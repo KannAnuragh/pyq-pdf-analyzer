@@ -250,8 +250,10 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                     code = ord(ch) if len(ch) == 1 else 0
                     bbox = c.get("bbox")
 
-                    # 1. First resolve character through font_map (essential for subset Indic fonts where code 32 or symbols are mapped glyphs!)
-                    if f_map and (str(code) in f_map or code in f_map):
+                    # Whitespace characters and synthetic spaces must NEVER be mapped through font maps
+                    if ch in (" ", "\n", "\t", "\xa0") or c.get("synthetic"):
+                        resolved = ch
+                    elif f_map and (str(code) in f_map or code in f_map):
                         resolved = f_map.get(str(code)) or f_map.get(code)
                     else:
                         resolved = ch
