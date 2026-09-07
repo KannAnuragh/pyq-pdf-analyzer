@@ -203,6 +203,9 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     # Remove spaces separating subjoined consonant signs (e.g. ya-sign, va-sign, ra-sign, la-sign)
     text = re.sub(r'(?<=[\u0D00-\u0D7F])[\s\xa0]+(്[\u200C\u200D]?[യവരല])', r'\1', text)
 
+    # 7.1 Resolve residual space-substitution artifacts (e.g. where space after a chillu was misdecoded as 'വ')
+    text = re.sub(r'([ൽൻർൺൾ])വ([അ-ഔക-ഹ])', r'\1 \2', text)
+
     # 8. Collapse multiple spaces into single spaces, but preserve newlines
     text = re.sub(r'[ \t\r\f\v]+', ' ', text).strip()
     text = re.sub(r'\n{3,}', '\n\n', text)

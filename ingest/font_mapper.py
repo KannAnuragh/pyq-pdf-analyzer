@@ -277,7 +277,7 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
         glyph_order = font.getGlyphOrder()
 
         for gid, gname in enumerate(glyph_order):
-            if gname in ('.notdef', '.null', 'space'):
+            if gname in ('.notdef', '.null', 'space') or gid == 32:
                 continue
             if gname not in glyf:
                 continue
