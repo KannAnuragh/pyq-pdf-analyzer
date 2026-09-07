@@ -173,6 +173,17 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     for char, repl in wedged_map.items():
         text = re.sub(rf'(?<=[\u0D00-\u0D7F]){re.escape(char)}', repl, text)
 
+    # 4.1. Special case: The comma character ',' sometimes gets incorrectly mapped 
+    # to the conjunct 'സ്റ്റ' (sta) from certain subset fonts.
+    # We can safely replace it when it's immediately followed by a dependent vowel sign or virama,
+    # because real punctuation commas cannot logically take dependent signs.
+    # e.g., 'ലി,്' -> 'ലിസ്റ്റ്' (list)
+    text = re.sub(r',([\u0D3E-\u0D4D\u0D57])', r'സ്റ്റ\1', text)
+    # Catch any common English loan words that might not have a vowel sign
+    text = re.sub(r'(?<=ക),മർ', 'സ്റ്റമർ', text) # കസ്റ്റമർ (customer)
+    text = re.sub(r'(?<=സി),ം', 'സ്റ്റം', text) # സിസ്റ്റം (system)
+    text = re.sub(r'(?<=മാ),ർ', 'സ്റ്റർ', text) # മാസ്റ്റർ (master)
+
     # 5. Convert visual-order native extractions to logical standard unicode
     text = convert_visual_to_logical(text)
 
