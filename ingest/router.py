@@ -308,6 +308,7 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                     "bbox": l_bbox,
                     "y_center": l_y_center,
                     "x0": l_bbox[0],
+                    "x1": l_bbox[2],
                     "y0": l_bbox[1],
                     "y1": l_bbox[3]
                 })
@@ -320,6 +321,7 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                 "bbox": [m["rect"].x0, m["rect"].y0, m["rect"].x1, m["rect"].y1],
                 "y_center": m["y_center"],
                 "x0": m["rect"].x0,
+                "x1": m["rect"].x1,
                 "y0": m["rect"].y0,
                 "y1": m["rect"].y1
             })
@@ -350,12 +352,31 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
     bands.sort(key=lambda b: b["avg_y"])
 
     # Within each band, sort lines left-to-right (x0)
+    # If the gap between text elements on the same band is large, insert a tab to preserve columns
     page_lines = []
     for band in bands:
         band["lines"].sort(key=lambda l: l["x0"])
-        band_str = " ".join(l["text"] for l in band["lines"]).strip()
-        if band_str:
-            page_lines.append(band_str)
+        
+        band_str = ""
+        prev_x1 = None
+        
+        for l in band["lines"]:
+            text = l["text"]
+            if not text:
+                continue
+                
+            if prev_x1 is not None:
+                gap = l["x0"] - prev_x1
+                if gap > 30:  # Significant gap suggests columns or table cells
+                    band_str += " \t "
+                else:
+                    band_str += " "
+            
+            band_str += text
+            prev_x1 = max(prev_x1 if prev_x1 is not None else 0, l["x1"])
+            
+        if band_str.strip():
+            page_lines.append(band_str.strip())
 
     return "\n".join(page_lines)
 
