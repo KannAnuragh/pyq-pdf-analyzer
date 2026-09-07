@@ -216,11 +216,16 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     text = re.sub(r'([ൽൻർൺൾ])വെപ', r'\1 പെ', text)
     text = re.sub(r'([ൽൻർൺൾ])വെവ', r'\1 വെ', text)
 
-    # 7.2 Repair detached plural suffixes (e.g. ചിഹ്ന ൾ -> ചിഹ്നങ്ങൾ, സ്വര ൾ -> സ്വരങ്ങൾ, ഗമക ളൊന്നുമില്ലാതെ -> ഗമകങ്ങളൊന്നുമില്ലാതെ)
-    # In Malayalam, chillu L 'ൾ' is never a standalone word. When separated by a space from a preceding Indic word,
-    # it is a broken plural suffix '-ങ്ങൾ' (where 'ങ്ങ' was lost or misdecoded as space).
+    # 7.2 Repair detached retroflex ള / plural suffixes (e.g. ചിഹ്ന ൾ -> ചിഹ്നങ്ങൾ, സ്വര ൾ -> സ്വരങ്ങൾ, അംഗ ളിൽ -> അംഗങ്ങളിൽ)
+    # In Dravidian / Malayalam phonology, no word can begin with ള or chillu ൾ.
+    # When separated by whitespace, these are broken plural suffixes where the root ending in vowel lost 'ങ്ങ' (due to font code 32).
     text = re.sub(r'([\u0D00-\u0D7F])[\s\xa0]+ൾ(?=[\s\.,;:!?\)\"\'\]]|$)', r'\1ങ്ങൾ', text)
-    text = re.sub(r'([\u0D00-\u0D7F])[\s\xa0]+ളൊ', r'\1ങ്ങളൊ', text)
+    text = re.sub(r'([\u0D00-\u0D7F])[\s\xa0]+(ള[\u0D3E-\u0D4E\u0D57\u0D00-\u0D7F]*)', r'\1ങ്ങ\2', text)
+
+    # 7.3 Repair verb stems with missing 'ക്കു' (caused by newline code 10 misinterpretation in subset fonts)
+    # e.g. സൂചിപ്പി ന്ന -> സൂചിപ്പിക്കുന്ന, രചി ന്ന -> രചിക്കുന്ന, പരിശോധി ക -> പരിശോധിക്കുക
+    text = re.sub(r'(സൂചിപ്പി|അവതരിപ്പി|പ്രതിപാദിപ്പി|ആലാപി|രചി|അറി|ഉപയോ\s*ഗി)[\s\xa0\n]+ന്ന', r'\1ക്കുന്ന', text)
+    text = re.sub(r'(പരിശോധി|തെരഞ്ഞെടു|തിരഞ്ഞെടു|രേഖപ്പെടു)[\s\xa0\n]+ക\b', r'\1ക്കുക', text)
 
     # 8. Collapse multiple spaces into single spaces, but preserve newlines
     text = re.sub(r'[ \t\r\f\v]+', ' ', text).strip()
