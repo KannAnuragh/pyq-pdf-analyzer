@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+langgraph
+langchain-core
+langchain-google-genai
+duckduckgo-search
+PyMuPDF
+python-multipart
+pytesseract
+pdf2image
+fonttools>=4.40.0
+Pillow>=10.0.0
+google-genai

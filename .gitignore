@@ -1,0 +1,70 @@
+# ==============================================================================
+# Environments and API Keys (Critical Secrets)
+# ==============================================================================
+.env
+.env.local
+.env.*.local
+*.env
+*.pem
+*.key
+
+# ==============================================================================
+# Python & Bytecode Caches
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+ENV/
+env/
+
+# ==============================================================================
+# Databases, Uploads & Runtime State
+# ==============================================================================
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/uploads/*
+!data/uploads/.gitkeep
+!data/.gitkeep
+
+# ==============================================================================
+# Frontend Dependencies & Build Output
+# ==============================================================================
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.vercel/
+frontend/*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ==============================================================================
+# Temporary Images & Local Render Artifacts
+# ==============================================================================
+glyph_grid_test.png
+page1_render.png
+scratch.py
+*.log
+
+# ==============================================================================
+# OS & IDE Metadata
+# ==============================================================================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

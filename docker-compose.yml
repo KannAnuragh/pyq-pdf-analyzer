@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/pdf_qa_agent/data
+      - .:/app/pdf_qa_agent
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/app/pdf_qa_agent/data
+      - SQLALCHEMY_DATABASE_URL=sqlite:////app/pdf_qa_agent/data/pdf_qa.db
+      - ENABLE_GEMINI=${ENABLE_GEMINI:-false}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GEMINI_EXTRACT_MODEL=${GEMINI_EXTRACT_MODEL:-gemini-3.1-flash-lite}
+      - GEMINI_SOLVE_MODEL=${GEMINI_SOLVE_MODEL:-gemini-3.1-pro-preview}
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: frontend.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
