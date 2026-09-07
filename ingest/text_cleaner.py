@@ -173,19 +173,21 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     for char, repl in wedged_map.items():
         text = re.sub(rf'(?<=[\u0D00-\u0D7F]){re.escape(char)}', repl, text)
 
-    # 4.1. Special case: The comma character ',' sometimes gets incorrectly mapped 
-    # to the conjunct 'സ്റ്റ' (sta) from certain subset fonts.
-    # We can safely replace it when it's immediately followed by a dependent vowel sign or virama,
-    # because real punctuation commas cannot logically take dependent signs.
-    # e.g., 'ലി,്' -> 'ലിസ്റ്റ്' (list)
-    text = re.sub(r',([\u0D3E-\u0D4D\u0D57])', r'സ്റ്റ\1', text)
-    # Catch any common English loan words that might not have a vowel sign
-    text = re.sub(r'(?<=ക),മർ', 'സ്റ്റമർ', text) # കസ്റ്റമർ (customer)
-    text = re.sub(r'(?<=സി),ം', 'സ്റ്റം', text) # സിസ്റ്റം (system)
-    text = re.sub(r'(?<=മാ),ർ', 'സ്റ്റർ', text) # മാസ്റ്റർ (master)
-
     # 5. Convert visual-order native extractions to logical standard unicode
     text = convert_visual_to_logical(text)
+
+    # 5.1 Universal fallback for common missing letters (like missing 'ya' sign or pre-base matra)
+    text = re.sub(r'\bറഷ[\s\u25CC]*ൻ\b', 'റഷ്യൻ', text)
+    text = re.sub(r'\bചനീസ്\b', 'ചൈനീസ്', text)
+    text = re.sub(r'\bഫ്രഞ[\s\u25CC]*്\b', 'ഫ്രഞ്ച്', text)
+
+    # 5.2 Universal comma remapping to 'സ്റ്റ'
+    # Tolerates optional dotted circles (U+25CC) and spaces that are often wedged in by PDF parsers
+    text = re.sub(r',[\s\u25CC]*([\u0D3E-\u0D4E\u0D57])', r'സ്റ്റ\1', text)
+    # Catch any common English loan words that might not have a vowel sign
+    text = re.sub(r'(?<=ക)[\s\u25CC]*,[\s\u25CC]*മർ', 'സ്റ്റമർ', text) # കസ്റ്റമർ (customer)
+    text = re.sub(r'(?<=സി)[\s\u25CC]*,[\s\u25CC]*ം', 'സ്റ്റം', text) # സിസ്റ്റം (system)
+    text = re.sub(r'(?<=മാ)[\s\u25CC]*,[\s\u25CC]*ർ', 'സ്റ്റർ', text) # മാസ്റ്റർ (master)
 
     # 6. Collapse duplicate subjoined signs (e.g. ഇന്ത്യ്യ -> ഇന്ത്യ)
     text = re.sub(r'(\u0D4D\u0D2F){2,}', r'\1', text)
