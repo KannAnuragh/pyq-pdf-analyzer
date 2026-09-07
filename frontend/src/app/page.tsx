@@ -607,17 +607,11 @@ export default function Home() {
                   whiteSpace: 'pre-wrap',
                   lineHeight: '1.8',
                   fontSize: '0.96rem',
-                  border: '1px solid var(--panel-border)'
+                  border: '1px solid var(--panel-border)',
+                  tabSize: 4
                 }}
                 dangerouslySetInnerHTML={{
-                  __html: renderLatex(
-                    selectedQuestion.stem
-                      .replace(/(\s*)([(](?:[ivx]+|[a-e]|\d+)[)])/gi, '\n$2')
-                      .replace(/(\s*)([a-h]\.\s+)/gi, '\n$2')
-                      .replace(/(\s*)(Statement\s+[I|V|X\d]+[\s:]+)/gi, '\n$2')
-                      .replace(/(\s*)(List\s+[I|V|X\d]+[\s:]+)/gi, '\n$2')
-                      .trim()
-                  )
+                  __html: renderLatex(selectedQuestion.stem.trim())
                 }}
               />
             </div>

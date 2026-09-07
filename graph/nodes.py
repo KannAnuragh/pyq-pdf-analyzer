@@ -87,13 +87,16 @@ def _clean_json_output(content) -> str:
 MULTIMODAL_EXTRACT_PROMPT = """
 Extract all questions from this uploaded PDF document into a structured JSON array.
 
-CRITICAL MATHEMATICAL & SYMBOL INSTRUCTIONS:
+CRITICAL INSTRUCTIONS:
 1. Preserve all mathematical symbols, formulas, and Greek letters as standard inline LaTeX ($...$).
    - For example: chi-squared must be written as $\\chi^2$, t-test as 't' test or $t$-test, z-test as $z$-test, alpha as $\\alpha$, beta as $\\beta$, sigma as $\\sigma$, etc.
    - Any inline symbols, equations, superscripts, and subscripts must be output as valid LaTeX math ($...$).
-2. If a question contains sub-items, statements, or lists (e.g. a., b., c... or (i), (ii), (iii)... or Statement I / Statement II, or List I / List II), format each item on its own separate line in 'stem'.
-3. Extract all options into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}.
-4. Extract the given 'Correct Answer' into 'marked_answer' (e.g. "A", "B", "C", "D") if present in the document.
+2. Extract all options cleanly into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}.
+   - NEVER leave options (A:-, B:-, C:-, D:-) inside the question 'stem'.
+3. Extract the given 'Correct Answer' into 'marked_answer' (e.g. "A", "B", "C", "D") if present in the document.
+4. If a question contains sub-items or statements, format each on its own line in 'stem'.
+   - For matching questions (List I / List II), keep each paired row on the same line separated by a tab (\t).
+   - Within options, keep code sequences like '(a) (b) (c) (d) (e)' together on a single line; never split them into single-letter lines.
 
 Output ONLY a valid JSON array matching this schema:
 [
@@ -144,53 +147,67 @@ def extract_node(state: GraphState) -> GraphState:
         q_num = int(q_match.group(1))
         content = q_match.group(2)
         
-        # Extract options securely by finding the LAST sequence of option markers
-        # to prevent cutting off internal lists like a. b. c. d. in the stem
-        options_pattern = re.compile(r'(?:^|\s)(?:\()?([A-D])(?:\)|\.|:-)\s*', re.IGNORECASE | re.MULTILINE)
-        matches = list(options_pattern.finditer(content))
+        # Extract options securely by finding the true sequential options block (A, B, C, D)
+        # Strictly require uppercase [A-D] preceded by newline/whitespace/tab to avoid false positives
+        # from internal sub-items like (a), (b), (c), (d), (e) or statements in matching questions!
+        opt_pattern = re.compile(r'(?:^|\n|\s{2,}|\t)(?:\()?([A-D])(?:\)|\.|:-)\s*')
+        matches = list(opt_pattern.finditer(content))
         
+        best_sequence = []
+        for i, m in enumerate(matches):
+            if m.group(1) == "A":
+                curr_seq = [m]
+                expected_next = "B"
+                for next_m in matches[i+1:]:
+                    if next_m.group(1) == expected_next:
+                        curr_seq.append(next_m)
+                        if expected_next == "B":
+                            expected_next = "C"
+                        elif expected_next == "C":
+                            expected_next = "D"
+                        elif expected_next == "D":
+                            break
+                if len(curr_seq) > len(best_sequence) or (len(curr_seq) >= 2 and len(curr_seq) >= len(best_sequence)):
+                    best_sequence = curr_seq
+
         stem = content.strip()
         options = {}
         marked_answer = None
-        
-        if matches:
-            last_positions = {}
-            for m in matches:
-                last_positions[m.group(1).upper()] = m
+
+        if len(best_sequence) >= 2:
+            stem = content[:best_sequence[0].start()].strip()
+            for idx, m in enumerate(best_sequence):
+                letter = m.group(1)
+                start_pos = m.end()
+                end_pos = best_sequence[idx+1].start() if idx + 1 < len(best_sequence) else len(content)
+                opt_text = content[start_pos:end_pos].strip()
                 
-            # If we at least have an A and a B, we assume it's the real options block
-            if 'A' in last_positions and 'B' in last_positions:
-                true_option_matches = sorted(last_positions.values(), key=lambda m: m.start())
-                
-                first_opt_match = true_option_matches[0]
-                stem = content[:first_opt_match.start()].strip()
-                
-                for i, match in enumerate(true_option_matches):
-                    opt_letter = match.group(1).upper()
-                    start_idx = match.end()
-                    end_idx = true_option_matches[i+1].start() if i + 1 < len(true_option_matches) else len(content)
-                    
-                    opt_text = content[start_idx:end_idx].strip()
-                    
-                    # Check for marked answer trailing the option
-                    ans_match = re.search(r'(?:Ans(?:wer)?|Correct(?:\s*Answer)?)\s*[:\-]*\s*(?:is\s*)?(?:Option\s*[:\-]*\s*)?([A-D])\b', opt_text, re.IGNORECASE)
-                    if ans_match:
-                        marked_answer = ans_match.group(1).upper()
-                        opt_text = opt_text[:ans_match.start()].strip()
-                        
-                    options[opt_letter] = opt_text
-            else:
-                # Fallback to older split logic if it's missing B (rare but possible)
-                parts = options_pattern.split(content)
-                stem = parts[0].strip()
-                for i in range(1, len(parts) - 1, 2):
-                    opt_letter = parts[i].upper()
-                    opt_text = parts[i+1].strip()
-                    ans_match = re.search(r'(?:Ans(?:wer)?|Correct(?:\s*Answer)?)\s*[:\-]*\s*(?:is\s*)?(?:Option\s*[:\-]*\s*)?([A-D])\b', opt_text, re.IGNORECASE)
-                    if ans_match:
-                        marked_answer = ans_match.group(1).upper()
-                        opt_text = opt_text[:ans_match.start()].strip()
-                    options[opt_letter] = opt_text
+                ans_match = re.search(r'(?:Ans(?:wer)?|Correct(?:\s*Answer)?)\s*[:\-]*\s*(?:is\s*)?(?:Option\s*[:\-]*\s*)?([A-D])\b', opt_text, re.IGNORECASE)
+                if ans_match:
+                    marked_answer = ans_match.group(1).upper()
+                    opt_text = opt_text[:ans_match.start()].strip()
+                options[letter] = opt_text
+        else:
+            # Fallback for questions where options might not strictly start with newline
+            fallback_pattern = re.compile(r'(?:^|\s)(?:\()?([A-D])(?:\)|\.|:-)\s*')
+            fb_matches = list(fallback_pattern.finditer(content))
+            if fb_matches:
+                last_positions = {}
+                for m in fb_matches:
+                    last_positions[m.group(1)] = m
+                if 'A' in last_positions and 'B' in last_positions:
+                    true_option_matches = sorted(last_positions.values(), key=lambda m: m.start())
+                    stem = content[:true_option_matches[0].start()].strip()
+                    for i, match in enumerate(true_option_matches):
+                        opt_letter = match.group(1)
+                        start_idx = match.end()
+                        end_idx = true_option_matches[i+1].start() if i + 1 < len(true_option_matches) else len(content)
+                        opt_text = content[start_idx:end_idx].strip()
+                        ans_match = re.search(r'(?:Ans(?:wer)?|Correct(?:\s*Answer)?)\s*[:\-]*\s*(?:is\s*)?(?:Option\s*[:\-]*\s*)?([A-D])\b', opt_text, re.IGNORECASE)
+                        if ans_match:
+                            marked_answer = ans_match.group(1).upper()
+                            opt_text = opt_text[:ans_match.start()].strip()
+                        options[opt_letter] = opt_text
         
         # Check if marked answer was in the stem
         if not marked_answer:
@@ -296,8 +313,9 @@ Extract ONLY Question {question_number} from this page exactly as it appears.
 CRITICAL INSTRUCTIONS:
 1. Preserve all mathematical symbols, formulas, and Greek letters as standard inline LaTeX ($...$).
 2. Extract all options into 'options': {{"A": "...", "B": "...", "C": "...", "D": "..."}}.
+   - NEVER include options (e.g. A:-, B:-, C:-, D:-) or option contents inside the question 'stem'.
 3. Extract the given 'Correct Answer' into 'marked_answer' if present.
-4. If there are lists or statements within the question, format each on a new line in the stem.
+4. For matching questions (List-I / List-II), preserve the two-column table using tabs or clear alignment. Keep matching option codes (e.g. '(a) (b) (c) (d) (e)') together on one line within each option, DO NOT break them into individual single-letter lines.
 
 Output ONLY a valid JSON object exactly matching this schema, with no markdown code blocks or extra text:
 {{
