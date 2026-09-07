@@ -253,10 +253,6 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                     # 1. First resolve character through font_map (essential for subset Indic fonts where code 32 or symbols are mapped glyphs!)
                     if f_map and (str(code) in f_map or code in f_map):
                         resolved = f_map.get(str(code)) or f_map.get(code)
-                    elif is_synth or ch in (" ", "\n", "\xa0"):
-                        resolved = ch
-                    elif 0x0D00 <= code <= 0x0D7F:
-                        resolved = ch
                     else:
                         resolved = ch
 
