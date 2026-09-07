@@ -30,6 +30,9 @@ def convert_visual_to_logical(text: str) -> str:
     if not text:
         return text
 
+    # Strip dotted circle rendering artifacts early
+    text = text.replace('\u25CC', '')
+
     # 0. Consolidate double e-karam to ai (െെ -> ൈ)
     text = re.sub(r'െെ', 'ൈ', text)
 
@@ -38,7 +41,7 @@ def convert_visual_to_logical(text: str) -> str:
     SUB_CLUSTER = rf'(?:്[\u200C\u200D]?[യവരല]|{CLUSTER})'
     VOWELS = r'[\u0D3E-\u0D4C\u0D57]'
     CHILLUS = r'[\u0D7A-\u0D7F]'
-    NON_C = rf'(?:^|[\s\(\[\{{<>\-_.,;:!?"\'/\\=+]|[അ-ഔ]|{VOWELS}|്|{CHILLUS})'
+    NON_C = rf'(?:^|[^\u0D15-\u0D3A])'
     END_B = r'(?=$|[\s\(\[\{<>\-_.,;:!?"\'/\\=+])'
 
     # 1. Two-part split vowels with pre-base placement:
@@ -117,10 +120,10 @@ def convert_visual_to_logical(text: str) -> str:
     text = re.sub(r'സംഖ[\s\u25CC]*[്്യ]?[\s\u25CC]*(?=[കയ])', 'സംഖ്യ', text)
 
     # 4. Pre-base matras (single െ, േ, ൈ) preceded by non-consonant boundary or at word start:
-    text = re.sub(rf'({NON_C})([െേൈ])({CLUSTER})', r'\1\3\2', text)
+    text = re.sub(rf'({NON_C})[\s\u25CC]*([െേൈ])[\s\u25CC]*({CLUSTER})', r'\1\3\2', text)
 
     # 5. Second pass for newly exposed pre-base matras:
-    text = re.sub(rf'({NON_C})([െേൈ])({CLUSTER})', r'\1\3\2', text)
+    text = re.sub(rf'({NON_C})[\s\u25CC]*([െേൈ])[\s\u25CC]*({CLUSTER})', r'\1\3\2', text)
 
     # 6. Safety cleanup for impossible vowel collisions caused by visual typesetting
     text = re.sub(r'പ്പടെു', 'പ്പെടു', text)
@@ -148,8 +151,9 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     text = re.sub(f'({INDIC_RANGE})[-\u2013\u2014\xad]\\s*({INDIC_RANGE})', r'\1\2', text)
     text = re.sub(f'({INDIC_RANGE})[-\u2013\u2014]({INDIC_RANGE})', r'\1\2', text)
 
-    # 3. Strip invisible formatting artifacts and control characters
+    # 3. Strip invisible formatting artifacts, control characters, and dotted circle placeholders
     text = re.sub(r'[\u200B\uFEFF\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    text = text.replace('\u25CC', '')
 
     # 4. Resolve known residual subset font ligature artifacts wedged in Malayalam words
     # (Must run BEFORE convert_visual_to_logical so split vowels like േ + ദ + * + ാ -> ദ്യോ work properly!)
