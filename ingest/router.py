@@ -250,8 +250,13 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                     code = ord(ch) if len(ch) == 1 else 0
                     bbox = c.get("bbox")
 
-                    # Whitespace characters and synthetic spaces must NEVER be mapped through font maps
-                    if ch in (" ", "\n", "\t", "\xa0") or c.get("synthetic"):
+                    # Check if this character is a wide non-blank glyph misreported as a space
+                    w = (bbox[2] - bbox[0]) if bbox else 0
+                    is_wide_glyph = (code == 32 and not c.get("synthetic") and font_size > 0 and (w / font_size) > 0.65)
+
+                    # Whitespace characters and synthetic spaces must not be mapped through font maps,
+                    # unless it is a wide non-blank glyph masquerading as code 32 with an actual font mapping!
+                    if (ch in (" ", "\n", "\t", "\xa0") or c.get("synthetic")) and not is_wide_glyph:
                         resolved = ch
                     elif f_map and (str(code) in f_map or code in f_map):
                         resolved = f_map.get(str(code)) or f_map.get(code)

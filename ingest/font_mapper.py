@@ -277,12 +277,14 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
         glyph_order = font.getGlyphOrder()
 
         for gid, gname in enumerate(glyph_order):
-            if gname in ('.notdef', '.null', 'space') or gid == 32:
+            if gname in ('.notdef', '.null', 'space', 'nonmarkingreturn') or gid in (0, 1, 2):
                 continue
             if gname not in glyf:
                 continue
 
             glyph = glyf[gname]
+            if getattr(glyph, 'numberOfContours', 0) == 0:
+                continue
             # 1. Exact coordinate hash match
             h = hash_glyph_coordinates(glyph, glyf)
             if h and h in master_hashes:

@@ -45,10 +45,10 @@ def convert_visual_to_logical(text: str) -> str:
     END_B = r'(?=$|[\s\(\[\{<>\-_.,;:!?"\'/\\=+])'
 
     # 1. Two-part split vowels with pre-base placement:
-    text = re.sub(rf'െ({SUB_CLUSTER})ാ', r'\1ൊ', text)
-    text = re.sub(rf'േ({SUB_CLUSTER})ാ', r'\1ോ', text)
-    text = re.sub(rf'െ({SUB_CLUSTER})[ൗൌ]', r'\1ൌ', text)
-    text = re.sub(rf'േ({SUB_CLUSTER})[ൗൌ]', r'\1ൌ', text)
+    text = re.sub(rf'({NON_C})െ({SUB_CLUSTER})ാ', r'\1\2ൊ', text)
+    text = re.sub(rf'({NON_C})േ({SUB_CLUSTER})ാ', r'\1\2ോ', text)
+    text = re.sub(rf'({NON_C})െ({SUB_CLUSTER})[ൗൌ]', r'\1\2ൌ', text)
+    text = re.sub(rf'({NON_C})േ({SUB_CLUSTER})[ൗൌ]', r'\1\2ൌ', text)
 
     # 2. Partially swapped split vowels (e/ee after cluster followed by aa):
     text = re.sub(rf'({SUB_CLUSTER})ൊ', r'\1ൊ', text)
@@ -60,33 +60,33 @@ def convert_visual_to_logical(text: str) -> str:
     #  never have their e-karam confused with an infix matra!)
 
     # a. Genitive suffix -nte: െ + ന്റ -> ന്റ + െ (ന്റെ)
-    text = re.sub(r'െ(ന്റ)', r'\1െ', text)
+    text = re.sub(rf'({NON_C})െ(ന്റ)', r'\1\2െ', text)
 
     # b. Passive/auxiliary verb stem -ppe: െ + പ്പ -> പ്പ + െ (പ്പെ)
-    text = re.sub(r'െ(പ്പ)', r'\1െ', text)
+    text = re.sub(rf'({NON_C})െ(പ്പ)', r'\1\2െ', text)
 
     # c. Turning/carving/picking verb stem: തിര + െ + ഞ്ഞ -> തിര + ഞ്ഞ + െ (തിരഞ്ഞെടുക്കാൻ)
-    text = re.sub(r'െ(ഞ്ഞ)', r'\1െ', text)
+    text = re.sub(rf'({NON_C})െ(ഞ്ഞ)', r'\1\2െ', text)
 
     # d. Accusative/locative suffix -the: െ + ത്ത -> ത്ത + െ (ത്തെ)
-    text = re.sub(r'െ(ത്ത)', r'\1െ', text)
+    text = re.sub(rf'({NON_C})െ(ത്ത)', r'\1\2െ', text)
 
     # e. Intensive/reflexive suffix -nne: െ + ന്ന -> ന്ന + െ (ന്നെ / തന്നെ)
-    text = re.sub(r'െ(ന്ന)', r'\1െ', text)
+    text = re.sub(rf'({NON_C})െ(ന്ന)', r'\1\2െ', text)
 
     # f. Genitive suffix -de: െ + ട -> ട + െ (ടെ)
     # (Must NOT match when da already has another vowel sign like du in thiranjedukkuka or ariyappedunnu!)
     text = re.sub(rf'({NON_C})െ(ട)(?!{VOWELS})', r'\1\2െ', text)
 
     # g. Accusative suffix -ye / -yellaam: െ + യ -> യ + െ (യെ / യെല്ലാം)
-    text = re.sub(rf'െ(യ)(?:ല്ലാം|െല്ലാം){END_B}', r'\1െല്ലാം', text)
-    text = re.sub(rf'െ(യ(?:ൽ|ിൽ|േ)?){END_B}', r'\1െ', text)
+    text = re.sub(rf'({NON_C})െ(യ)(?:ല്ലാം|െല്ലാം){END_B}', r'\1\2െല്ലാം', text)
+    text = re.sub(rf'({NON_C})െ(യ(?:ൽ|ിൽ|േ)?){END_B}', r'\1\2െ', text)
 
     # h. Accusative plural suffix -le: െ + ള -> ള + െ (ളെ)
-    text = re.sub(rf'െ(ള){END_B}', r'\1െ', text)
+    text = re.sub(rf'({NON_C})െ(ള){END_B}', r'\1\2െ', text)
 
     # i. Pre-base ai-karam before consonant clusters:
-    text = re.sub(rf'ൈ({CLUSTER})', r'\1ൈ', text)
+    text = re.sub(rf'({NON_C})ൈ({CLUSTER})', r'\1\2ൈ', text)
 
     # j. Standalone visual typesetting words and known visual ligatures:
     text = re.sub(r'\bവളെര\b', 'വളരെ', text)
@@ -203,8 +203,24 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     # Remove spaces separating subjoined consonant signs (e.g. ya-sign, va-sign, ra-sign, la-sign)
     text = re.sub(r'(?<=[\u0D00-\u0D7F])[\s\xa0]+(്[\u200C\u200D]?[യവരല])', r'\1', text)
 
-    # 7.1 Resolve residual space-substitution artifacts (e.g. where space after a chillu was misdecoded as 'വ')
+    # 7.1 Universal repair of misdecoded space characters (e.g. TrueType subset fonts where space code 32 resolved to GID 32 glyph 'വ')
+    # a. Malayalam character + 'വ' + Latin / Digits / Roman numerals (e.g. ഓപ്ഷൻവA -> ഓപ്ഷൻ A, അലക്സാണ്ടർവII -> അലക്സാണ്ടർ II, ഇംഗ്ലണ്ടിൽവ1688 -> ഇംഗ്ലണ്ടിൽ 1688)
+    text = re.sub(r'([\u0D00-\u0D7F])വ([A-Za-z0-9])', r'\1 \2', text)
+    text = re.sub(r'([A-Za-z0-9])വ([\u0D00-\u0D7F])', r'\1 \2', text)
+
+    # b. Chillu + 'വ' followed by an Indic letter (e.g. ഈജിപ്ഷ്യൻവസംസ്ക്കാര -> ഈജിപ്ഷ്യൻ സംസ്ക്കാര, നേട്ടങ്ങളിൽവഉൾപ്പെടുന്നവ -> നേട്ടങ്ങളിൽ ഉൾപ്പെടുന്നവ)
     text = re.sub(r'([ൽൻർൺൾ])വ([അ-ഔക-ഹ])', r'\1 \2', text)
+
+    # c. Chillu + 'വെ' + consonant (where pre-base 'െ' was merged onto misdecoded 'വ')
+    # e.g. കണ്ടുപിടുത്തങ്ങളിൽവെപടാത്തത് -> കണ്ടുപിടുത്തങ്ങളിൽ പെടാത്തത്, ഫെഡറലിസത്തിൻവെവല്ലുവിളിയായിരിക്കുന്നത് -> ഫെഡറലിസത്തിൻ വെല്ലുവിളിയായിരിക്കുന്നത്
+    text = re.sub(r'([ൽൻർൺൾ])വെപ', r'\1 പെ', text)
+    text = re.sub(r'([ൽൻർൺൾ])വെവ', r'\1 വെ', text)
+
+    # 7.2 Repair detached plural suffixes (e.g. ചിഹ്ന ൾ -> ചിഹ്നങ്ങൾ, സ്വര ൾ -> സ്വരങ്ങൾ, ഗമക ളൊന്നുമില്ലാതെ -> ഗമകങ്ങളൊന്നുമില്ലാതെ)
+    # In Malayalam, chillu L 'ൾ' is never a standalone word. When separated by a space from a preceding Indic word,
+    # it is a broken plural suffix '-ങ്ങൾ' (where 'ങ്ങ' was lost or misdecoded as space).
+    text = re.sub(r'([\u0D00-\u0D7F])[\s\xa0]+ൾ(?=[\s\.,;:!?\)\"\'\]]|$)', r'\1ങ്ങൾ', text)
+    text = re.sub(r'([\u0D00-\u0D7F])[\s\xa0]+ളൊ', r'\1ങ്ങളൊ', text)
 
     # 8. Collapse multiple spaces into single spaces, but preserve newlines
     text = re.sub(r'[ \t\r\f\v]+', ' ', text).strip()
