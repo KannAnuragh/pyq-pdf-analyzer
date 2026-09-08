@@ -223,14 +223,14 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
     - Preserves all already-valid Malayalam Unicode characters.
     - Preserves natural spacing and Latin text (headers, English terms).
     - Substitutes unmapped ligatures/symbols from the resolved Indic font map.
-    - Spatially injects inline math/equation images based on bounding box alignment.
-    - Sorts visual line segments top-to-bottom and left-to-right, ensuring that questions
-      with separate content streams (English labels in one font stream, Malayalam text in another)
-      are correctly assembled on the same line.
+    - Spatially interleaves inline math/equation images based on bounding box alignment.
+    - Groups text into horizontal visual bands and sorts elements left-to-right (x0),
+      placing equations exactly inside sentences and options.
+    - Displays diagrams and figures as centered block elements.
     """
     rawdict = page.get_text("rawdict")
     eq_items = list(equation_items) if equation_items else []
-    extracted_lines = []
+    text_lines = []
 
     for b in rawdict.get("blocks", []):
         if "lines" not in b:
@@ -295,75 +295,94 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
             l_bbox = l.get("bbox", [0, 0, 0, 0])
             l_y_center = (l_bbox[1] + l_bbox[3]) / 2
 
-            # Spatial placement for equations aligning with this line
-            if eq_items:
-                matching = [
-                    item for item in eq_items
-                    if abs(l_bbox[3] - item["rect"].y1) <= 12 or abs(item["y_center"] - l_y_center) <= 20
-                ]
-                if matching:
-                    matching.sort(key=lambda item: item["x_center"])
-                    for m in matching:
-                        if m["rect"].x0 >= l_bbox[0] - 10:
-                            line_str = f"{line_str} {m['math']}".strip()
-                        else:
-                            line_str = f"{m['math']} {line_str}".strip()
-                        if m in eq_items:
-                            eq_items.remove(m)
-
             if line_str:
-                extracted_lines.append({
+                text_lines.append({
                     "text": line_str,
                     "bbox": l_bbox,
                     "y_center": l_y_center,
                     "x0": l_bbox[0],
                     "x1": l_bbox[2],
                     "y0": l_bbox[1],
-                    "y1": l_bbox[3]
+                    "y1": l_bbox[3],
+                    "is_block": False
                 })
 
-    # Append any remaining unplaced equations
-    if eq_items:
-        for m in eq_items:
-            extracted_lines.append({
-                "text": m["math"],
-                "bbox": [m["rect"].x0, m["rect"].y0, m["rect"].x1, m["rect"].y1],
-                "y_center": m["y_center"],
-                "x0": m["rect"].x0,
-                "x1": m["rect"].x1,
-                "y0": m["rect"].y0,
-                "y1": m["rect"].y1
-            })
-
-    if not extracted_lines:
+    if not text_lines and not eq_items:
         return ""
 
-    # Sort lines vertically primarily
-    extracted_lines.sort(key=lambda item: item["y_center"])
+    # Sort text lines vertically
+    text_lines.sort(key=lambda item: item["y_center"])
 
     # Group lines that lie within the same visual horizontal band (threshold ~5.5pt)
     bands = []
-    for line in extracted_lines:
+    for line in text_lines:
         placed = False
         for band in bands:
             if abs(line["y_center"] - band["avg_y"]) <= 5.5:
                 band["lines"].append(line)
                 band["avg_y"] = sum(l["y_center"] for l in band["lines"]) / len(band["lines"])
+                band["y0"] = min(band["y0"], line["y0"])
+                band["y1"] = max(band["y1"], line["y1"])
                 placed = True
                 break
         if not placed:
             bands.append({
                 "avg_y": line["y_center"],
-                "lines": [line]
+                "y0": line["y0"],
+                "y1": line["y1"],
+                "lines": [line],
+                "is_block": False
+            })
+
+    # Integrate equation and diagram items into visual bands
+    for item in eq_items:
+        if item.get("is_block"):
+            bands.append({
+                "avg_y": item["y_center"],
+                "y0": item["y0"],
+                "y1": item["y1"],
+                "lines": [item],
+                "is_block": True
+            })
+            continue
+
+        best_band = None
+        best_score = -1e9
+        for band in bands:
+            if band.get("is_block"):
+                continue
+            overlap = max(0, min(item["y1"], band["y1"]) - max(item["y0"], band["y0"]))
+            bottom_dist = abs(item["y1"] - band["y1"])
+            center_dist = abs(item["y_center"] - band["avg_y"])
+            if overlap > 4 or bottom_dist <= 8 or center_dist <= 8:
+                score = overlap * 2.0 - bottom_dist - center_dist * 0.5
+                if score > best_score:
+                    best_score = score
+                    best_band = band
+
+        if best_band is not None and best_score > -15:
+            best_band["lines"].append(item)
+            best_band["y0"] = min(best_band["y0"], item["y0"])
+            best_band["y1"] = max(best_band["y1"], item["y1"])
+        else:
+            bands.append({
+                "avg_y": item["y_center"],
+                "y0": item["y0"],
+                "y1": item["y1"],
+                "lines": [item],
+                "is_block": False
             })
 
     # Sort bands top-to-bottom
     bands.sort(key=lambda b: b["avg_y"])
 
     # Within each band, sort lines left-to-right (x0)
-    # If the gap between text elements on the same band is large, insert a tab to preserve columns
     page_lines = []
     for band in bands:
+        if band.get("is_block"):
+            page_lines.append(band["lines"][0]["text"])
+            continue
+
         band["lines"].sort(key=lambda l: l["x0"])
         
         band_str = ""
@@ -378,8 +397,9 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                 gap = l["x0"] - prev_x1
                 if gap > 30:  # Significant gap suggests columns or table cells
                     band_str += " \t "
-                else:
-                    band_str += " "
+                elif gap > 2:
+                    if not band_str.endswith(" ") and not text.startswith(" "):
+                        band_str += " "
             
             band_str += text
             prev_x1 = max(prev_x1 if prev_x1 is not None else 0, l["x1"])
@@ -395,10 +415,10 @@ def extract_text_from_pdf(file_path: str) -> tuple[str, int, int]:
     Universal PDF text extraction pipeline.
     
     Per page:
-    1. Detect inline math/equation images and extract via OCR
+    1. Detect inline math/equation images and diagrams, preserving them as crisp base64 images
     2. Detect subset fonts → build/retrieve font maps
-    3. Rebuild text using font maps with inline math injection
-    4. Clean and normalize text
+    3. Rebuild text using font maps with exact 2D spatial reading order interleaving
+    4. Clean and normalize Indic text (with HTML image tag protection)
     5. Sanity check → if still garbled, trigger full-page Vision OCR fallback
     """
     doc = pymupdf.open(file_path)
@@ -410,7 +430,7 @@ def extract_text_from_pdf(file_path: str) -> tuple[str, int, int]:
         images = page.get_images()
 
         # ---------------------------------------------------------------
-        # Step 1: Pre-extract and OCR equation / symbol clips on the page
+        # Step 1: Pre-extract equation clips and diagrams on the page
         # ---------------------------------------------------------------
         equation_items = []
         seen_rect_keys = set()
@@ -427,25 +447,45 @@ def extract_text_from_pdf(file_path: str) -> tuple[str, int, int]:
                     seen_rect_keys.add(r_key)
 
                     # Skip full-page background images
-                    if r.width > page.rect.width * 0.8 and r.height > page.rect.height * 0.5:
+                    if r.width > page.rect.width * 0.85 and r.height > page.rect.height * 0.5:
                         continue
                     # Skip tiny speckles
-                    if r.width < 4 or r.height < 4:
+                    if r.width < 3 or r.height < 3:
                         continue
-                    strip_pix = page.get_pixmap(clip=r, dpi=300)
-                    latex, p_tok, c_tok = ocr_equation_clip(strip_pix.tobytes("png"))
-                    total_p_tokens += p_tok
-                    total_c_tokens += c_tok
-                    if latex:
-                        clean_math = latex.strip()
-                        if not clean_math.startswith("$"):
-                            clean_math = f"${clean_math}$"
-                        equation_items.append({
-                            "rect": r,
-                            "math": clean_math,
-                            "y_center": (r.y0 + r.y1) / 2,
-                            "x_center": (r.x0 + r.x1) / 2
-                        })
+
+                    # Render sharp high-DPI image clip (200 DPI gives excellent clarity while staying lightweight)
+                    strip_pix = page.get_pixmap(clip=r, dpi=200)
+                    b64 = base64.b64encode(strip_pix.tobytes("png")).decode("utf-8")
+                    h = r.height
+                    w = r.width
+
+                    # Distinguish block diagrams/figures from mathematical expressions
+                    is_block = (h > 75 or (h > 55 and w > 280))
+                    if is_block:
+                        html = f'<div class="my-3 flex justify-center"><img src="data:image/png;base64,{b64}" alt="diagram" class="max-h-64 rounded shadow-sm border border-slate-200" /></div>'
+                    else:
+                        if h > 32:
+                            va = "-0.65em"
+                            mh = "3.6em"
+                        elif h > 18:
+                            va = "-0.38em"
+                            mh = "2.2em"
+                        else:
+                            va = "-0.2em"
+                            mh = "1.55em"
+                        html = f'<img src="data:image/png;base64,{b64}" alt="math" class="inline-math-img" style="vertical-align:{va};max-height:{mh};display:inline-block;margin:0 1px;" />'
+
+                    equation_items.append({
+                        "text": html,
+                        "rect": r,
+                        "bbox": [r.x0, r.y0, r.x1, r.y1],
+                        "x0": r.x0,
+                        "x1": r.x1,
+                        "y0": r.y0,
+                        "y1": r.y1,
+                        "y_center": (r.y0 + r.y1) / 2,
+                        "is_block": is_block
+                    })
 
         # ---------------------------------------------------------------
         # Step 2: Universal font map detection and text rebuild

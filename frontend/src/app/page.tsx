@@ -10,9 +10,17 @@ const API_BASE = 'http://localhost:8000';
 function renderLatex(text: string): string {
   if (!text) return '';
 
-  // 0. Protect fill-in-the-blanks (3 or more underscores) so they don't break LaTeX parsing
+  // 0. Protect HTML tags (inline equation images & diagrams) from KaTeX / regex interference
+  const htmlTags: string[] = [];
+  let s = text.replace(/<div[^>]*>[\s\S]*?<\/div>|<img[^>]*\/?>/gi, (match) => {
+    const id = `___HTML_TAG_${htmlTags.length}___`;
+    htmlTags.push(match);
+    return id;
+  });
+
+  // 0.1 Protect fill-in-the-blanks (3 or more underscores) so they don't break LaTeX parsing
   const blanks: string[] = [];
-  let s = text.replace(/_{3,}/g, (match) => {
+  s = s.replace(/_{3,}/g, (match) => {
     const id = `___BLANK_${blanks.length}___`;
     blanks.push(match);
     return id;
@@ -123,6 +131,11 @@ function renderLatex(text: string): string {
       `___BLANK_${i}___`,
       '<span style="display:inline-block;border-bottom:1.5px solid currentColor;min-width:48px;margin:0 4px;"></span>'
     );
+  });
+
+  // 11. Restore protected HTML tags
+  htmlTags.forEach((tag, i) => {
+    s = s.replace(`___HTML_TAG_${i}___`, tag);
   });
 
   return s;
@@ -512,7 +525,7 @@ export default function Home() {
                     <tr key={q.question_number} onClick={() => setSelectedQuestion(q)} style={{ cursor: 'pointer' }}>
                       <td>{q.question_number}</td>
                       <td style={{ maxWidth: '350px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        <span dangerouslySetInnerHTML={{ __html: renderLatex(q.stem.slice(0, 100)) }} />
+                        <span dangerouslySetInnerHTML={{ __html: renderLatex((q.stem || '').replace(/<[^>]+>/g, ' ').trim().slice(0, 100)) }} />
                       </td>
                       <td style={{ fontWeight: 600 }}>{q.marked_correct_answer || q.marked_answer || '-'}</td>
                       <td>

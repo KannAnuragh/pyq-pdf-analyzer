@@ -26,7 +26,8 @@ DEFAULT_INDIC_FAMILIES = [
     "Rachana", "Meera", "Manjari", "Gayathri", "Dyuthi", "Chilanka",
     "Anjali", "Karumbi", "Keraleeyam", "Suruma", "Uroob", "Raghu",
     "ML-TT", "Karthika", "Revathi", "Ambili", "Panchari", "Haritha",
-    "Indulekha", "Nandini", "Uma", "Charaka", "Manorama"
+    "Indulekha", "Nandini", "Uma", "Charaka", "Manorama",
+    "Shree", "SHREE-MAL", "Shree-Mal", "Shree-Lipi"
 ]
 
 

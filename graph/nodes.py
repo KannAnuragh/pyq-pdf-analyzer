@@ -225,7 +225,7 @@ def extract_node(state: GraphState) -> GraphState:
         
     print(f"Regex parser extracted {len(extracted)} questions.", flush=True)
     
-    avg_length = sum(len(b["stem"]) for b in extracted) / max(1, len(extracted))
+    avg_length = sum(len(re.sub(r'<[^>]+>', '', b["stem"])) for b in extracted) / max(1, len(extracted))
     
     # Fallback to LLM if regex fails (extracts very few questions or creates huge malformed blocks)
     if len(extracted) == 0 or (len(raw_text) > 1000 and len(extracted) < 2) or avg_length > 1500:

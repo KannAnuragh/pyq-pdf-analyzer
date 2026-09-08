@@ -20,6 +20,24 @@ from ..graph.workflow import app_graph
 from ..graph.state import GraphState
 from ..graph.nodes import get_gemini_status, is_gemini_enabled, rescan_question_vision, _solve_single_block
 
+def get_job_file_path(job: models.Job) -> Optional[str]:
+    """Resolves the physical file path across Docker and host environments."""
+    if not job:
+        return None
+    # 1. Direct path if valid
+    if job.file_path and os.path.exists(job.file_path):
+        return job.file_path
+    # 2. Match basename inside current UPLOADS_DIR
+    if job.file_path:
+        rel_target = os.path.join(database.UPLOADS_DIR, os.path.basename(job.file_path))
+        if os.path.exists(rel_target):
+            return rel_target
+    # 3. Fallback to {job.id}_{job.filename} inside current UPLOADS_DIR
+    fallback_target = os.path.join(database.UPLOADS_DIR, f"{job.id}_{job.filename}")
+    if os.path.exists(fallback_target):
+        return fallback_target
+    return None
+
 def process_pdf_background(job_id: str, file_path: str, db: Session):
     try:
         # Mark as processing
@@ -27,6 +45,9 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
         if job:
             job.status = "processing"
             db.commit()
+            resolved = get_job_file_path(job)
+            if resolved:
+                file_path = resolved
 
         # 1. Ingestion
         raw_text, ingest_p_tokens, ingest_c_tokens = route_and_extract(file_path)
@@ -121,24 +142,6 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
         if job:
             job.status = "failed"
             db.commit()
-
-def get_job_file_path(job: models.Job) -> Optional[str]:
-    """Resolves the physical file path across Docker and host environments."""
-    if not job:
-        return None
-    # 1. Direct path if valid
-    if job.file_path and os.path.exists(job.file_path):
-        return job.file_path
-    # 2. Match basename inside current UPLOADS_DIR
-    if job.file_path:
-        rel_target = os.path.join(database.UPLOADS_DIR, os.path.basename(job.file_path))
-        if os.path.exists(rel_target):
-            return rel_target
-    # 3. Fallback to {job.id}_{job.filename} inside current UPLOADS_DIR
-    fallback_target = os.path.join(database.UPLOADS_DIR, f"{job.id}_{job.filename}")
-    if os.path.exists(fallback_target):
-        return fallback_target
-    return None
 
 @router.post("/pdfs/upload", response_model=schemas.JobStatusResponse)
 async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(database.get_db)):

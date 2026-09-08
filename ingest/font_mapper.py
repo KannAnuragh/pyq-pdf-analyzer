@@ -28,7 +28,8 @@ INDIC_FAMILIES = (
     "Rachana", "Meera", "Manjari", "Gayathri", "Dyuthi", "Chilanka",
     "Anjali", "Karumbi", "Keraleeyam", "Suruma", "Uroob", "Raghu",
     "ML-TT", "Karthika", "Revathi", "Ambili", "Panchari", "Haritha",
-    "Indulekha", "Nandini", "Uma", "Charaka", "Manorama"
+    "Indulekha", "Nandini", "Uma", "Charaka", "Manorama",
+    "Shree", "SHREE-MAL", "Shree-Mal", "Shree-Lipi"
 )
 
 _MASTER_HASHES = None
@@ -236,7 +237,7 @@ def is_indic_font(font_name: str, font_buffer: bytes = None) -> bool:
         return True
 
     # 2. General Indic keywords
-    generic_keywords = ("malayalam", "indic", "kerala", "karthika", "revathi", "samvad", "ism", "fml")
+    generic_keywords = ("malayalam", "indic", "kerala", "karthika", "revathi", "samvad", "ism", "fml", "shree", "shreemal")
     if any(kw in font_name.lower() for kw in generic_keywords):
         return True
 
@@ -259,8 +260,8 @@ def is_indic_font(font_name: str, font_buffer: bytes = None) -> bool:
 
 def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
     """
-    Builds a GID/CID -> Unicode mapping for a font buffer using
-    the master hash database and topological signatures.
+    Builds a GID/CID/char-code -> Unicode mapping for a font buffer using
+    the master hash database, topological signatures, and legacy fallbacks.
     """
     master_hashes, topo_sigs = load_master_hashes()
 
@@ -275,6 +276,23 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
             return {}
         glyf = font['glyf']
         glyph_order = font.getGlyphOrder()
+        cmap = font['cmap'].getBestCmap() if 'cmap' in font else {}
+
+        # Reverse cmap: gname -> list of character codes
+        gname_to_codes = {}
+        for c_code, gn in cmap.items():
+            gname_to_codes.setdefault(gn, []).append(c_code)
+
+        def _assign_mapping(gid, gname, text):
+            cid_to_unicode[gid] = text
+            cid_to_unicode[str(gid)] = text
+            for code in gname_to_codes.get(gname, []):
+                cid_to_unicode[code] = text
+                cid_to_unicode[str(code)] = text
+                try:
+                    cid_to_unicode[chr(code)] = text
+                except Exception:
+                    pass
 
         for gid, gname in enumerate(glyph_order):
             if gname in ('.notdef', '.null', 'space', 'nonmarkingreturn') or gid in (0, 1, 2):
@@ -285,12 +303,11 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
             glyph = glyf[gname]
             if getattr(glyph, 'numberOfContours', 0) == 0:
                 continue
+
             # 1. Exact coordinate hash match
             h = hash_glyph_coordinates(glyph, glyf)
             if h and h in master_hashes:
-                text = master_hashes[h]
-                cid_to_unicode[gid] = text
-                cid_to_unicode[str(gid)] = text
+                _assign_mapping(gid, gname, master_hashes[h])
                 continue
 
             # 2. Topological signature match (for minor version nudges)
@@ -298,13 +315,35 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
             if sig:
                 sig_key = str(sig)
                 if sig in topo_sigs:
-                    text = topo_sigs[sig]
-                    cid_to_unicode[gid] = text
-                    cid_to_unicode[str(gid)] = text
+                    _assign_mapping(gid, gname, topo_sigs[sig])
                 elif sig_key in topo_sigs:
-                    text = topo_sigs[sig_key]
-                    cid_to_unicode[gid] = text
-                    cid_to_unicode[str(gid)] = text
+                    _assign_mapping(gid, gname, topo_sigs[sig_key])
+
+        # 3. Dedicated legacy Shree-Lipi fallback by font family name
+        if any(k in basefont.lower() for k in ("shree", "shreemal")):
+            legacy_shree_map = os.path.join(os.path.dirname(__file__), "..", "storage", "legacy_maps", "shree_mal_0501.map")
+            if os.path.exists(legacy_shree_map):
+                try:
+                    with open(legacy_shree_map, "r", encoding="utf-8") as smf:
+                        for line in smf:
+                            line = line.strip()
+                            if not line or line.startswith("#") or "=" not in line:
+                                continue
+                            parts = line.split("=", 1)
+                            raw_ch = parts[0]
+                            uni_val = parts[1]
+                            code_val = ord(raw_ch)
+                            cid_to_unicode.setdefault(code_val, uni_val)
+                            cid_to_unicode.setdefault(str(code_val), uni_val)
+                            cid_to_unicode.setdefault(raw_ch, uni_val)
+                            if code_val in cmap:
+                                gn = cmap[code_val]
+                                if gn in glyph_order:
+                                    g_id = glyph_order.index(gn)
+                                    cid_to_unicode.setdefault(g_id, uni_val)
+                                    cid_to_unicode.setdefault(str(g_id), uni_val)
+                except Exception as ex:
+                    print(f"[Font Mapper] Error loading Shree fallback map: {ex}")
 
     except Exception as e:
         print(f"[Font Mapper] Error indexing font {basefont}: {e}")

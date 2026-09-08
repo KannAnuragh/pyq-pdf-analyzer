@@ -45,10 +45,10 @@ def convert_visual_to_logical(text: str) -> str:
     END_B = r'(?=$|[\s\(\[\{<>\-_.,;:!?"\'/\\=+])'
 
     # 1. Two-part split vowels with pre-base placement:
-    text = re.sub(rf'({NON_C})െ({SUB_CLUSTER})ാ', r'\1\2ൊ', text)
-    text = re.sub(rf'({NON_C})േ({SUB_CLUSTER})ാ', r'\1\2ോ', text)
-    text = re.sub(rf'({NON_C})െ({SUB_CLUSTER})[ൗൌ]', r'\1\2ൌ', text)
-    text = re.sub(rf'({NON_C})േ({SUB_CLUSTER})[ൗൌ]', r'\1\2ൌ', text)
+    text = re.sub(rf'െ({SUB_CLUSTER})ാ', r'\1ൊ', text)
+    text = re.sub(rf'േ({SUB_CLUSTER})ാ', r'\1ോ', text)
+    text = re.sub(rf'െ({SUB_CLUSTER})[ൗൌ]', r'\1ൌ', text)
+    text = re.sub(rf'േ({SUB_CLUSTER})[ൗൌ]', r'\1ൌ', text)
 
     # 2. Partially swapped split vowels (e/ee after cluster followed by aa):
     text = re.sub(rf'({SUB_CLUSTER})ൊ', r'\1ൊ', text)
@@ -142,6 +142,15 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     if not text:
         return text
 
+    # 0. Protect HTML tags (inline equation images, block diagrams) so cleaning never alters them
+    html_tags = []
+    def _mask_tag(m):
+        idx = len(html_tags)
+        html_tags.append(m.group(0))
+        return f" ___HTML_TAG_{idx}___ "
+
+    text = re.sub(r'<div[^>]*>[\s\S]*?</div>|<img[^>]*\/?>', _mask_tag, text, flags=re.IGNORECASE)
+
     # 1. Normalize Unicode to NFC format
     text = unicodedata.normalize("NFC", text)
 
@@ -193,6 +202,10 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     text = re.sub(r'(?<=സി)[\s\u25CC]*,[\s\u25CC]*ം', 'സ്റ്റം', text) # സിസ്റ്റം (system)
     text = re.sub(r'(?<=മാ)[\s\u25CC]*,[\s\u25CC]*ർ', 'സ്റ്റർ', text) # മാസ്റ്റർ (master)
 
+    # 5.3 Normalization for standard PostScript math symbols (e.g. StandardSymbolsPS)
+    text = re.sub(r'´\s*N\b', r'\\times N', text)
+    text = re.sub(r'Î\s*N\b', r'\\in N', text)
+
     # 6. Collapse duplicate subjoined signs (e.g. ഇന്ത്യ്യ -> ഇന്ത്യ)
     text = re.sub(r'(\u0D4D\u0D2F){2,}', r'\1', text)
     text = re.sub(r'(\u0D4D\u0D35){2,}', r'\1', text)
@@ -227,9 +240,13 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     text = re.sub(r'(സൂചിപ്പി|അവതരിപ്പി|പ്രതിപാദിപ്പി|ആലാപി|രചി|അറി|ഉപയോ\s*ഗി)[\s\xa0\n]+ന്ന', r'\1ക്കുന്ന', text)
     text = re.sub(r'(പരിശോധി|തെരഞ്ഞെടു|തിരഞ്ഞെടു|രേഖപ്പെടു)[\s\xa0\n]+ക\b', r'\1ക്കുക', text)
 
-    # 8. Collapse multiple spaces into single spaces, but preserve newlines
-    text = re.sub(r'[ \t\r\f\v]+', ' ', text).strip()
+    # 8. Collapse multiple spaces into single spaces, but preserve newlines and tabs
+    text = re.sub(r'[ \r\f\v]+', ' ', text).strip()
     text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # 9. Restore protected HTML tags
+    for idx, tag in enumerate(html_tags):
+        text = text.replace(f"___HTML_TAG_{idx}___", tag)
 
     return text
 
@@ -245,6 +262,9 @@ def sanity_check_malayalam_text(text: str) -> tuple[bool, dict]:
     """
     if not text.strip():
         return True, {"reason": "empty"}
+
+    # Strip HTML tags (inline images, block diagrams) before checking text sanity
+    text = re.sub(r'<[^>]+>', ' ', text)
 
     non_ws = re.sub(r'\s+', '', text)
     if not non_ws:
@@ -282,7 +302,11 @@ def sanity_check_malayalam_text(text: str) -> tuple[bool, dict]:
     # 3. Check if English overwhelms Malayalam (sign of total CMap failure)
     english_chars = len(re.findall(r'[A-Za-z]', non_ws))
     if english_chars > malayalam_chars * 1.5 and malayalam_chars > 10:
-        return False, {"reason": "overwhelmed by english letters", "coverage": coverage}
+        # Check if this is genuine bilingual text (e.g. English questions followed by Malayalam questions)
+        words = set(re.findall(r'\b[a-zA-Z]{2,}\b', text.lower()))
+        common_en = {'the', 'of', 'and', 'to', 'in', 'is', 'that', 'for', 'it', 'as', 'was', 'with', 'on', 'by', 'at', 'question', 'option', 'answer', 'correct', 'which', 'following', 'from', 'this'}
+        if not (words & common_en):
+            return False, {"reason": "overwhelmed by english letters", "coverage": coverage}
 
     # 4. Check for too many garbled non-ASCII, non-Malayalam symbols
     garbled_chars = len(re.findall(r'[^\u0D00-\u0D7F\x00-\x7F]', non_ws))
