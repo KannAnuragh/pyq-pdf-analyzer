@@ -141,10 +141,9 @@ function renderLatex(text: string): string {
 
   // Mathematical Exponents, Fractions & Functions
   s = s.replace(/\$?x\\ne\$?/g, '$e^x$');
-  s = s.replace(/\$?1(?:\s*[\n/]|\\n)\s*x\$?/g, '$\\frac{1}{x}$');
-  s = s.replace(/\$?1(?:\s*[\n/]|\\n)\s*y\$?/g, '$\\frac{1}{y}$');
-  s = s.replace(/\$?1(?:\s*[\n/]|\\n)\s*B\$?/g, '$\\frac{1}{B}$');
-  s = s.replace(/\$?1(?:\s*[\n/]|\\n)\s*n\$?/g, '$\\frac{1}{n}$');
+  s = s.replace(/(?<![A-Za-z0-9])1\s*\/\s*x(?![A-Za-z0-9])/g, '$\\frac{1}{x}$');
+  s = s.replace(/(?<![A-Za-z0-9])1\s*\/\s*y(?![A-Za-z0-9])/g, '$\\frac{1}{y}$');
+  s = s.replace(/(?<![A-Za-z0-9])1\s*\/\s*n(?![A-Za-z0-9])/g, '$\\frac{1}{n}$');
   s = s.replace(/\b2(?:\s*[\n/]|\\n)\s*X[xX]?\b/g, 'x^2');
   s = s.replace(/\$2(?:\s*[\n/]|\\n)\s*[xX]\$?/g, '$x^2$');
   s = s.replace(/\bln\s*\(\s*x\s*\)/g, '$\\ln(x)$');
@@ -1055,27 +1054,35 @@ export default function Home() {
 
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                <h4 style={{ color: 'var(--text-muted)', margin: 0 }}>Solver Reasoning</h4>
-                {!selectedQuestion.validated_answer && (
-                  <span style={{ fontSize: '0.75rem', color: '#f87171' }}>Gemini AI Offline</span>
-                )}
+                <h4 style={{ color: 'var(--text-muted)', margin: 0 }}>Solution / Description</h4>
               </div>
-              <div
-                style={{
-                  background: !selectedQuestion.validated_answer ? 'rgba(239, 68, 68, 0.04)' : 'rgba(255,255,255,0.03)',
-                  padding: '1.25rem',
-                  borderRadius: '8px',
-                  fontSize: '0.92rem',
-                  lineHeight: '1.7',
-                  color: 'var(--text-main)',
-                  whiteSpace: 'pre-wrap',
-                  border: !selectedQuestion.validated_answer ? '1px solid rgba(239, 68, 68, 0.2)' : '1px solid var(--panel-border)'
-                }}
-                dangerouslySetInnerHTML={{ __html: renderLatex(selectedQuestion.reasoning || 'No reasoning provided.') }}
-              />
-              {selectedQuestion.used_web_search && (
-                <div style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                  <span>🌐</span> Web search was consulted to verify this answer.
+              {selectedQuestion.explanation ? (
+                <div
+                  style={{
+                    background: 'rgba(255,255,255,0.03)',
+                    padding: '1.25rem',
+                    borderRadius: '8px',
+                    fontSize: '0.92rem',
+                    lineHeight: '1.7',
+                    color: 'var(--text-main)',
+                    whiteSpace: 'pre-wrap',
+                    border: '1px solid var(--panel-border)'
+                  }}
+                  dangerouslySetInnerHTML={{ __html: renderLatex(selectedQuestion.explanation) }}
+                />
+              ) : (
+                <div
+                  style={{
+                    background: 'rgba(255,255,255,0.02)',
+                    padding: '1rem 1.25rem',
+                    borderRadius: '8px',
+                    fontSize: '0.88rem',
+                    color: 'var(--text-muted)',
+                    fontStyle: 'italic',
+                    border: '1px solid var(--panel-border)'
+                  }}
+                >
+                  Not available
                 </div>
               )}
             </div>

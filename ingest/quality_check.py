@@ -45,7 +45,9 @@ def score_question_text(raw_text: str, has_malayalam_expected: bool = True) -> Q
 
     # Strip HTML tags (inline equation images, block diagrams) before analysis
     text_only = re.sub(r'<[^>]+>', ' ', raw_text)
-    non_ws = re.sub(r'\s+', '', text_only)
+    # CRITICAL: Mask out LaTeX math expressions ($...$ and $$...$$) before analyzing for unmapped glyphs/wedges
+    text_no_math = re.sub(r'\$\$[\s\S]*?\$\$|\$[^$\n]+\$', ' ', text_only)
+    non_ws = re.sub(r'\s+', '', text_no_math)
 
     if not non_ws:
         return score
@@ -62,12 +64,12 @@ def score_question_text(raw_text: str, has_malayalam_expected: bool = True) -> Q
         score.coverage_pct = 0.0
         return score
 
-    # 1. Count unmapped glyphs: ASCII/symbols wedged inside Malayalam words
+    # 1. Count unmapped glyphs: ASCII/symbols wedged inside Malayalam words (excluding LaTeX formulas)
     wedged = re.findall(
         r'[\u0D00-\u0D7F]'
-        r'([A-Za-z#$%&*+<>=@\\^_`|~{}\[\]!/])'
+        r'([A-Za-z#$%&*+<>=@\\^_`|~{}\[\]!/]+)'
         r'[\u0D00-\u0D7F]',
-        text_only
+        text_no_math
     )
     score.unmapped_glyph_count = len(wedged)
 
@@ -79,7 +81,7 @@ def score_question_text(raw_text: str, has_malayalam_expected: bool = True) -> Q
 
     # 3. Suspicious gaps: spaces inside what should be a single Malayalam word
     # (consonant + space + combining sign = broken cluster)
-    gaps = re.findall(r'[\u0D15-\u0D3A]\s+[\u0D3E-\u0D4E\u0D57]', text_only)
+    gaps = re.findall(r'[\u0D15-\u0D3A]\s+[\u0D3E-\u0D4E\u0D57]', text_no_math)
     score.suspicious_gap_count = len(gaps)
 
     # 4. Run structural anomaly detection
@@ -241,9 +243,12 @@ def flag_structural_anomalies(cleaned_text: str) -> list[str]:
         anomalies.append("repeated_substring")
 
     # 4. Isolated single Latin char inside Malayalam-majority sentence
-    #    that isn't a known math variable
-    known_math_vars = set("xyznpqrstuvwθαβγδεφ")
-    words = cleaned_text.split()
+    #    that isn't a known math/science variable or unit
+    # First mask out LaTeX math spans so formulas inside $...$ are never checked as isolated Latin chars
+    text_no_math = re.sub(r'\$\$[\s\S]*?\$\$|\$[^$\n]+\$', ' ', cleaned_text)
+    known_math_vars = set("abcdefghijklmnopqrstuvwxyzθαβγδεφηθλμπστω")
+    known_science_tokens = {"ph", "ml", "mg", "kg", "km", "cm", "mm", "mol", "dna", "rna", "atp", "co2", "h2o", "nacl"}
+    words = text_no_math.split()
     if words:
         total_mal_words = sum(1 for w in words if re.search(r'[\u0D00-\u0D7F]', w))
         if total_mal_words > len(words) * 0.5:
@@ -251,7 +256,9 @@ def flag_structural_anomalies(cleaned_text: str) -> list[str]:
                 # Option markers like (A), (B), A., B. are structural labels, not isolated glyph leaks
                 if re.match(r"^\(?[A-D]\)?[\.:-]?$", w):
                     continue
-                stripped = w.strip(".,;:!?()[]\"'")
+                stripped = w.strip(".,;:!?()[]\"'{}<>/\\")
+                if stripped.lower() in known_science_tokens:
+                    continue
                 if len(stripped) == 1 and stripped.isalpha() and stripped.lower() not in known_math_vars:
                     anomalies.append("isolated_latin_char")
                     break

@@ -194,10 +194,9 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     text = re.sub(r'(?<!\\frac\{)\bdx(?:\s*[\n/]|\\n)\s*dt\b', r'\\frac{dx}{dt}', text)
 
     text = re.sub(r'\$?x\\ne\$?', r'$e^x$', text)
-    text = re.sub(r'\$?1(?:\s*[\n/]|\\n)\s*x\$?', r'$\\frac{1}{x}$', text)
-    text = re.sub(r'\$?1(?:\s*[\n/]|\\n)\s*y\$?', r'$\\frac{1}{y}$', text)
-    text = re.sub(r'\$?1(?:\s*[\n/]|\\n)\s*B\$?', r'$\\frac{1}{B}$', text)
-    text = re.sub(r'\$?1(?:\s*[\n/]|\\n)\s*n\$?', r'$\\frac{1}{n}$', text)
+    text = re.sub(r'(?<![A-Za-z0-9])1\s*/\s*x(?![A-Za-z0-9])', r'$\\frac{1}{x}$', text)
+    text = re.sub(r'(?<![A-Za-z0-9])1\s*/\s*y(?![A-Za-z0-9])', r'$\\frac{1}{y}$', text)
+    text = re.sub(r'(?<![A-Za-z0-9])1\s*/\s*n(?![A-Za-z0-9])', r'$\\frac{1}{n}$', text)
     text = re.sub(r'\b2(?:\s*[\n/]|\\n)\s*X[xX]?\b', r'x^2', text)
     text = re.sub(r'\$2(?:\s*[\n/]|\\n)\s*[xX]\$?', r'$x^2$', text)
     text = re.sub(r'\bln\s*\(\s*x\s*\)', r'$\\ln(x)$', text)
@@ -258,6 +257,33 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     # 3. Strip invisible formatting artifacts, control characters, and dotted circle placeholders
     text = re.sub(r'[\u200B\uFEFF\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
     text = text.replace('\u25CC', '')
+
+    # 3.1 Repair chillu / suffix split across newlines (e.g. ന്റെ\nയും -> ന്റെയും, ത്തിന്റെ\n ഗ്ര -> ത്തിന്റെ ഗ്ര)
+    text = re.sub(r'ന്റെ\s*\n\s*യും', 'ന്റെയും', text)
+    text = re.sub(r'([ൽൻർൺൾ]|ന്റെ|ത്തിന്റെ|ത്തിൽ|തിൽ|കൾ|ങ്ങൾ)\s*\n\s*', r'\1 ', text)
+
+    # 3.2 Clean Noto Sans Malayalam positioning & ligature artifacts wedged in words
+    MAL_CHAR = r'[\u0D00-\u0D7F]'
+    MAL_VOWEL = r'[ാിീുൂൃെേൈൊോൌ്\u0D02\u0D03]'
+
+    # Universal rule: Any ASCII letter, digit, or symbol wedged immediately before a Malayalam vowel sign
+    # (in Malayalam phonology, vowel signs can ONLY attach directly to base consonants; any intermediate ASCII is an artifact)
+    text = re.sub(rf'(?<={MAL_CHAR})[A-Za-z0-9@_~^\-\[](?={MAL_VOWEL})', '', text)
+
+    # Hyphen wedged inside Malayalam word before vowel sign or letter (e.g. എഴുതുമ്പ-ോൾ -> എഴുതുമ്പോൾ)
+    text = re.sub(rf'(?<={MAL_CHAR})-(?={MAL_VOWEL}|{MAL_CHAR})', '', text)
+    # Digits or symbols wedged inside Malayalam words (e.g. പ4ൊ -> പൊ, പ്ര4 -> പ്ര, പൈ4 -> പൈ, ചെ@ -> ചെ, ചേ@ -> ചേ, അപ്പE -> അപ്പ)
+    text = re.sub(rf'(?<={MAL_CHAR})4(?={MAL_VOWEL}|{MAL_CHAR})', '', text)
+    text = re.sub(rf'(?<={MAL_CHAR})@(?={MAL_VOWEL}|{MAL_CHAR})', '', text)
+    text = re.sub(rf'(?<={MAL_CHAR})E(?={MAL_VOWEL}|{MAL_CHAR})', '', text)
+    text = re.sub(rf'(?<={MAL_CHAR})N(?={MAL_VOWEL}|{MAL_CHAR})', '', text)
+    text = re.sub(rf'(?<={MAL_CHAR})Q(?={MAL_VOWEL}|{MAL_CHAR}|\s|$)', '', text)
+    text = re.sub(rf'(?<={MAL_CHAR})V(?={MAL_VOWEL}|{MAL_CHAR}|[\s\.,;:!?\)\"\'\]]|$)', '', text)
+    text = re.sub(rf'(?<={MAL_CHAR})\[(?={MAL_VOWEL}|{MAL_CHAR}|[\s\.,;:!?\)\"\'\]]|$)', '', text)
+    text = re.sub(rf'(?<={MAL_CHAR})f(?={MAL_VOWEL}|{MAL_CHAR}|\s|$)', '', text)
+    text = re.sub(rf'(?<={MAL_CHAR})a(?={MAL_VOWEL}|{MAL_CHAR})', '', text)
+    text = re.sub(rf'(?<={MAL_CHAR})u(?={MAL_VOWEL}|{MAL_CHAR})', '', text)
+    text = re.sub(rf'(?<={MAL_CHAR})p(?={MAL_VOWEL}|{MAL_CHAR})', '', text)
 
     # 4. Resolve known residual subset font ligature artifacts wedged in Malayalam words
     # (Must run BEFORE convert_visual_to_logical so split vowels like േ + ദ + * + ാ -> ദ്യോ work properly!)

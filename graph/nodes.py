@@ -2,6 +2,7 @@ import json
 import os
 import re
 import traceback
+from typing import Optional, Dict, List, Tuple, Any
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from duckduckgo_search import DDGS
@@ -183,6 +184,174 @@ Output ONLY a valid JSON array matching this schema:
 ]
 """
 
+def parse_trailing_meta(text: str) -> tuple[str, Optional[str], Optional[str]]:
+    """
+    Parses trailing metadata from text (e.g. at the end of an option or question block).
+    Detects marked answer (English 'Answer: B', 'Ans:- B', 'Correct Answer:- Option-C', Malayalam 'ഉത്തരം: B', etc.)
+    and solution/explanation ('Solution:', 'Explanation:', 'Description:', 'വിശദീകരണം:', 'പരിഹാരം:', etc.).
+    Returns (clean_text, marked_answer, explanation).
+    """
+    if not text:
+        return "", None, None
+
+    clean_text = text.strip()
+    marked_answer = None
+    explanation = None
+
+    ans_pat = re.compile(
+        r"(?:^|\n|\s+)(?:Answer|Ans(?:wer)?|Correct(?:\s*Answer)?|ഉത്തരം)\s*[:\-]*\s*(?:is\s*)?(?:Option\s*[:\-]*\s*)?(?:\()?([A-D])(?:\))?\b",
+        re.IGNORECASE
+    )
+    sol_pat = re.compile(
+        r"(?:^|\n|\s+)(?:Solution|Explanation|Description|Sol|Exp|Hint|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*[:\.\-]+\s*",
+        re.IGNORECASE
+    )
+
+    ans_m = ans_pat.search(clean_text)
+    sol_m = sol_pat.search(clean_text)
+
+    if ans_m and sol_m:
+        if ans_m.start() < sol_m.start():
+            marked_answer = ans_m.group(1).upper()
+            explanation = clean_text[sol_m.end():].strip()
+            clean_text = clean_text[:ans_m.start()].strip()
+        else:
+            marked_answer = ans_m.group(1).upper()
+            explanation = (clean_text[sol_m.end():ans_m.start()] + "\n" + clean_text[ans_m.end():]).strip()
+            clean_text = clean_text[:sol_m.start()].strip()
+    elif ans_m:
+        marked_answer = ans_m.group(1).upper()
+        trailing = clean_text[ans_m.end():].strip()
+        trailing_sol_m = sol_pat.search(trailing)
+        if trailing_sol_m:
+            explanation = trailing[trailing_sol_m.end():].strip()
+        elif trailing and (trailing.lower().startswith("because") or trailing.lower().startswith("since")):
+            explanation = trailing
+        clean_text = clean_text[:ans_m.start()].strip()
+    elif sol_m:
+        explanation = clean_text[sol_m.end():].strip()
+        clean_text = clean_text[:sol_m.start()].strip()
+        ans_in_sol = re.search(r"(?:Option\s*[:\-]*\s*\(?([A-D])\)?\s*is\s*correct|\(?([A-D])\)?\s*is\s*(?:the\s*)?correct\s*(?:option|answer))", explanation, re.IGNORECASE)
+        if ans_in_sol:
+            marked_answer = (ans_in_sol.group(1) or ans_in_sol.group(2)).upper()
+
+    return clean_text, marked_answer, explanation
+
+
+def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Optional[str], Optional[str]]:
+    """
+    Given raw question content, reliably separates question stem from multiple-choice options (A, B, C, D).
+    Guarantees:
+    1. Heals mangled option markers (e.g. 1\nB:- turned into \frac{1}{B}:-).
+    2. Finds increasing option sequence (A, B, C, D or A, C, D or B, C, D).
+    3. Emergency line fallback if options are at the bottom of the stem.
+    4. Strips and extracts marked answers ('Correct Answer:- Option-C', 'Ans:- B', 'ഉത്തരം: C').
+    5. Extracts solution/description ('Solution:', 'Explanation:', 'വിശദീകരണം:') if present in the document.
+    Returns (stem, options, marked_answer, explanation).
+    """
+    if not content:
+        return "", {}, None, None
+
+    # Heal any accidental math conversions of option markers (e.g. 1\nB:- turned into \frac{1}{B}:-)
+    content = re.sub(
+        r'(?:\$?\{\\frac\{1\}\{([A-D])\}\}?|\$?\\\s*frac\s*\{\s*1\s*\}\s*\{\s*([A-D])\s*\}\$?|1\s*/\s*([A-D]))(\s*[:-]+|\s*\.|\s*\))',
+        lambda m: f"1\n{m.group(1) or m.group(2) or m.group(3)}{m.group(4)}",
+        content
+    )
+
+    opt_pattern = re.compile(r'(?:^|\n|\s+)(?:\()?([A-D])(?:\)|\.|:-)\s*')
+    matches = list(opt_pattern.finditer(content))
+    
+    best_sequence = []
+    for i, m in enumerate(matches):
+        curr_seq = [m]
+        curr_letter = m.group(1)
+        for next_m in matches[i+1:]:
+            next_letter = next_m.group(1)
+            if next_letter > curr_letter:
+                curr_seq.append(next_m)
+                curr_letter = next_letter
+        if len(curr_seq) > len(best_sequence):
+            best_sequence = curr_seq
+
+    stem = content.strip()
+    options = {}
+    marked_answer = None
+    explanation = None
+
+    if len(best_sequence) >= 2:
+        stem = content[:best_sequence[0].start()].strip()
+        for idx, m in enumerate(best_sequence):
+            letter = m.group(1)
+            start_pos = m.end()
+            end_pos = best_sequence[idx+1].start() if idx < len(best_sequence) - 1 else len(content)
+            opt_text = content[start_pos:end_pos].strip()
+            
+            clean_opt, ans, exp = parse_trailing_meta(opt_text)
+            if ans and not marked_answer:
+                marked_answer = ans
+            if exp and not explanation:
+                explanation = exp
+            options[letter] = clean_opt
+
+    # Fallback 1: Flexible separator matching
+    if len(options) < 2:
+        fallback_pattern = re.compile(r'(?:^|\s)(?:\()?([A-D])(?:\)|\.|:-)\s*')
+        fb_matches = list(fallback_pattern.finditer(content))
+        if fb_matches:
+            last_positions = {}
+            for m in fb_matches:
+                last_positions[m.group(1)] = m
+            if len(last_positions) >= 2:
+                true_option_matches = sorted(last_positions.values(), key=lambda m: m.start())
+                stem = content[:true_option_matches[0].start()].strip()
+                for i, match in enumerate(true_option_matches):
+                    opt_letter = match.group(1)
+                    start_idx = match.end()
+                    end_idx = true_option_matches[i+1].start() if i + 1 < len(true_option_matches) else len(content)
+                    opt_text = content[start_idx:end_idx].strip()
+                    clean_opt, ans, exp = parse_trailing_meta(opt_text)
+                    if ans and not marked_answer:
+                        marked_answer = ans
+                    if exp and not explanation:
+                        explanation = exp
+                    options[opt_letter] = clean_opt
+
+    # Fallback 2: Line-based emergency extraction if options are still trapped in stem
+    if len(options) < 2:
+        lines = stem.split('\n')
+        opt_line_pattern = re.compile(r'^\s*(?:\()?([A-D])(?:\)|\.|:-)\s*(.*)', re.IGNORECASE)
+        first_opt_idx = -1
+        found_opts = {}
+        for idx, line in enumerate(lines):
+            m_line = opt_line_pattern.match(line)
+            if m_line:
+                if first_opt_idx == -1:
+                    first_opt_idx = idx
+                opt_t = m_line.group(2).strip()
+                clean_opt, ans, exp = parse_trailing_meta(opt_t)
+                if ans and not marked_answer:
+                    marked_answer = ans
+                if exp and not explanation:
+                    explanation = exp
+                found_opts[m_line.group(1).upper()] = clean_opt
+        if len(found_opts) >= 2:
+            options = found_opts
+            stem = '\n'.join(lines[:first_opt_idx]).strip()
+    
+    # Check if marked answer or explanation was in the stem
+    if not marked_answer or not explanation:
+        clean_stem, s_ans, s_exp = parse_trailing_meta(stem)
+        if s_ans and not marked_answer:
+            marked_answer = s_ans
+            stem = clean_stem
+        if s_exp and not explanation:
+            explanation = s_exp
+            stem = clean_stem
+
+    return stem, options, marked_answer, explanation
+
+
 def extract_node(state: GraphState) -> GraphState:
     """Extracts question blocks from raw text using a lightweight Regex parser."""
     raw_text = state.get("raw_text", "")
@@ -216,83 +385,14 @@ def extract_node(state: GraphState) -> GraphState:
         q_num = int(q_match.group(1))
         content = q_match.group(2)
         
-        # Extract options securely by finding the true sequential options block (A, B, C, D)
-        # Strictly require uppercase [A-D] preceded by newline/whitespace/tab to avoid false positives
-        # from internal sub-items like (a), (b), (c), (d), (e) or statements in matching questions!
-        opt_pattern = re.compile(r'(?:^|\n|\s{2,}|\t)(?:\()?([A-D])(?:\)|\.|:-)\s*')
-        matches = list(opt_pattern.finditer(content))
-        
-        best_sequence = []
-        for i, m in enumerate(matches):
-            if m.group(1) == "A":
-                curr_seq = [m]
-                expected_next = "B"
-                for next_m in matches[i+1:]:
-                    if next_m.group(1) == expected_next:
-                        curr_seq.append(next_m)
-                        if expected_next == "B":
-                            expected_next = "C"
-                        elif expected_next == "C":
-                            expected_next = "D"
-                        elif expected_next == "D":
-                            break
-                if len(curr_seq) > len(best_sequence) or (len(curr_seq) >= 2 and len(curr_seq) >= len(best_sequence)):
-                    best_sequence = curr_seq
-
-        stem = content.strip()
-        options = {}
-        marked_answer = None
-
-        if len(best_sequence) >= 2:
-            stem = content[:best_sequence[0].start()].strip()
-            for idx, m in enumerate(best_sequence):
-                letter = m.group(1)
-                start_pos = m.end()
-                if idx < len(best_sequence) - 1:
-                    end_pos = best_sequence[idx+1].start()
-                    opt_text = content[start_pos:end_pos].strip()
-                else:
-                    opt_text = content[start_pos:].strip()
-                
-                ans_match = re.search(r'(?:Ans(?:wer)?|Correct(?:\s*Answer)?)\s*[:\-]*\s*(?:is\s*)?(?:Option\s*[:\-]*\s*)?([A-D])\b', opt_text, re.IGNORECASE)
-                if ans_match:
-                    marked_answer = ans_match.group(1).upper()
-                    opt_text = opt_text[:ans_match.start()].strip()
-                options[letter] = opt_text
-        else:
-            # Fallback for questions where options might not strictly start with newline
-            fallback_pattern = re.compile(r'(?:^|\s)(?:\()?([A-D])(?:\)|\.|:-)\s*')
-            fb_matches = list(fallback_pattern.finditer(content))
-            if fb_matches:
-                last_positions = {}
-                for m in fb_matches:
-                    last_positions[m.group(1)] = m
-                if 'A' in last_positions and 'B' in last_positions:
-                    true_option_matches = sorted(last_positions.values(), key=lambda m: m.start())
-                    stem = content[:true_option_matches[0].start()].strip()
-                    for i, match in enumerate(true_option_matches):
-                        opt_letter = match.group(1)
-                        start_idx = match.end()
-                        end_idx = true_option_matches[i+1].start() if i + 1 < len(true_option_matches) else len(content)
-                        opt_text = content[start_idx:end_idx].strip()
-                        ans_match = re.search(r'(?:Ans(?:wer)?|Correct(?:\s*Answer)?)\s*[:\-]*\s*(?:is\s*)?(?:Option\s*[:\-]*\s*)?([A-D])\b', opt_text, re.IGNORECASE)
-                        if ans_match:
-                            marked_answer = ans_match.group(1).upper()
-                            opt_text = opt_text[:ans_match.start()].strip()
-                        options[opt_letter] = opt_text
-        
-        # Check if marked answer was in the stem
-        if not marked_answer:
-            ans_match = re.search(r'(?:Ans(?:wer)?|Correct(?:\s*Answer)?)\s*[:\-]*\s*(?:is\s*)?(?:Option\s*[:\-]*\s*)?([A-D])\b', stem, re.IGNORECASE)
-            if ans_match:
-                marked_answer = ans_match.group(1).upper()
-                stem = stem[:ans_match.start()].strip()
+        stem, options, marked_answer, explanation = separate_stem_and_options(content)
         
         extracted.append({
             "question_number": q_num,
             "stem": stem,
             "options": options,
-            "marked_answer": marked_answer
+            "marked_answer": marked_answer,
+            "explanation": explanation
         })
         
     extracted.sort(key=lambda x: x["question_number"])
@@ -734,9 +834,10 @@ CRITICAL INSTRUCTIONS:
 1. Transcribe and preserve all mathematical equations, fractions, formulas, and symbols into standard inline LaTeX ($...) or display LaTeX ($$...$$), just like non-image math equations (e.g. $\\frac{1}{2}$, $\\sqrt{x^2+y^2}$, $x^2$, $\\chi^2$). Never output raw image tags or placeholders for mathematical formulas.
 2. Extract all options into 'options': {{"A": "...", "B": "...", "C": "...", "D": "..."}}.
    - NEVER include options (e.g. A:-, B:-, C:-, D:-) or option contents inside the question 'stem'.
-3. Extract the given 'Correct Answer' into 'marked_answer' if present (e.g. if an option letter or option text is highlighted in yellow/color, marked with a tick mark, circled, or explicitly printed as answer). Set to null if not marked.
-4. For matching questions (List-I / List-II), preserve the two-column table using tabs or clear alignment. Keep matching option codes (e.g. '(a) (b) (c) (d) (e)') together on one line within each option, DO NOT break them into individual single-letter lines.
-5. Transcribe Malayalam and Indic text faithfully into standard Unicode script. Do not invent or summarize.
+3. Extract the given 'Correct Answer' into 'marked_answer' if present (e.g. if an option letter or option text is highlighted in yellow/color, marked with a tick mark, circled, or explicitly printed as answer / ഉത്തരം). Set to null if not marked.
+4. Extract the given 'Solution', 'Explanation', or 'Description' into 'explanation' if present below the question or options (e.g. 'Solution:', 'Explanation:', 'Description:', 'വിശദീകരണം:', 'പരിഹാരം:'). Set to null if not present in the document.
+5. For matching questions (List-I / List-II), preserve the two-column table using tabs or clear alignment. Keep matching option codes (e.g. '(a) (b) (c) (d) (e)') together on one line within each option, DO NOT break them into individual single-letter lines.
+6. Transcribe Malayalam and Indic text faithfully into standard Unicode script. Do not invent or summarize.
 
 Output ONLY a valid JSON object exactly matching this schema, with no markdown code blocks or extra text:
 {{
@@ -748,7 +849,8 @@ Output ONLY a valid JSON object exactly matching this schema, with no markdown c
     "C": "Option C text",
     "D": "Option D text"
   }},
-  "marked_answer": "B"
+  "marked_answer": "B",
+  "explanation": "Solution or explanation text here"
 }}
 """
     # Priority 1: Groq Vision if enabled

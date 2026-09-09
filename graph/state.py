@@ -10,18 +10,20 @@ class PageMetadata(TypedDict):
     has_text_layer: bool
 
 
-class QuestionBlock(TypedDict):
+class QuestionBlock(TypedDict, total=False):
     question_number: int
     stem: str
     options: Dict[str, str]
     marked_answer: Optional[str]
+    explanation: Optional[str]
 
 
-class ProcessedQuestion(QuestionBlock):
+class ProcessedQuestion(QuestionBlock, total=False):
     validated_answer: Optional[str]
     is_valid: bool
     confidence: str
     reasoning: Optional[str]
+    explanation: Optional[str]
     used_web_search: bool
 
 

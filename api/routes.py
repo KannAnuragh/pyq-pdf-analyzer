@@ -21,7 +21,7 @@ router = APIRouter()
 from ..ingest.router import route_and_extract, ocr_equation_clip, clean_latex_equation
 from ..graph.workflow import app_graph
 from ..graph.state import GraphState
-from ..graph.nodes import get_gemini_status, is_gemini_enabled, get_groq_status, is_groq_enabled, get_llm_status, is_llm_enabled, is_answer_validation_enabled, rescan_question_vision, _solve_single_block
+from ..graph.nodes import get_gemini_status, is_gemini_enabled, get_groq_status, is_groq_enabled, get_llm_status, is_llm_enabled, is_answer_validation_enabled, rescan_question_vision, _solve_single_block, separate_stem_and_options, parse_trailing_meta
 
 _math_conversion_tasks: dict[str, dict] = {}
 
@@ -401,6 +401,62 @@ def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
     result_obj = None
     if job.result_json:
         result_obj = schemas.PDFResult.model_validate_json(job.result_json)
+        # Self-healing: if any question has empty options or trapped answer/explanation
+        changed = False
+        for q in result_obj.questions:
+            # 1. Trapped in stem when options empty or incomplete (< 4 options while trapped markers exist)
+            re_separate_needed = False
+            if not q.options or len(q.options) < 4:
+                # Check if options or stem contain unseparated option markers like B), C), D)
+                combined_probe = (q.stem or "") + " " + " ".join(q.options.values() if q.options else [])
+                if any(m in combined_probe for m in ["B)", "C)", "D)", "B:-", "C:-", "D:-", "B.", "C.", "D."]):
+                    re_separate_needed = True
+
+            if re_separate_needed:
+                # Reconstruct full block to reliably extract all options A, B, C, D
+                reconstruct_text = (q.stem or "").strip()
+                if q.options:
+                    for k in sorted(q.options.keys()):
+                        reconstruct_text += f"\n{k}) {q.options[k]}"
+                if q.marked_answer and "answer" not in reconstruct_text.lower() and "ഉത്തരം" not in reconstruct_text:
+                    reconstruct_text += f"\nAnswer: {q.marked_answer}"
+                if q.explanation and "solution" not in reconstruct_text.lower() and "വിശദീകരണം" not in reconstruct_text:
+                    reconstruct_text += f"\nSolution: {q.explanation}"
+
+                healed_stem, healed_options, healed_ans, healed_exp = separate_stem_and_options(reconstruct_text)
+                if len(healed_options) > len(q.options or {}):
+                    q.stem = healed_stem
+                    q.options = healed_options
+                    if not q.marked_answer and healed_ans:
+                        q.marked_answer = healed_ans
+                        q.marked_correct_answer = healed_ans
+                    if not q.explanation and healed_exp:
+                        q.explanation = healed_exp
+                    changed = True
+
+            # 2. Trapped answer or explanation in the last option (e.g. Option D has Answer / Solution / ഉത്തരം / വിശദീകരണം)
+            if q.options:
+                last_key = sorted(q.options.keys())[-1]
+                last_val = q.options[last_key]
+                clean_opt, ans, exp = parse_trailing_meta(last_val)
+                if clean_opt != last_val:
+                    q.options[last_key] = clean_opt
+                    changed = True
+                if ans and not q.marked_answer:
+                    q.marked_answer = ans
+                    q.marked_correct_answer = ans
+                    changed = True
+                if exp and not q.explanation:
+                    q.explanation = exp
+                    changed = True
+
+        if changed:
+            try:
+                job.result_json = result_obj.model_dump_json()
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                print(f"Warning: Failed to persist self-healed options/explanation for job {job_id}: {e}")
 
     return schemas.JobResultResponse(
         job_id=job.id,

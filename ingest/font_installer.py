@@ -84,7 +84,7 @@ def hash_glyph_coordinates(glyph, glyf_table):
     return hashlib.md5(str(normalized).encode()).hexdigest()
 
 
-def install_font_map(font_md5: str, font_name: str, font_buffer: bytes, resolved_map: dict) -> bool:
+def install_font_map(font_md5: str, font_name: str, font_buffer: bytes, resolved_map: dict, source: str = "gemini_repair") -> bool:
     """
     Installs a newly analyzed or distilled font map:
     1. Writes storage/font_maps/<font_md5>_map.json
@@ -97,6 +97,7 @@ def install_font_map(font_md5: str, font_name: str, font_buffer: bytes, resolved
 
     ensure_storage_dirs()
     clean_name = font_name.split("+")[-1] if "+" in font_name else font_name
+    print(f"[Font Installer] Installing font map for '{font_name}' (hash: {font_md5[:8]}) with {len(resolved_map)} glyphs via source='{source}'", flush=True)
 
     # 1. Save font map cache
     cache_file = os.path.join(CACHE_DIR, f"{font_md5}_map.json")
@@ -108,7 +109,7 @@ def install_font_map(font_md5: str, font_name: str, font_buffer: bytes, resolved
         existing_map.update({str(k): v for k, v in resolved_map.items()})
         with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(existing_map, f, ensure_ascii=False, indent=2)
-        print(f"[Font Installer] Saved {len(existing_map)} mapped glyphs to {cache_file}", flush=True)
+        print(f"[Font Installer] Saved {len(existing_map)} mapped glyphs to {cache_file} (source: {source})", flush=True)
     except Exception as e:
         print(f"[Font Installer] Error saving font map: {e}", flush=True)
         return False
@@ -201,6 +202,7 @@ def validate_and_commit_font_map(
     proposed_mapping: dict,
     affected_question_texts: list[str],
     current_scores: list[dict] = None,
+    source: str = "gemini_repair",
 ) -> bool:
     """
     Validation gate before caching a font map. Prevents silent corruption.
@@ -220,6 +222,7 @@ def validate_and_commit_font_map(
         proposed_mapping: {str(cid): unicode_char} proposed by Vision repair
         affected_question_texts: List of raw question texts that use this font
         current_scores: Optional list of current QualityScore dicts for comparison
+        source: Source tag identifying who generated this proposed mapping
 
     Returns:
         True if mapping was committed, False if rejected.
@@ -230,11 +233,18 @@ def validate_and_commit_font_map(
         print(f"[Font Installer] Rejecting empty proposed mapping for '{font_name}'", flush=True)
         return False
 
-    # Simulate applying the mapping: replace char codes with their proposed Unicode
-    # In practice, we test coverage improvement on the raw texts
+    # Simulate applying the proposed mapping to each affected text
     new_scores = []
-    for i, text in enumerate(affected_question_texts):
-        s = score_question_text(text, has_malayalam_expected=True)
+    for i, text in enumerate(affected_question_texts or []):
+        simulated_text = text
+        for code_str, uni in proposed_mapping.items():
+            try:
+                code_int = int(code_str)
+                if code_int > 0:
+                    simulated_text = simulated_text.replace(chr(code_int), uni)
+            except Exception:
+                pass
+        s = score_question_text(simulated_text, has_malayalam_expected=True)
         new_scores.append(s)
 
     # Check aggregate coverage
@@ -254,18 +264,25 @@ def validate_and_commit_font_map(
                 has_regression = True
 
     if has_regression:
-        print(f"[Font Installer] REJECTING proposed mapping for '{font_name}' — "
+        print(f"[Font Installer] REJECTING proposed mapping for '{font_name}' (source: {source}) — "
               f"causes regression in at least one question. "
               f"Logging to manual review queue.", flush=True)
         _log_repair_rejection(font_hash, font_name, proposed_mapping, "regression")
         return False
 
+    # If affected texts were provided and aggregate coverage is unacceptably low (< 75%), reject
+    if new_scores and avg_coverage < 0.75:
+        print(f"[Font Installer] REJECTING proposed mapping for '{font_name}' (source: {source}) — "
+              f"aggregate coverage {avg_coverage:.1%} is below minimum threshold (75%).", flush=True)
+        _log_repair_rejection(font_hash, font_name, proposed_mapping, "low_coverage")
+        return False
+
     # Commit the mapping
-    print(f"[Font Installer] Validation PASSED for '{font_name}' "
+    print(f"[Font Installer] Validation PASSED for '{font_name}' (source: {source}) "
           f"(avg coverage: {avg_coverage:.1%}, {len(proposed_mapping)} glyphs). "
           f"Committing permanently.", flush=True)
 
-    success = install_font_map(font_hash, font_name, font_buffer, proposed_mapping)
+    success = install_font_map(font_hash, font_name, font_buffer, proposed_mapping, source=source)
     return success
 
 

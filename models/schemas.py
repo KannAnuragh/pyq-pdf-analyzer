@@ -14,6 +14,7 @@ class QuestionResult(BaseModel):
     is_valid: bool = False
     confidence: str = "low"
     reasoning: Optional[str] = None
+    explanation: Optional[str] = None
     used_web_search: bool = False
     page_number: Optional[int] = None
 

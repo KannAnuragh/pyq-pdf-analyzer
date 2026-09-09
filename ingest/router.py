@@ -653,7 +653,13 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
 
                     # Whitespace characters and synthetic spaces must not be mapped through font maps,
                     # unless it is a wide non-blank glyph with an actual font mapping!
-                    if (ch in (" ", "\n", "\t", "\r", "\xa0") or c.get("synthetic")) and not is_real_glyph:
+                    if ch in ("\n", "\r", "\t"):
+                        resolved = ch
+                    elif (ch in (" ", "\xa0") or c.get("synthetic")) and not is_real_glyph:
+                        resolved = ch
+                    elif 0x0D00 <= code <= 0x0D7F:
+                        # Character is already a valid standard Malayalam Unicode code point from PDF ToUnicode CMap!
+                        # Never overwrite already-valid Malayalam with GID shape lookups.
                         resolved = ch
                     elif f_map and (str(code) in f_map or code in f_map):
                         resolved = f_map.get(str(code)) or f_map.get(code)
@@ -929,7 +935,8 @@ def extract_text_from_pdf(file_path: str) -> dict:
         # ---------------------------------------------------------------
         # Step 2: Universal font map detection and text rebuild
         # ---------------------------------------------------------------
-        font_map = get_or_create_font_map(doc, page_idx)
+        page_blocks = [b[4] for b in page.get_text("blocks") if len(b) > 4 and b[4].strip()]
+        font_map = get_or_create_font_map(doc, page_idx, affected_texts=page_blocks)
 
         # Collect font hashes for this page (for downstream repair_node)
         page_font_hashes = {}

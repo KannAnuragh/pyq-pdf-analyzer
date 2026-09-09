@@ -1,0 +1,10 @@
+{
+  "timestamp": "2026-09-09T15:23:19.191643",
+  "font_hash": "00000000000000000000000000000000",
+  "font_name": "MockFont",
+  "reason": "low_coverage",
+  "proposed_mapping_count": 1,
+  "proposed_mapping": {
+    "100": "$"
+  }
+}

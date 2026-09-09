@@ -85,7 +85,7 @@ def get_glyph_topology_signature(glyph, glyf_table):
 
     w = max(c[0] for c in coords) - min(c[0] for c in coords)
     h = max(c[1] for c in coords) - min(c[1] for c in coords)
-    ar = round(w / h, 1) if h else 0
+    ar = round(w / h, 2) if h else 0
     return (num_contours, len(coords), tuple(endPts), ar)
 
 
@@ -162,13 +162,13 @@ def load_master_hashes() -> tuple[dict, dict]:
     _TOPO_SIGNATURES = {}
 
     # 1. Load Universal Hashes (12,900+ entries)
+    cached_topo_sigs = {}
     if os.path.exists(UNIVERSAL_HASH_MAP):
         try:
             with open(UNIVERSAL_HASH_MAP, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 _MASTER_HASHES.update(data.get("glyph_hashes", {}))
-                for k, v in data.get("topological_signatures", {}).items():
-                    _TOPO_SIGNATURES[k] = v
+                cached_topo_sigs = data.get("topological_signatures_v2", {})
         except Exception as e:
             print(f"[Font Mapper] Error loading universal hashes: {e}")
 
@@ -181,15 +181,21 @@ def load_master_hashes() -> tuple[dict, dict]:
             except Exception:
                 pass
 
-    # 3. If master hashes empty or missing, decompile reference fonts dynamically
-    if len(_MASTER_HASHES) < 1000:
+    # 3. If cached v2 topo signatures are available and master hashes populated, use them
+    if cached_topo_sigs and len(_MASTER_HASHES) >= 1000:
+        _TOPO_SIGNATURES.update(cached_topo_sigs)
+    else:
+        # Build reference font hashes and topological signatures deterministically
         font_candidates = []
         if os.path.exists(REFERENCE_FONTS_DIR):
-            for fname in os.listdir(REFERENCE_FONTS_DIR):
+            for fname in sorted(os.listdir(REFERENCE_FONTS_DIR)):
                 if fname.lower().endswith(".ttf"):
                     font_candidates.append(os.path.join(REFERENCE_FONTS_DIR, fname))
         if os.path.exists(RACHANA_FONT_PATH) and RACHANA_FONT_PATH not in font_candidates:
             font_candidates.append(RACHANA_FONT_PATH)
+
+        from collections import defaultdict
+        topo_multi_map = defaultdict(set)
 
         for font_path in font_candidates:
             try:
@@ -209,17 +215,27 @@ def load_master_hashes() -> tuple[dict, dict]:
                         sig = get_glyph_topology_signature(rg, ref_glyf)
                         if sig:
                             sig_key = str(sig)
-                            if sig_key not in _TOPO_SIGNATURES:
-                                _TOPO_SIGNATURES[sig_key] = g2u[gname]
-                            if sig not in _TOPO_SIGNATURES:
-                                _TOPO_SIGNATURES[sig] = g2u[gname]
+                            topo_multi_map[sig_key].add(g2u[gname])
             except Exception as e:
                 print(f"[Font Mapper] Error building hashes from {font_path}: {e}")
+
+        # Retain ONLY unambiguous topological signatures (maps to exactly 1 distinct Unicode character)
+        ambiguous_count = 0
+        for sig_key, chars in topo_multi_map.items():
+            if len(chars) == 1:
+                _TOPO_SIGNATURES[sig_key] = next(iter(chars))
+            else:
+                ambiguous_count += 1
+
+        print(f"[Font Mapper] Built {len(_TOPO_SIGNATURES)} unambiguous topological signatures (filtered out {ambiguous_count} ambiguous signatures).", flush=True)
 
         # Save to UNIVERSAL_HASH_MAP for fast subsequent startup
         try:
             with open(UNIVERSAL_HASH_MAP, "w", encoding="utf-8") as f:
-                json.dump({"glyph_hashes": _MASTER_HASHES, "topological_signatures": {str(k): v for k, v in _TOPO_SIGNATURES.items()}}, f, ensure_ascii=False)
+                json.dump({
+                    "glyph_hashes": _MASTER_HASHES,
+                    "topological_signatures_v2": _TOPO_SIGNATURES
+                }, f, ensure_ascii=False)
         except Exception as e:
             print(f"[Font Mapper] Could not save universal hashes: {e}")
 
@@ -283,9 +299,12 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
         for c_code, gn in cmap.items():
             gname_to_codes.setdefault(gn, []).append(c_code)
 
-        def _assign_mapping(gid, gname, text):
+        resolution_counts = {"exact_hash": 0, "topo_sig": 0, "legacy_shree": 0}
+
+        def _assign_mapping(gid, gname, text, source="exact_hash"):
             cid_to_unicode[gid] = text
             cid_to_unicode[str(gid)] = text
+            resolution_counts[source] = resolution_counts.get(source, 0) + 1
             for code in gname_to_codes.get(gname, []):
                 cid_to_unicode[code] = text
                 cid_to_unicode[str(code)] = text
@@ -307,17 +326,17 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
             # 1. Exact coordinate hash match
             h = hash_glyph_coordinates(glyph, glyf)
             if h and h in master_hashes:
-                _assign_mapping(gid, gname, master_hashes[h])
+                _assign_mapping(gid, gname, master_hashes[h], source="exact_hash")
                 continue
 
-            # 2. Topological signature match (for minor version nudges)
+            # 2. Topological signature match (only unambiguous matches)
             sig = get_glyph_topology_signature(glyph, glyf)
             if sig:
                 sig_key = str(sig)
                 if sig in topo_sigs:
-                    _assign_mapping(gid, gname, topo_sigs[sig])
+                    _assign_mapping(gid, gname, topo_sigs[sig], source="topo_sig")
                 elif sig_key in topo_sigs:
-                    _assign_mapping(gid, gname, topo_sigs[sig_key])
+                    _assign_mapping(gid, gname, topo_sigs[sig_key], source="topo_sig")
 
         # 3. Dedicated legacy Shree-Lipi fallback by font family name
         if any(k in basefont.lower() for k in ("shree", "shreemal")):
@@ -333,17 +352,18 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
                             raw_ch = parts[0]
                             uni_val = parts[1]
                             code_val = ord(raw_ch)
-                            cid_to_unicode.setdefault(code_val, uni_val)
-                            cid_to_unicode.setdefault(str(code_val), uni_val)
-                            cid_to_unicode.setdefault(raw_ch, uni_val)
-                            if code_val in cmap:
-                                gn = cmap[code_val]
-                                if gn in glyph_order:
-                                    g_id = glyph_order.index(gn)
-                                    cid_to_unicode.setdefault(g_id, uni_val)
-                                    cid_to_unicode.setdefault(str(g_id), uni_val)
+                            gn = cmap.get(code_val, "")
+                            _assign_mapping(code_val, gn, uni_val, source="legacy_shree")
+                            if gn and gn in glyph_order:
+                                g_id = glyph_order.index(gn)
+                                _assign_mapping(g_id, gn, uni_val, source="legacy_shree")
                 except Exception as ex:
                     print(f"[Font Mapper] Error loading Shree fallback map: {ex}")
+
+        print(f"[Font Mapper] Indexed font '{basefont}': {len(cid_to_unicode)} mappings "
+              f"({resolution_counts['exact_hash']} exact_hash, "
+              f"{resolution_counts['topo_sig']} topo_sig, "
+              f"{resolution_counts['legacy_shree']} legacy_shree)", flush=True)
 
     except Exception as e:
         print(f"[Font Mapper] Error indexing font {basefont}: {e}")
@@ -354,7 +374,7 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
     return cid_to_unicode
 
 
-def get_or_create_font_map(doc: pymupdf.Document, page_idx: int) -> dict:
+def get_or_create_font_map(doc: pymupdf.Document, page_idx: int, affected_texts: list[str] = None) -> dict:
     """
     Detects all Indic/Malayalam subset fonts on a page and returns their
     CID/GID -> Unicode mapping.
@@ -404,20 +424,34 @@ def get_or_create_font_map(doc: pymupdf.Document, page_idx: int) -> dict:
             cid_to_correct = build_font_map_from_buffer(buffer, basefont)
 
             # 2. If shape matching yields low coverage (< 10 glyphs) and Gemini is active,
-            # autonomously analyze the unrecognized font and install it permanently!
+            # autonomously analyze the unrecognized font and validate before committing!
             enable_gemini = os.getenv("ENABLE_GEMINI", "true").lower() in ("true", "1", "yes")
             if (not cid_to_correct or len(cid_to_correct) < 10) and enable_gemini:
                 try:
-                    from .font_analyzer import analyze_and_install_font
-                    print(f"[Font Mapper] Unrecognized font '{basefont}' detected. Running autonomous analysis and installation...", flush=True)
-                    analysis_res = analyze_and_install_font(basefont, buffer)
+                    from .font_analyzer import analyze_font_map
+                    from .font_installer import validate_and_commit_font_map
+                    print(f"[Font Mapper] Unrecognized font '{basefont}' detected. Running autonomous analysis...", flush=True)
+                    analysis_res = analyze_font_map(basefont, buffer)
                     if analysis_res.get("status") == "success":
-                        cid_to_correct = analysis_res.get("mappings", {})
-                        print(f"[Font Mapper] Successfully analyzed and installed font '{basefont}' with {len(cid_to_correct)} glyphs!", flush=True)
+                        proposed_map = analysis_res.get("proposed_mapping", {})
+                        eval_texts = affected_texts or [b[4] for b in page.get_text("blocks") if len(b) > 4 and b[4].strip()]
+                        committed = validate_and_commit_font_map(
+                            font_hash=font_data_hash,
+                            font_name=basefont,
+                            font_buffer=buffer,
+                            proposed_mapping=proposed_map,
+                            affected_question_texts=eval_texts,
+                            source="gemini_autonomous"
+                        )
+                        if committed:
+                            cid_to_correct = proposed_map
+                            print(f"[Font Mapper] Successfully validated and committed font '{basefont}' with {len(cid_to_correct)} glyphs!", flush=True)
+                        else:
+                            print(f"[Font Mapper] Autonomous font map for '{basefont}' rejected by validation gate. Not committed.", flush=True)
                 except Exception as ex:
                     print(f"[Font Mapper] Autonomous font analysis failed: {ex}", flush=True)
 
-            if cid_to_correct:
+            if cid_to_correct and not os.path.exists(cache_file):
                 try:
                     with open(cache_file, "w", encoding="utf-8") as cf:
                         json.dump(cid_to_correct, cf, ensure_ascii=False, indent=2)
