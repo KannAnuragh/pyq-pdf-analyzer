@@ -196,3 +196,26 @@ body {
 .spin {
   animation: spin 1s linear infinite;
 }
+
+/* Mathematical Equation and Diagram Image Styling */
+.inline-math-img {
+  display: inline-block;
+  vertical-align: -0.3em;
+  background: #ffffff;
+  border-radius: 4px;
+  padding: 2px 4px;
+  margin: 0 3px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+img[alt="diagram"] {
+  max-width: 100%;
+  height: auto;
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+

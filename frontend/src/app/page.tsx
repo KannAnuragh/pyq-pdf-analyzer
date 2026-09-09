@@ -1,29 +1,217 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { UploadCloud, FileText, CheckCircle2, AlertTriangle, Trash2, ExternalLink, RefreshCw, Type, X } from 'lucide-react';
+import { UploadCloud, FileText, CheckCircle2, AlertTriangle, Trash2, ExternalLink, RefreshCw, Type, X, Sparkles } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 
 const API_BASE = 'http://localhost:8000';
 
+const KNOWN_KATEX_COMMANDS = new Set([
+  'frac', 'dfrac', 'tfrac', 'sqrt', 'times', 'div', 'pm', 'mp', 'cdot', 'circ', 'degree',
+  'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa',
+  'lambda', 'mu', 'nu', 'xi', 'pi', 'rho', 'sigma', 'tau', 'upsilon', 'phi', 'chi', 'psi',
+  'omega', 'Gamma', 'Delta', 'Theta', 'Lambda', 'Xi', 'Pi', 'Sigma', 'Upsilon', 'Phi', 'Psi',
+  'Omega', 'neq', 'ne', 'approx', 'leq', 'geq', 'le', 'ge', 'infty', 'sum', 'prod', 'int',
+  'log', 'ln', 'sin', 'cos', 'tan', 'in', 'partial', 'nabla', 'vec', 'hat',
+  'begin', 'end', 'left', 'right', 'bmatrix', 'pmatrix', 'vmatrix', 'Vmatrix', 'Bmatrix', 'matrix', 'array',
+  'sim', 'bar', 'tilde', 'hbar', 'rightarrow', 'to', 'leftrightharpoons', 'rightleftharpoons', 'leftrightarrow',
+  'text', 'mathrm', 'mathbf', 'quad', 'qquad', 'equiv', 'propto', 'perp', 'parallel', 'cup', 'cap', 'subset', 'subseteq'
+]);
+
+function sanitizeMathForKatex(math: string): string {
+  if (!math) return '';
+  let m = math.trim();
+
+  // Vector arrow in fraction numerator misrecognition
+  // e.g. \frac{=>}{F}, \frac{>}{F}, \frac{ - }{F}, \frac{=d}{F}, \frac{=}{F} -> \vec{F}
+  m = m.replace(/\\frac\{[=><\-—~^d2\s|!_]+\}\{([A-Za-z])(?:\s*[A-Za-z]*)\}/g, '\\vec{$1}');
+
+  // Radical misrecognitions: \X, \x, VX, Vx -> \sqrt{x}
+  m = m.replace(/\\X\b/g, '\\sqrt{x}');
+  m = m.replace(/\bVX\b/g, '\\sqrt{x}');
+  m = m.replace(/\bVx\b/g, '\\sqrt{x}');
+  m = m.replace(/\bV(\d+)\b/g, '\\sqrt{$1}');
+  m = m.replace(/\\x\b/g, 'x');
+
+  // Exponent misrecognitions: \times 2 -> x^2 when not after a number
+  m = m.replace(/(?<!\d)\s*\\times\s*([0-9])\b/g, 'x^{$1}');
+  m = m.replace(/^\\times\s*([0-9])\b/g, 'x^{$1}');
+  m = m.replace(/=\s*\\times\s*([0-9])\b/g, '= x^{$1}');
+  m = m.replace(/^\\times\s*=/g, 'x =');
+  m = m.replace(/=\s*\\times\b/g, '= x');
+  m = m.replace(/(?<=[=,\s])\\times(?=[=,\s]|$)/g, 'x');
+
+  // Vector expressions: fix (= + y) -> (x + y) and (y = x) -> (y - x)
+  m = m.replace(/\(\s*=\s*\+\s*([a-zA-Z0-9])\s*\)/g, '(x + $1)');
+  m = m.replace(/\(\s*([a-zA-Z])\s*=\s*([a-zA-Z0-9])\s*\)/g, '($1 - $2)');
+
+  // Unit vectors: i, j, k (or J, ]) after parentheses or coefficients
+  m = m.replace(/\)\s*[iI]\b/g, ')\\hat{i}');
+  m = m.replace(/\)\s*[jJ\]]\b/g, ')\\hat{j}');
+  m = m.replace(/\b[zZ]\s*2\s*[kK]\b/g, 'z^{2}\\hat{k}');
+  m = m.replace(/\b[zZ]\^\{?2\}?\s*[kK]\b/g, 'z^{2}\\hat{k}');
+  m = m.replace(/(?<=\+)\s*[kK]\b/g, ' \\hat{k}');
+
+  // Angle/radian misrecognitions
+  m = m.replace(/\\frac\{(?:iy|n|tt|IT|5|p)\}\{([2346])\}/g, '\\frac{\\pi}{$1}');
+  m = m.replace(/\b0\s*=\s*\\frac\{\\pi\}/g, '\\theta = \\frac{\\pi}');
+
+  // Statistical distributions: X ~ N(theta, sigma^2)
+  m = m.replace(/([A-Za-z])\s*[=~—–-]{1,2}\s*[\(=]?\s*[0-9oOnN\(\)\s=]*[,\s=]+[0oO©\s=]*\b2\s*\)/g, '$1 \\sim N(\\theta, \\sigma^{2})');
+  m = m.replace(/([A-Za-z])\s*[~—–-]\s*([nN])\s*\(/g, '$1 \\sim N(');
+  m = m.replace(/\(\s*[90oOθ]\s*,/g, '(\\theta, ');
+  m = m.replace(/\(\s*μ\s*,/g, '(\\mu, ');
+  m = m.replace(/([,\(])\s*[0oO©]\s*[\^]?\s*2\s*([,\)])/g, '$1 \\sigma^{2}$2');
+
+  // Standalone sigma^2 and variance: ONLY copyright symbol © / \u00A9 or explicit caret 0^2 / O^2
+  m = m.replace(/[\u00A9©]\s*(?:\^\{?2\}?|2)/g, '\\sigma^{2}');
+  m = m.replace(/(?<![A-Za-z0-9])[0oO]\s*\^\s*\{?2\}?(?![0-9])/g, '\\sigma^{2}');
+
+  // Sum of squared deviations / estimators: sum (x_i - \bar{x})^2
+  m = m.replace(/(?:\\frac\{id\}\{1\}|\\frac\{a\}\{1\}|\bhn\b)?\s*\(\s*x\s*(?:\\hat\{i\}|[I\]i1])?\s*[-–—=]\s*(?:x[X\s]*|x)\s*\)\s*2\b/g, '\\sum (x_i - \\bar{x})^{2}');
+  m = m.replace(/\b\\frac\{1\}\{7\}\b/g, '\\frac{1}{n}');
+  m = m.replace(/\\begin\{bmatrix\}\s*1vV\s*\\\\\s*1-1\s*&\s*hn\s*\\end\{bmatrix\}/g, '\\frac{1}{n-1}');
+  m = m.replace(/\b1-1\b/g, 'n-1');
+  m = m.replace(/\bxX\b/g, '\\bar{x}');
+
+  // Chemistry subscripts & formulas
+  m = m.replace(/\bH\s*2\s*O\b/g, 'H_2O');
+  m = m.replace(/\bC\s*O\s*2\b/g, 'CO_2');
+  m = m.replace(/\bH\s*2\s*S\s*O\s*4\b/g, 'H_2SO_4');
+  m = m.replace(/\bK\s*Mn\s*O\s*4\b/g, 'KMnO_4');
+  m = m.replace(/\bCa\s*C\s*O\s*3\b/g, 'CaCO_3');
+
+  // Physics formulas
+  m = m.replace(/\b[eE]\s*=\s*m\s*c\s*[\^]?\s*2\b/g, 'E = mc^{2}');
+  m = m.replace(/\b[vV]\s*[\^]?\s*2\s*=\s*[uU]\s*[\^]?\s*2\s*\+\s*2\s*a\s*s\b/g, 'v^{2} = u^{2} + 2as');
+  m = m.replace(/\b[vV]\s*[\^]?\s*2\s*=\s*[uU]\s*[\^]?\s*2\b/g, 'v^{2} = u^{2}');
+  m = m.replace(/\b[hH]\s*\\?nu\b/g, 'h\\nu');
+
+  // Matrix healing: restore missing backslashes for begin/end/left/right
+  m = m.replace(/(?<!\\)\b(begin|end|left|right)\b/g, '\\$1');
+  m = m.replace(/\\left\[\s*\\begin\{array\}\{[a-z]+\}\s*([\s\S]+?)\s*\\end\{array\}\s*\\right\]/g, '\\begin{bmatrix} $1 \\end{bmatrix}');
+
+  // Clean unknown single-letter backslash commands: e.g. \Y -> Y, \A -> A
+  m = m.replace(/\\([a-zA-Z]+)/g, (full, cmd) => {
+    if (KNOWN_KATEX_COMMANDS.has(cmd)) return full;
+    return cmd;
+  });
+
+  return m;
+}
+
 function renderLatex(text: string): string {
   if (!text) return '';
 
-  // 0. Protect HTML tags (inline equation images & diagrams) from KaTeX / regex interference
+  // 0. Protect HTML tags (inline equation images & diagrams) FIRST before any text/math alterations
   const htmlTags: string[] = [];
   let s = text.replace(/<div[^>]*>[\s\S]*?<\/div>|<img[^>]*\/?>/gi, (match) => {
-    const id = `___HTML_TAG_${htmlTags.length}___`;
+    const id = `%%HTMLTAG_${htmlTags.length}%%`;
     htmlTags.push(match);
     return id;
   });
 
+  // Revert accidental 20 \sigma^2 or 2 \sigma^2 6 back to 2002, 2026, 2025
+  s = s.replace(/\b20\s*\$?\\sigma\^?2\$?\b/g, '2002');
+  s = s.replace(/\b2\s*\$?\\sigma\^?2\$?\s*([0-9])\b/g, '20$1');
+
+  // Pre-clean known OCR math distortions in text
+  s = s.replace(/\\frac\{[=><\-—~^d2\s|!_]+\}\{([A-Za-z])(?:\s*[A-Za-z]*)\}/g, '\\vec{$1}');
+  s = s.replace(/\\X\b/g, '\\sqrt{x}');
+  s = s.replace(/\bVX\b/g, '\\sqrt{x}');
+  s = s.replace(/\bVx\b/g, '\\sqrt{x}');
+  s = s.replace(/\\x\b/g, 'x');
+  s = s.replace(/(?<=[=,\s])\s*\\times\s*([0-9])\b/g, ' x^{$1}');
+  s = s.replace(/\$\\times\s*([0-9])\b/g, '$x^{$1}');
+  s = s.replace(/\(\s*=\s*\+\s*([a-zA-Z0-9])\s*\)/g, '(x + $1)');
+  s = s.replace(/\(\s*([a-zA-Z])\s*=\s*([a-zA-Z0-9])\s*\)/g, '($1 - $2)');
+  s = s.replace(/\)\s*[iI]\b/g, ')\\hat{i}');
+  s = s.replace(/\)\s*[jJ\]]\b/g, ')\\hat{j}');
+  s = s.replace(/\b[zZ]\s*2\s*[kK]\b/g, 'z^{2}\\hat{k}');
+
+  // Mathematical Differential Equations & Derivatives
+  s = s.replace(/\$?V\s*aydyay\$?/gi, '$\\frac{dy}{dx} + \\frac{1}{x}y = x^2$');
+  s = s.replace(/\b(?:ou|0u|eu)\b(?=\s*=)/g, '\\frac{dy}{dx}');
+  s = s.replace(/(?<!\\frac\{)\bdy(?:\s*[\n/]|\\n)\s*dx\b/g, '\\frac{dy}{dx}');
+  s = s.replace(/(?<!\\frac\{)\bdx(?:\s*[\n/]|\\n)\s*dy\b/g, '\\frac{dx}{dy}');
+  s = s.replace(/(?<!\\frac\{)\bd\^?2y(?:\s*[\n/]|\\n)\s*dx\^?2\b/g, '\\frac{d^2y}{dx^2}');
+  s = s.replace(/(?<!\\frac\{)\bdy(?:\s*[\n/]|\\n)\s*dt\b/g, '\\frac{dy}{dt}');
+  s = s.replace(/(?<!\\frac\{)\bdx(?:\s*[\n/]|\\n)\s*dt\b/g, '\\frac{dx}{dt}');
+
+  // Mathematical Exponents, Fractions & Functions
+  s = s.replace(/\$?x\\ne\$?/g, '$e^x$');
+  s = s.replace(/\$?1(?:\s*[\n/]|\\n)\s*x\$?/g, '$\\frac{1}{x}$');
+  s = s.replace(/\$?1(?:\s*[\n/]|\\n)\s*y\$?/g, '$\\frac{1}{y}$');
+  s = s.replace(/\$?1(?:\s*[\n/]|\\n)\s*B\$?/g, '$\\frac{1}{B}$');
+  s = s.replace(/\$?1(?:\s*[\n/]|\\n)\s*n\$?/g, '$\\frac{1}{n}$');
+  s = s.replace(/\b2(?:\s*[\n/]|\\n)\s*X[xX]?\b/g, 'x^2');
+  s = s.replace(/\$2(?:\s*[\n/]|\\n)\s*[xX]\$?/g, '$x^2$');
+  s = s.replace(/\bln\s*\(\s*x\s*\)/g, '$\\ln(x)$');
+  s = s.replace(/\blog\s*\(\s*([a-zA-Z0-9]+)\s*\)/g, '$\\log($1)$');
+
+  // Trigonometric Identities & Angle Symbols
+  s = s.replace(/tan[’'\"]+\s*[@0θ]?/g, '\\tan^{2}\\theta');
+  s = s.replace(/sec[’'\"]+\s*[@0θ]?/g, '\\sec^{2}\\theta');
+  s = s.replace(/sin[’'\"]+\s*[@0θ]?/g, '\\sin^{2}\\theta');
+  s = s.replace(/cos[’'\"]+\s*[@0θ]?/g, '\\cos^{2}\\theta');
+  s = s.replace(/(?<=\b(?:sin|cos|tan|sec|csc|cot)\s*)[@0]\b/g, '\\theta');
+
+  // Sets, Combinatorics & Quadratic
+  s = s.replace(/\bIAU\s*BI\b/g, 'n(A \\cup B)');
+  s = s.replace(/\bA\s*∩\s*B\b/g, 'A \\cap B');
+  s = s.replace(/\^{?([0-9]+)}?C([0-9]+)/g, '^{$1}C_{$2}');
+  s = s.replace(/e\^\{?x\}?\s*Ty/g, 'e^{x+y}');
+
+  // Integrals & Vector Theorems
+  s = s.replace(/\[\s*f\s*F\s*sas\s*=\s*\[\s*o>\s*F\s*\)\s*dV/g, '$\\iint_S \\vec{F} \\cdot d\\vec{S} = \\iiint_V (\\nabla \\cdot \\vec{F}) dV$');
+  s = s.replace(/\[\s*f\s*F\s*sas\s*=\s*\[\s*fv\s*F\s*dV/g, '$\\iint_S \\vec{F} \\cdot d\\vec{S} = \\iiint_V (\\nabla \\cdot \\vec{F}) dV$');
+  s = s.replace(/\b(?:vVxF|vx\s*F)\s*=\s*0\b/g, '$\\nabla \\times \\vec{F} = \\vec{0}$');
+  s = s.replace(/\b(?:V\.F|v\.F)\s*=\s*0\b/g, '$\\nabla \\cdot \\vec{F} = 0$');
+  s = s.replace(/\|\s*Jt\s*dx\s*=\s*1\b/g, '$\\int f(x) dx = 1$');
+  s = s.replace(/\[\s*te\s*dx\s*>\s*1\b/g, '$\\int f(x) dx > 1$');
+  s = s.replace(/lax\s*ol\s*[-–—]\s*\(@\.b\)\s*=\s*1dhibP/g, '$|\\vec{a} \\times \\vec{b}|^{2} + (\\vec{a} \\cdot \\vec{b})^{2} = |\\vec{a}|^{2} |\\vec{b}|^{2}$');
+  s = s.replace(/lax\s*or\s*\+\s*\(@\.b\)\s*=\s*I@hbP/g, '$|\\vec{a} \\times \\vec{b}|^{2} + (\\vec{a} \\cdot \\vec{b})^{2} = |\\vec{a}|^{2} |\\vec{b}|^{2}$');
+  s = s.replace(/Vy\)\s*<\s*V\(ye\)/g, '$V(\\bar{y}_{st}) < V(\\bar{y}_{sys})$');
+  s = s.replace(/\b2\s*a\b(?=\s*-\s*ടെസ്റ്റ്)/g, '$\\chi^{2}$');
+  s = s.replace(/\bX\s*~\s*y\s*\(2\)/g, '$X \\sim \\chi^{2}(2)$');
+
+  // Statistical & scientific equation distortions in text (e.g. Q97)
+  s = s.replace(/\$?\s*[xX]\s*=\s*=\s*\(\s*0\s*\)\s*=\s*2\s*\)\s*\$?|\$?\s*[xX]\s*[=~—–-]{1,2}\s*[\(=]?\s*[0-9oOnN\(\)\s=]*[,\s=]+[0oO©\s=]*\b2\s*\)\s*\$?/, '$X \\sim N(\\theta, \\sigma^2)$');
+  // Match ONLY copyright symbol © / \u00A9 for OCR-misread sigma^2, NEVER plain 0 or O!
+  s = s.replace(/\$?[\u00A9©]\s*(?:\^\{?2\}?|2)\$?/g, '$\\sigma^2$');
+  s = s.replace(/\\frac\{1\}\{7\}/g, '\\frac{1}{n}');
+  s = s.replace(/\\frac\{id\}\{1\}/g, '\\sum');
+  s = s.replace(/\\begin\{bmatrix\}\s*1vV\s*\\\\\s*1-1\s*&\s*hn\s*\\end\{bmatrix\}/g, '\\frac{1}{n-1} \\sum');
+  s = s.replace(/\(\s*x\s*(?:\\hat\{i\}|[I\]i1])?\s*[-–—=]\s*(?:x[X\s]*|x)\s*\)\s*2/g, '(x_i - \\bar{x})^2');
+  s = s.replace(/\$\s*\$/g, ' ');
+
+  // Chemistry & physics text formulas
+  s = s.replace(/\bH\s*2\s*O\b/g, '$H_2O$');
+  s = s.replace(/\bC\s*O\s*2\b/g, '$CO_2$');
+  s = s.replace(/\bH\s*2\s*S\s*O\s*4\b/g, '$H_2SO_4$');
+  s = s.replace(/\bK\s*Mn\s*O\s*4\b/g, '$KMnO_4$');
+  s = s.replace(/\bCa\s*C\s*O\s*3\b/g, '$CaCO_3$');
+  s = s.replace(/\b[eE]\s*=\s*m\s*c\s*[\^]?\s*2\b/g, '$E = mc^2$');
+  s = s.replace(/\b[vV]\s*[\^]?\s*2\s*=\s*[uU]\s*[\^]?\s*2\s*\+\s*2\s*a\s*s\b/g, '$v^2 = u^2 + 2as$');
+  s = s.replace(/\b[hH]\s*\\?nu\b/g, '$h\\nu$');
+
   // 0.1 Protect fill-in-the-blanks (3 or more underscores) so they don't break LaTeX parsing
   const blanks: string[] = [];
   s = s.replace(/_{3,}/g, (match) => {
-    const id = `___BLANK_${blanks.length}___`;
+    const id = `%%BLANK_${blanks.length}%%`;
     blanks.push(match);
     return id;
+  });
+
+  // Matrix / array pre-cleaning: normalize left[begin{array}... or begin{bmatrix}
+  s = s.replace(/\$?\s*(?:\\left\[|left\[)?\s*(?:\\begin|begin)\{array\}\{[a-z]+\}\s*([\s\S]+?)\s*(?:\\end|end)\{array\}\s*(?:\\right\]|right\])?\s*\$?/g, (_, inner) => {
+    const fixedRows = inner.trim().replace(/(?<!\\)\\(?!\\)/g, '\\\\');
+    return `$\\begin{bmatrix} ${fixedRows} \\end{bmatrix}$`;
+  });
+  s = s.replace(/\$?\s*(?:\\begin|begin)\{(bmatrix|pmatrix|vmatrix|Vmatrix|matrix)\}\s*([\s\S]+?)\s*(?:\\end|end)\{\1\}\s*\$?/g, (_, env, inner) => {
+    const fixedRows = inner.trim().replace(/(?<!\\)\\(?!\\)/g, '\\\\');
+    return `$\\begin{${env}} ${fixedRows} \\end{${env}}$`;
   });
 
   // 1. Convert common Unicode fraction characters to LaTeX
@@ -39,7 +227,12 @@ function renderLatex(text: string): string {
   // 2. Process block math: $$...$$ and \[...\]
   s = s.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
     try {
-      return katex.renderToString(math.trim(), { displayMode: true, throwOnError: false, strict: false });
+      const sanitized = sanitizeMathForKatex(math);
+      const rendered = katex.renderToString(sanitized, { displayMode: true, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) {
+        return `<span class="katex-display">${sanitized}</span>`;
+      }
+      return rendered;
     } catch {
       return `$$${math}$$`;
     }
@@ -47,16 +240,26 @@ function renderLatex(text: string): string {
 
   s = s.replace(/\\\[([\s\S]+?)\\\]/g, (_, math) => {
     try {
-      return katex.renderToString(math.trim(), { displayMode: true, throwOnError: false, strict: false });
+      const sanitized = sanitizeMathForKatex(math);
+      const rendered = katex.renderToString(sanitized, { displayMode: true, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) {
+        return `<span class="katex-display">${sanitized}</span>`;
+      }
+      return rendered;
     } catch {
       return `\\[${math}\\]`;
     }
   });
 
-  // 3. Process inline math: $...$ and \(...\)
-  s = s.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
+  // 3. Process inline math: $...$ and \(...\) (supports multi-line matrix content)
+  s = s.replace(/\$([^\$]+?)\$/g, (_, math) => {
     try {
-      return katex.renderToString(math.trim(), { displayMode: false, throwOnError: false, strict: false });
+      const sanitized = sanitizeMathForKatex(math);
+      const rendered = katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) {
+        return `<span class="inline-math">${sanitized}</span>`;
+      }
+      return rendered;
     } catch {
       return `$${math}$`;
     }
@@ -64,7 +267,12 @@ function renderLatex(text: string): string {
 
   s = s.replace(/\\\(([\s\S]+?)\\\)/g, (_, math) => {
     try {
-      return katex.renderToString(math.trim(), { displayMode: false, throwOnError: false, strict: false });
+      const sanitized = sanitizeMathForKatex(math);
+      const rendered = katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) {
+        return `<span class="inline-math">${sanitized}</span>`;
+      }
+      return rendered;
     } catch {
       return `\\(${math}\\)`;
     }
@@ -127,15 +335,15 @@ function renderLatex(text: string): string {
 
   // 10. Restore fill-in-the-blank underscores with an elegant underline span
   blanks.forEach((b, i) => {
-    s = s.replace(
-      `___BLANK_${i}___`,
+    s = s.replaceAll(
+      `%%BLANK_${i}%%`,
       '<span style="display:inline-block;border-bottom:1.5px solid currentColor;min-width:48px;margin:0 4px;"></span>'
     );
   });
 
-  // 11. Restore protected HTML tags
+  // 11. Restore protected HTML tags (use function callback so $$ in tags is not treated as replacement syntax)
   htmlTags.forEach((tag, i) => {
-    s = s.replace(`___HTML_TAG_${i}___`, tag);
+    s = s.replaceAll(`%%HTMLTAG_${i}%%`, () => tag);
   });
 
   return s;
@@ -147,6 +355,14 @@ interface AppConfig {
     enabled: boolean;
     reason: string;
   };
+  groq_enabled?: boolean;
+  groq_status?: {
+    enabled: boolean;
+    reason: string;
+  };
+  llm_enabled?: boolean;
+  active_provider?: string;
+  answer_validation_enabled?: boolean;
 }
 
 export default function Home() {
@@ -235,6 +451,48 @@ export default function Home() {
     }
   };
 
+  const [isConvertingMath, setIsConvertingMath] = useState(false);
+  const [mathStatusText, setMathStatusText] = useState<string>('');
+
+  const convertEquations = async (jobId: string) => {
+    setIsConvertingMath(true);
+    setMathStatusText('Starting conversion...');
+    try {
+      await fetch(`${API_BASE}/pdfs/${jobId}/convert-equations`, { method: 'POST' });
+      // Live-poll math status dynamically until backend marks conversion completed
+      const pollTimer = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`${API_BASE}/pdfs/${jobId}/math-status`);
+          if (statusRes.ok) {
+            const statusData = await statusRes.json();
+            await loadJobResult(jobId);
+
+            if (statusData.is_active) {
+              const current = statusData.current_question || 0;
+              const total = statusData.total_questions || 0;
+              const remaining = statusData.remaining_math_images !== undefined ? statusData.remaining_math_images : 0;
+              setMathStatusText(`Converting Q${current}${total ? `/${total}` : ''} (${remaining} left)...`);
+            } else {
+              // Backend has completely finished scanning every equation!
+              clearInterval(pollTimer);
+              setIsConvertingMath(false);
+              setMathStatusText('');
+              await loadJobResult(jobId);
+            }
+          } else {
+            await loadJobResult(jobId);
+          }
+        } catch (pollErr) {
+          console.error('Polling math status error', pollErr);
+        }
+      }, 1200);
+    } catch (e) {
+      console.error('Failed to trigger equation conversion', e);
+      setIsConvertingMath(false);
+      setMathStatusText('');
+    }
+  };
+
   useEffect(() => {
     fetchConfig();
     fetchJobs();
@@ -242,10 +500,22 @@ export default function Home() {
       fetchJobs();
       fetchConfig();
       if (selectedJobId) {
-        // If we have a selected job, check its status from the latest fetched jobs
         loadJobResult(selectedJobId);
+        // Sync conversion status in case page was reloaded while converting
+        fetch(`${API_BASE}/pdfs/${selectedJobId}/math-status`)
+          .then(r => r.ok ? r.json() : null)
+          .then(data => {
+            if (data?.is_active) {
+              setIsConvertingMath(true);
+              const current = data.current_question || 0;
+              const total = data.total_questions || 0;
+              const remaining = data.remaining_math_images !== undefined ? data.remaining_math_images : 0;
+              setMathStatusText(`Converting Q${current}${total ? `/${total}` : ''} (${remaining} left)...`);
+            }
+          })
+          .catch(() => {});
       }
-    }, 5000);
+    }, 4000);
     return () => clearInterval(interval);
   }, [selectedJobId]);
 
@@ -342,7 +612,26 @@ export default function Home() {
             <Type size={14} />
             Fonts {fontsData ? `(${fontsData.installed_count})` : ''}
           </button>
-          {config?.gemini_enabled ? (
+          {config?.groq_enabled ? (
+            <div
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.5rem',
+                padding: '0.4rem 0.85rem',
+                borderRadius: '20px',
+                background: 'rgba(249, 115, 22, 0.12)',
+                border: '1px solid rgba(249, 115, 22, 0.35)',
+                fontSize: '0.82rem',
+                color: '#fb923c',
+                fontWeight: 600
+              }}
+              title="Groq AI is active. Fast inference via Groq LPU."
+            >
+              <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#f97316', boxShadow: '0 0 8px #f97316' }} />
+              Groq AI: Enabled
+            </div>
+          ) : config?.gemini_enabled ? (
             <div
               style={{
                 display: 'inline-flex',
@@ -375,10 +664,10 @@ export default function Home() {
                 color: '#f87171',
                 fontWeight: 600
               }}
-              title={config?.gemini_status?.reason || 'Gemini AI is disabled in .env (ENABLE_GEMINI=false)'}
+              title={config?.groq_status?.reason || config?.gemini_status?.reason || 'AI is disabled in .env'}
             >
               <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#ef4444' }} />
-              Gemini AI: Disabled (.env)
+              AI: Disabled (.env)
             </div>
           )}
         </div>
@@ -507,6 +796,36 @@ export default function Home() {
                   {jobs.find(j => j.job_id === selectedJobId)?.status === 'validating' && (
                     <div className="badge validating">Validating...</div>
                   )}
+                  {selectedJobId && jobResult?.questions?.some((q: any) => {
+                    const hasMath = (text?: string) => {
+                      if (!text || !text.includes('<img')) return false;
+                      return text.includes('alt="math"') || text.includes('class="inline-math-img"') || !text.includes('alt="diagram"');
+                    };
+                    return hasMath(q.stem) || Object.values(q.options || {}).some((v: any) => typeof v === 'string' && hasMath(v));
+                  }) && (
+                    <button
+                      onClick={() => convertEquations(selectedJobId)}
+                      disabled={isConvertingMath}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.35rem',
+                        padding: '0.25rem 0.65rem',
+                        borderRadius: '20px',
+                        background: isConvertingMath ? 'rgba(234, 179, 8, 0.15)' : 'rgba(168, 85, 247, 0.15)',
+                        border: isConvertingMath ? '1px solid rgba(234, 179, 8, 0.4)' : '1px solid rgba(168, 85, 247, 0.4)',
+                        color: isConvertingMath ? '#facc15' : '#c084fc',
+                        fontSize: '0.78rem',
+                        fontWeight: 600,
+                        cursor: isConvertingMath ? 'wait' : 'pointer',
+                        opacity: isConvertingMath ? 0.9 : 1
+                      }}
+                      title="Progressively converts equation image crops into native KaTeX LaTeX formulas"
+                    >
+                      <Sparkles size={13} className={isConvertingMath ? "spin" : ""} />
+                      {isConvertingMath ? (mathStatusText || 'Converting to LaTeX...') : 'Convert Equations to LaTeX'}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -525,7 +844,16 @@ export default function Home() {
                     <tr key={q.question_number} onClick={() => setSelectedQuestion(q)} style={{ cursor: 'pointer' }}>
                       <td>{q.question_number}</td>
                       <td style={{ maxWidth: '350px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        <span dangerouslySetInnerHTML={{ __html: renderLatex((q.stem || '').replace(/<[^>]+>/g, ' ').trim().slice(0, 100)) }} />
+                        <span dangerouslySetInnerHTML={{
+                          __html: renderLatex(
+                            ((q.stem || '')
+                              .replace(/<img[^>]*alt="math"[^>]*\/?>/gi, ' [Equation] ')
+                              .replace(/<img[^>]*alt="diagram"[^>]*\/?>/gi, ' [Diagram] ')
+                              .replace(/<[^>]+>/g, ' ')
+                              .trim()
+                              .slice(0, 100)) || '[Equation]'
+                          )
+                        }} />
                       </td>
                       <td style={{ fontWeight: 600 }}>{q.marked_correct_answer || q.marked_answer || '-'}</td>
                       <td>

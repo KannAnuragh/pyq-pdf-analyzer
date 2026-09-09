@@ -6,6 +6,9 @@ import uuid
 import json
 import os
 import urllib.parse
+import threading
+import time
+import base64
 
 import pymupdf
 import re
@@ -15,10 +18,174 @@ from ..models import schemas
 
 router = APIRouter()
 
-from ..ingest.router import route_and_extract
+from ..ingest.router import route_and_extract, ocr_equation_clip, clean_latex_equation
 from ..graph.workflow import app_graph
 from ..graph.state import GraphState
-from ..graph.nodes import get_gemini_status, is_gemini_enabled, rescan_question_vision, _solve_single_block
+from ..graph.nodes import get_gemini_status, is_gemini_enabled, get_groq_status, is_groq_enabled, get_llm_status, is_llm_enabled, is_answer_validation_enabled, rescan_question_vision, _solve_single_block
+
+_math_conversion_tasks: dict[str, dict] = {}
+
+def _count_math_images(questions: list) -> int:
+    """Counts remaining equation images in questions (excluding genuine geometry diagrams)."""
+    cnt = 0
+    for q in questions:
+        for text in [q.get("stem", "")] + list(q.get("options", {}).values()):
+            if '<img' in text:
+                for m in re.finditer(r'<img[^>]*>', text):
+                    tag = m.group(0)
+                    if 'alt="diagram"' not in tag:
+                        cnt += 1
+    return cnt
+
+def _replace_math_images_in_text(text: str) -> tuple[str, bool]:
+    """Replaces equation and diagram image tags with LaTeX by running targeted OCR on each clip."""
+    if not text or '<img' not in text:
+        return text, False
+
+    # Match both standalone <img ... /> and wrapper <div ...><img ... /></div>
+    pattern = r'(?:<div[^>]*>\s*)?<img[^>]*src="data:image/png;base64,([^"]+)"[^>]*\/?>\s*(?:<\/div>)?'
+    matches = list(re.finditer(pattern, text, re.IGNORECASE))
+    if not matches:
+        return text, False
+
+    modified = False
+    new_text = text
+    for m in reversed(matches):
+        tag_str = m.group(0)
+        # Skip genuine geometry/drawing diagrams (e.g. alt="diagram" with large size)
+        if 'alt="diagram"' in tag_str and 'inline-math-img' not in tag_str:
+            try:
+                b64_chk = m.group(1).strip()
+                pad = len(b64_chk) % 4
+                if pad:
+                    b64_chk += '=' * (4 - pad)
+                img_bytes_chk = base64.b64decode(b64_chk)
+                from PIL import Image
+                chk_img = Image.open(io.BytesIO(img_bytes_chk))
+                cw, ch = chk_img.size
+                if cw > 180 and ch > 120:
+                    continue
+            except Exception:
+                pass
+
+        b64_str = m.group(1).strip()
+        try:
+            pad = len(b64_str) % 4
+            if pad:
+                b64_str += '=' * (4 - pad)
+            img_bytes = base64.b64decode(b64_str)
+            latex, _, _ = ocr_equation_clip(img_bytes)
+            clean_math = clean_latex_equation(latex)
+            if clean_math and clean_math != "$$":
+                new_text = new_text[:m.start()] + f" {clean_math} " + new_text[m.end():]
+                modified = True
+        except Exception as e:
+            print(f"[Progressive Math OCR] Tag parse failed: {e}", flush=True)
+
+    if modified:
+        new_text = re.sub(r' +', ' ', new_text).strip()
+
+    return new_text, modified
+
+
+def progressively_convert_equations_to_latex(job_id: str):
+    """
+    Progressively scans equation images in background and converts them to LaTeX.
+    Runs persistently across passes until every single equation is converted.
+    Updates the database per-question so the frontend live-updates in real-time.
+    """
+    db = database.SessionLocal()
+    try:
+        job = db.query(models.Job).filter(models.Job.id == job_id).first()
+        if not job or not job.result_json:
+            return
+
+        result_dict = json.loads(job.result_json)
+        questions = result_dict.get("questions", [])
+        if not questions:
+            return
+
+        initial_remaining = _count_math_images(questions)
+        _math_conversion_tasks[job_id] = {
+            "is_active": True,
+            "current_question": 0,
+            "total_questions": len(questions),
+            "remaining_math_images": initial_remaining,
+            "converted_count": 0,
+            "status": "running"
+        }
+
+        if initial_remaining == 0:
+            _math_conversion_tasks[job_id]["is_active"] = False
+            _math_conversion_tasks[job_id]["status"] = "completed"
+            return
+
+        print(f"[Progressive Math OCR] Starting background LaTeX conversion for Job {job_id} ({initial_remaining} equation clips)...", flush=True)
+
+        max_passes = 100
+        pass_num = 0
+        failed_passes_in_a_row = 0
+        while pass_num < max_passes:
+            pass_num += 1
+            any_converted_in_pass = False
+
+            for idx, q in enumerate(questions):
+                _math_conversion_tasks[job_id]["current_question"] = q.get("question_number", idx + 1)
+                updated_q = False
+
+                # Stem
+                new_stem, mod_stem = _replace_math_images_in_text(q.get("stem", ""))
+                if mod_stem:
+                    q["stem"] = new_stem
+                    updated_q = True
+
+                # Options
+                opts = q.get("options", {})
+                for k, v in list(opts.items()):
+                    new_v, mod_v = _replace_math_images_in_text(v)
+                    if mod_v:
+                        opts[k] = new_v
+                        updated_q = True
+
+                if updated_q:
+                    any_converted_in_pass = True
+                    _math_conversion_tasks[job_id]["converted_count"] += 1
+                    result_dict["questions"] = questions
+                    job.result_json = json.dumps(result_dict, ensure_ascii=False)
+                    db.commit()
+                    print(f"[Progressive Math OCR] Q{q.get('question_number')} converted to LaTeX", flush=True)
+
+                time.sleep(0.02)
+
+            remaining = _count_math_images(questions)
+            _math_conversion_tasks[job_id]["remaining_math_images"] = remaining
+            print(f"[Progressive Math OCR] Pass {pass_num} finished for Job {job_id}. Remaining equation clips: {remaining}", flush=True)
+
+            if remaining == 0:
+                break
+                
+            if not any_converted_in_pass:
+                failed_passes_in_a_row += 1
+                if failed_passes_in_a_row >= 5:
+                    print(f"[Progressive Math OCR] No equations converted for 5 passes, stopping.", flush=True)
+                    break
+            else:
+                failed_passes_in_a_row = 0
+
+        print(f"[Progressive Math OCR] All equations processed for Job {job_id}. Final remaining clips: {_count_math_images(questions)}.", flush=True)
+
+    except Exception as e:
+        print(f"[Progressive Math OCR] Error for Job {job_id}: {e}", flush=True)
+    finally:
+        if job_id in _math_conversion_tasks:
+            _math_conversion_tasks[job_id]["is_active"] = False
+            _math_conversion_tasks[job_id]["status"] = "completed"
+            try:
+                _math_conversion_tasks[job_id]["remaining_math_images"] = _count_math_images(questions)
+            except Exception:
+                pass
+        db.close()
+
 
 def get_job_file_path(job: models.Job) -> Optional[str]:
     """Resolves the physical file path across Docker and host environments."""
@@ -50,13 +217,21 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
                 file_path = resolved
 
         # 1. Ingestion
-        raw_text, ingest_p_tokens, ingest_c_tokens = route_and_extract(file_path)
+        ingest_result = route_and_extract(file_path)
+        raw_text = ingest_result["full_text"]
+        pages_metadata = ingest_result["pages"]
+        ingest_p_tokens = ingest_result["prompt_tokens"]
+        ingest_c_tokens = ingest_result["completion_tokens"]
         
         # 2. LangGraph Workflow Streaming
         initial_state = GraphState(
             file_path=file_path,
             raw_text=raw_text,
+            pages=pages_metadata,
             extracted_blocks=[],
+            quality_scores={},
+            repair_log=[],
+            vision_calls_count=0,
             processed_questions=[],
             summary={"total": 0, "validated": 0, "flagged": 0},
             token_usage={
@@ -135,6 +310,13 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
             job.status = "done"
             job.result_json = result.model_dump_json()
             db.commit()
+
+            # Slowly convert equation images to LaTeX in the background
+            threading.Thread(
+                target=progressively_convert_equations_to_latex,
+                args=(job_id,),
+                daemon=True
+            ).start()
             
     except Exception as e:
         print(f"Job {job_id} failed: {e}")
@@ -261,11 +443,93 @@ def delete_pdf(job_id: str, db: Session = Depends(database.get_db)):
 
 @router.get("/config")
 def get_app_config():
-    status = get_gemini_status()
+    gemini_st = get_gemini_status()
+    groq_st = get_groq_status()
+    llm_st = get_llm_status()
     return {
-        "gemini_enabled": status["enabled"],
-        "gemini_status": status
+        "gemini_enabled": gemini_st["enabled"],
+        "gemini_status": gemini_st,
+        "groq_enabled": groq_st["enabled"],
+        "groq_status": groq_st,
+        "llm_enabled": llm_st["enabled"],
+        "active_provider": llm_st.get("provider", "none"),
+        "answer_validation_enabled": is_answer_validation_enabled()
     }
+
+def is_cover_or_instruction_page(page_text: str) -> bool:
+    """Identifies cover, instructions, or syllabus pages that are not part of the question paper."""
+    has_inst = any(w in page_text for w in [
+        'j]¡SÇw°¥', 'നിർദ്ദേശങ്ങൾ', 'Instructions', 'INSTRUCTIONS',
+        'DSh|LYL¡À]W¥¨Oç', 'ഉദ്യോഗാർത്ഥികൾക്കുള്ള', 'CANDIDATES'
+    ])
+    has_booklet = any(w in page_text for w in [
+        'S\\Lh|kOñW', 'ചോദ്യപുസ്തക', 'Question Booklet', 'Alpha Code', 'AƒqSWLcV',
+        'Max. Marks', 'Maximum Marks', 'yopU :'
+    ])
+    return has_inst and has_booklet
+
+
+def find_question_page(doc, question_number: int, hint_page: int = None) -> int:
+    """Finds the true physical page containing question_number, skipping cover/instruction pages."""
+    if hint_page is not None and 0 <= hint_page < len(doc):
+        txt = doc[hint_page].get_text()
+        if not is_cover_or_instruction_page(txt):
+            if re.search(fr'(?:^|\n)\s*{question_number}\s*[\.\):-]', txt):
+                return hint_page
+
+    # Priority 1: Explicit 'Question N' or 'Q. N'
+    q_explicit = re.compile(fr'(?i)(?:^|\n)\s*(?:Question\s*|Q\.?\s*){question_number}\s*(?::\-?|[\.\):-])\s*')
+    for p in range(len(doc)):
+        txt = doc[p].get_text()
+        if is_cover_or_instruction_page(txt):
+            continue
+        if q_explicit.search(txt):
+            return p
+
+    # Priority 2: Question number followed by options (A, B, C, D) on the same page
+    q_with_opts = re.compile(fr'(?:^|\n)\s*{question_number}\s*[\.\):-]\s+.*?(?:^|\n|\s+)(?:\(?[A-D][\.\):-]|\([a-d]\))', re.DOTALL)
+    for p in range(len(doc)):
+        txt = doc[p].get_text()
+        if is_cover_or_instruction_page(txt):
+            continue
+        if q_with_opts.search(txt):
+            return p
+
+    # Priority 3: Fallback N. on a non-instruction page
+    q_fallback = re.compile(fr'(?:^|\n)\s*{question_number}\s*(?:[\.\)]|:-)\s+')
+    for p in range(len(doc)):
+        txt = doc[p].get_text()
+        if is_cover_or_instruction_page(txt):
+            continue
+        if q_fallback.search(txt):
+            return p
+
+    return None
+
+
+def get_question_crop_rect(page, question_number: int):
+    """Calculates tight bounding box Rect for the specified question on page."""
+    blocks = page.get_text("blocks")
+    start_y = None
+    end_y = None
+    
+    q_start_pat = re.compile(fr'(?:^|\n)\s*{question_number}\s*[\.\):-]\s+')
+    next_q_pat = re.compile(fr'(?:^|\n)\s*{question_number + 1}\s*[\.\):-]\s+')
+    
+    for b in blocks:
+        txt = b[4]
+        if start_y is None and q_start_pat.search(txt):
+            start_y = max(0, b[1] - 12)
+        elif start_y is not None and next_q_pat.search(txt):
+            end_y = b[1] - 5
+            break
+            
+    if start_y is not None:
+        if end_y is None:
+            end_y = max(start_y + 100, page.rect.height - 30)
+        return pymupdf.Rect(0, start_y, page.rect.width, end_y)
+    return None
+
 
 @router.post("/pdfs/{job_id}/rescan/{question_number}", response_model=schemas.QuestionResult)
 def rescan_question(job_id: str, question_number: int, db: Session = Depends(database.get_db)):
@@ -292,39 +556,30 @@ def rescan_question(job_id: str, question_number: int, db: Session = Depends(dat
     if target_q_idx == -1:
         raise HTTPException(status_code=404, detail=f"Question {question_number} not found in this job")
 
-    # 2. Find the page in the PDF
+    # 2. Find the true page in the PDF (skipping cover/instruction pages)
     try:
         doc = pymupdf.open(file_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to open PDF: {e}")
         
-    q_pattern_explicit = re.compile(fr'(?i)(?:^|\n)\s*(?:Question\s*|Q\.?\s*){question_number}\s*(?::\-?|[\.\):-])\s*')
-    q_pattern_fallback = re.compile(fr'(?:^|\n)\s*{question_number}\s*(?:[\.\)]|:-)\s+')
-    
-    target_page_idx = None
-    for page_idx in range(len(doc)):
-        text = doc[page_idx].get_text()
-        if q_pattern_explicit.search(text):
-            target_page_idx = page_idx
-            break
-            
-    if target_page_idx is None:
-        for page_idx in range(len(doc)):
-            text = doc[page_idx].get_text()
-            if q_pattern_fallback.search(text):
-                target_page_idx = page_idx
-                break
+    hint_page = getattr(result_obj.questions[target_q_idx], "page_number", None)
+    target_page_idx = find_question_page(doc, question_number, hint_page)
                 
     if target_page_idx is None:
-        raise HTTPException(status_code=404, detail="Could not find this question in the PDF pages")
+        raise HTTPException(status_code=404, detail=f"Could not find Question {question_number} in the PDF pages")
 
-    # 3. Render page and send to Gemini Vision
+    # 3. Crop question region (or full page if crop rect not found) and send to Vision
     try:
         page = doc[target_page_idx]
-        pix = page.get_pixmap(dpi=200)
+        crop_rect = get_question_crop_rect(page, question_number)
+        if crop_rect:
+            pix = page.get_pixmap(clip=crop_rect, dpi=200)
+        else:
+            pix = page.get_pixmap(dpi=200)
         image_bytes = pix.tobytes("png")
         
         extracted_data, p_tok, c_tok = rescan_question_vision(image_bytes, question_number)
+        extracted_data["page_number"] = target_page_idx
         
         # Merge with existing marked answer if missing
         if not extracted_data.get("marked_answer"):
@@ -353,4 +608,47 @@ def rescan_question(job_id: str, question_number: int, db: Session = Depends(dat
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/pdfs/{job_id}/convert-equations")
+def convert_equations_endpoint(job_id: str, background_tasks: BackgroundTasks, db: Session = Depends(database.get_db)):
+    """Manually triggers progressive equation-to-LaTeX background conversion for a job."""
+    task = _math_conversion_tasks.get(job_id)
+    if task and task.get("is_active"):
+        return {"status": "already_running", "message": "Conversion is already actively running for this job"}
+
+    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.result_json:
+        raise HTTPException(status_code=400, detail="Job has no results yet")
+    background_tasks.add_task(progressively_convert_equations_to_latex, job_id)
+    return {"status": "started", "message": "Progressively converting equation images to LaTeX in background"}
+
+
+@router.get("/pdfs/{job_id}/math-status")
+def get_math_conversion_status(job_id: str, db: Session = Depends(database.get_db)):
+    """Returns the live conversion status, question progress, and remaining equation image count."""
+    task = _math_conversion_tasks.get(job_id)
+    if task and task.get("is_active"):
+        return task
+
+    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not job or not job.result_json:
+        return {"is_active": False, "status": "not_found", "remaining_math_images": 0, "total_questions": 0, "current_question": 0}
+
+    try:
+        data = json.loads(job.result_json)
+        questions = data.get("questions", [])
+        remaining = _count_math_images(questions)
+        return {
+            "is_active": False,
+            "status": "idle" if remaining > 0 else "completed",
+            "remaining_math_images": remaining,
+            "total_questions": len(questions),
+            "current_question": len(questions)
+        }
+    except Exception:
+        return {"is_active": False, "status": "idle", "remaining_math_images": 0, "total_questions": 0, "current_question": 0}
+
 

@@ -15,6 +15,7 @@ class QuestionResult(BaseModel):
     confidence: str = "low"
     reasoning: Optional[str] = None
     used_web_search: bool = False
+    page_number: Optional[int] = None
 
 class TokenUsage(BaseModel):
     prompt_tokens: int = 0

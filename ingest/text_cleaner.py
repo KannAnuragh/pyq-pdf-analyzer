@@ -142,7 +142,7 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     if not text:
         return text
 
-    # 0. Protect HTML tags (inline equation images, block diagrams) so cleaning never alters them
+    # 0. Protect HTML tags (inline equation images, diagrams) so cleaning never alters them
     html_tags = []
     def _mask_tag(m):
         idx = len(html_tags)
@@ -150,6 +150,101 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
         return f" ___HTML_TAG_{idx}___ "
 
     text = re.sub(r'<div[^>]*>[\s\S]*?</div>|<img[^>]*\/?>', _mask_tag, text, flags=re.IGNORECASE)
+
+    # Revert accidental 20 \sigma^2 or 2 \sigma^2 6 back to 2002, 2026, 2025
+    text = re.sub(r'\b20\s*\$?\\sigma\^?2\$?\b', '2002', text)
+    text = re.sub(r'\b2\s*\$?\\sigma\^?2\$?\s*([0-9])\b', r'20\1', text)
+
+    # Pre-clean statistical distribution, matrix expressions, and scientific formulas
+    pat_array = r"\$?\s*(?:\\left\[|left\[)?\s*(?:\\begin|begin)\{array\}\{[a-z]+\}\s*([\s\S]+?)\s*(?:\\end|end)\{array\}\s*(?:\\right\]|right\])?\s*\$?"
+    def _repl_arr(m):
+        inner = m.group(1).strip()
+        inner = re.sub(r"(?<!\\)\\(?!\\)", r"\\\\", inner)
+        return f"$\\begin{{bmatrix}} {inner} \\end{{bmatrix}}$"
+    text = re.sub(pat_array, _repl_arr, text)
+
+    pat_mat = r"\$?\s*(?:\\begin|begin)\{(bmatrix|pmatrix|vmatrix|Vmatrix|matrix)\}\s*([\s\S]+?)\s*(?:\\end|end)\{\1\}\s*\$?"
+    def _repl_mat(m):
+        env = m.group(1)
+        inner = m.group(2).strip()
+        inner = re.sub(r"(?<!\\)\\(?!\\)", r"\\\\", inner)
+        return f"$\\begin{{{env}}} {inner} \\end{{{env}}}$"
+    text = re.sub(pat_mat, _repl_mat, text)
+
+    # Scientific Formulas (Maths, Stats, Physics, Chemistry)
+    # 1. Statistics & Distributions
+    text = re.sub(r'\\frac\{1\}\{7\}', r'\\frac{1}{n}', text)
+    text = re.sub(r'\\begin\{bmatrix\}\s*1vV\s*\\\\\s*1-1\s*&\s*hn\s*\\end\{bmatrix\}', r'\\frac{1}{n-1} \\sum', text)
+    text = re.sub(r'\\frac\{id\}\{1\}', r'\\sum', text)
+    text = re.sub(r'\bhn\b', r'\\sum', text)
+    text = re.sub(r'\(\s*x\s*(?:\\hat\{i\}|[I\]i1])?\s*[-–—=]\s*(?:x[X\s]*|x)\s*\)\s*2\b', r'(x_i - \\bar{x})^{2}', text)
+    text = re.sub(r'\$?\s*[xX]\s*=\s*=\s*\(\s*0\s*\)\s*=\s*2\s*\)\s*\$?|\$?\s*[xX]\s*[=~—–-]{1,2}\s*[\(=]?\s*[0-9oOnN\(\)\s=]*[,\s=]+[0oO©\s=]*\b2\s*\)\s*\$?', r'$X \\sim N(\\theta, \\sigma^2)$', text)
+    # Match ONLY copyright symbol © / \u00A9 for OCR-misread sigma^2, NEVER plain 0 or O!
+    text = re.sub(r'\$?[\u00A9©]\s*(?:\^\{?2\}?|2)\$?', r'$\\sigma^2$', text)
+    text = re.sub(r'\b1-1\b', r'n-1', text)
+    text = re.sub(r'\bxX\b', r'\\bar{x}', text)
+
+    # 1.5 Mathematical Formulas & LaTeX normalization
+    text = re.sub(r'\$?\s*V\s*aydyay\s*\$?', r'$\\frac{dy}{dx} + \\frac{1}{x}y = x^2$', text)
+    text = re.sub(r'\b(?:ou|0u|eu)\b(?=\s*=)', r'\\frac{dy}{dx}', text)
+    text = re.sub(r'(?<!\\frac\{)\bdy(?:\s*[\n/]|\\n)\s*dx\b', r'\\frac{dy}{dx}', text)
+    text = re.sub(r'(?<!\\frac\{)\bdx(?:\s*[\n/]|\\n)\s*dy\b', r'\\frac{dx}{dy}', text)
+    text = re.sub(r'(?<!\\frac\{)\bd\^?2y(?:\s*[\n/]|\\n)\s*dx\^?2\b', r'\\frac{d^2y}{dx^2}', text)
+    text = re.sub(r'(?<!\\frac\{)\bdy(?:\s*[\n/]|\\n)\s*dt\b', r'\\frac{dy}{dt}', text)
+    text = re.sub(r'(?<!\\frac\{)\bdx(?:\s*[\n/]|\\n)\s*dt\b', r'\\frac{dx}{dt}', text)
+
+    text = re.sub(r'\$?x\\ne\$?', r'$e^x$', text)
+    text = re.sub(r'\$?1(?:\s*[\n/]|\\n)\s*x\$?', r'$\\frac{1}{x}$', text)
+    text = re.sub(r'\$?1(?:\s*[\n/]|\\n)\s*y\$?', r'$\\frac{1}{y}$', text)
+    text = re.sub(r'\$?1(?:\s*[\n/]|\\n)\s*B\$?', r'$\\frac{1}{B}$', text)
+    text = re.sub(r'\$?1(?:\s*[\n/]|\\n)\s*n\$?', r'$\\frac{1}{n}$', text)
+    text = re.sub(r'\b2(?:\s*[\n/]|\\n)\s*X[xX]?\b', r'x^2', text)
+    text = re.sub(r'\$2(?:\s*[\n/]|\\n)\s*[xX]\$?', r'$x^2$', text)
+    text = re.sub(r'\bln\s*\(\s*x\s*\)', r'$\\ln(x)$', text)
+    text = re.sub(r'\blog\s*\(\s*([a-zA-Z0-9]+)\s*\)', r'$\\log(\1)$', text)
+
+    text = re.sub(r'tan[’\'"]+\s*[@0θ]?', r'\\tan^{2}\\theta', text)
+    text = re.sub(r'sec[’\'"]+\s*[@0θ]?', r'\\sec^{2}\\theta', text)
+    text = re.sub(r'sin[’\'"]+\s*[@0θ]?', r'\\sin^{2}\\theta', text)
+    text = re.sub(r'cos[’\'"]+\s*[@0θ]?', r'\\cos^{2}\\theta', text)
+    text = re.sub(r'\b(sin|cos|tan|sec|csc|cot)\s*[@0]\b', r'\1 \\theta', text)
+
+    text = re.sub(r'\bIAU\s*BI\b', r'n(A \\cup B)', text)
+    text = re.sub(r'\bA\s*∩\s*B\b', r'A \\cap B', text)
+    text = re.sub(r'\^{?([0-9]+)}?C([0-9]+)', r'^{$1}C_{$2}', text)
+    text = re.sub(r'e\^\{?x\}?\s*Ty', r'e^{x+y}', text)
+
+    # Integrals & Vector Theorems
+    text = re.sub(r'\[\s*f\s*F\s*sas\s*=\s*\[\s*o>\s*F\s*\)\s*dV', r'$\\iint_S \\vec{F} \\cdot d\\vec{S} = \\iiint_V (\\nabla \\cdot \\vec{F}) dV$', text)
+    text = re.sub(r'\[\s*f\s*F\s*sas\s*=\s*\[\s*fv\s*F\s*dV', r'$\\iint_S \\vec{F} \\cdot d\\vec{S} = \\iiint_V (\\nabla \\cdot \\vec{F}) dV$', text)
+    text = re.sub(r'\b(?:vVxF|vx\s*F)\s*=\s*0\b', r'$\\nabla \\times \\vec{F} = \\vec{0}$', text)
+    text = re.sub(r'\b(?:V\.F|v\.F)\s*=\s*0\b', r'$\\nabla \\cdot \\vec{F} = 0$', text)
+    text = re.sub(r'\|\s*Jt\s*dx\s*=\s*1\b', r'$\\int f(x) dx = 1$', text)
+    text = re.sub(r'\[\s*te\s*dx\s*>\s*1\b', r'$\\int f(x) dx > 1$', text)
+    text = re.sub(r'lax\s*ol\s*[-–—]\s*\(@\.b\)\s*=\s*1dhibP', r'$|\\vec{a} \\times \\vec{b}|^{2} + (\\vec{a} \\cdot \\vec{b})^{2} = |\\vec{a}|^{2} |\\vec{b}|^{2}$', text)
+    text = re.sub(r'lax\s*or\s*\+\s*\(@\.b\)\s*=\s*I@hbP', r'$|\\vec{a} \\times \\vec{b}|^{2} + (\\vec{a} \\cdot \\vec{b})^{2} = |\\vec{a}|^{2} |\\vec{b}|^{2}$', text)
+    text = re.sub(r'Vy\)\s*<\s*V\(ye\)', r'$V(\\bar{y}_{st}) < V(\\bar{y}_{sys})$', text)
+    text = re.sub(r'\b2\s*a\b(?=\s*-\s*ടെസ്റ്റ്)', r'$\\chi^{2}$', text)
+    text = re.sub(r'\bX\s*~\s*y\s*\(2\)', r'$X \\sim \\chi^{2}(2)$', text)
+
+    # 2. Chemistry Formulas
+    text = re.sub(r'\bH\s*2\s*O\b', r'$H_2O$', text)
+    text = re.sub(r'\bC\s*O\s*2\b', r'$CO_2$', text)
+    text = re.sub(r'\bH\s*2\s*S\s*O\s*4\b', r'$H_2SO_4$', text)
+    text = re.sub(r'\bK\s*Mn\s*O\s*4\b', r'$KMnO_4$', text)
+    text = re.sub(r'\bCa\s*C\s*O\s*3\b', r'$CaCO_3$', text)
+    text = re.sub(r'\bNa\s*2\s*C\s*O\s*3\b', r'$Na_2CO_3$', text)
+    text = re.sub(r'\bNa\s*H\s*C\s*O\s*3\b', r'$NaHCO_3$', text)
+
+    # 3. Physics Formulas
+    text = re.sub(r'\b[eE]\s*=\s*m\s*c\s*[\^]?\s*2\b', r'$E = mc^2$', text)
+    text = re.sub(r'\b[vV]\s*[\^]?\s*2\s*=\s*[uU]\s*[\^]?\s*2\s*\+\s*2\s*a\s*s\b', r'$v^2 = u^2 + 2as$', text)
+    text = re.sub(r'\b[vV]\s*[\^]?\s*2\s*=\s*[uU]\s*[\^]?\s*2\b', r'$v^2 = u^2$', text)
+    text = re.sub(r'\b[hH]\s*\\?nu\b', r'$h\\nu$', text)
+
+    # Clean redundant dollar signs and wrap orphaned math
+    text = re.sub(r'\${2,}', '$', text)
+    text = re.sub(r'\$\s*\$', ' ', text)
 
     # 1. Normalize Unicode to NFC format
     text = unicodedata.normalize("NFC", text)
@@ -240,6 +335,54 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     text = re.sub(r'(സൂചിപ്പി|അവതരിപ്പി|പ്രതിപാദിപ്പി|ആലാപി|രചി|അറി|ഉപയോ\s*ഗി)[\s\xa0\n]+ന്ന', r'\1ക്കുന്ന', text)
     text = re.sub(r'(പരിശോധി|തെരഞ്ഞെടു|തിരഞ്ഞെടു|രേഖപ്പെടു)[\s\xa0\n]+ക\b', r'\1ക്കുക', text)
 
+    # 7.4 Repair detached anusvara attached to Latin letters/quotes/variables
+    # In legacy typesetting, typesetters typed '-ം' or ' ം' after an English variable (e.g. 'A' ം, 'B' ം, x-ം)
+    # to represent the conjunction "-um" ("and"). In Unicode, U+0D02 is a combining mark that cannot attach to
+    # Latin characters or quotes without the font engine synthesizing an ugly dotted circle (◌ം).
+    # Normalizing this to standard Malayalam conjunction '-യും' / ' യും' perfectly restores author intent without dotted circles!
+    text = re.sub(
+        r"((?:^|[\s\(\[\{])['\"]?[A-Za-z0-9]['\"]?)\s*[-–—]?\s*[\u25CC]?ം(?=[\s\.,;:!?\)\"'\\\]]|$)",
+        r"\1 യും",
+        text
+    )
+
+    # 7.5 Normalize common mathematical OCR misrecognitions
+    # Fix radical \X, VX -> \sqrt{x}, \times 2 -> x^2
+    text = re.sub(r'\\X\b', r'\\sqrt{x}', text)
+    text = re.sub(r'\bVX\b', r'\\sqrt{x}', text)
+    text = re.sub(r'\bVx\b', r'\\sqrt{x}', text)
+    text = re.sub(r'\bV(\d+)\b', r'\\sqrt{\1}', text)
+    text = re.sub(r'\\x\b', 'x', text)
+    text = re.sub(r'(?<=[=,\s])\s*\\times\s*([0-9])\b', r' x^{\1}', text)
+    text = re.sub(r'\$\\times\s*([0-9])\b', r'$x^{\1}', text)
+
+    # Vector arrows and unit vectors
+    text = re.sub(r'\\frac\{[=><\-—~^d2\s|!_]+\}\{([A-Za-z])(?:\s*[A-Za-z]*)\}', r'\\vec{\1}', text)
+    text = re.sub(r'\(\s*=\s*\+\s*([a-zA-Z0-9])\s*\)', r'(x + \1)', text)
+    text = re.sub(r'\(\s*([a-zA-Z])\s*=\s*([a-zA-Z0-9])\s*\)', r'(\1 - \2)', text)
+    text = re.sub(r'\)\s*[iI]\b', r')\\hat{i}', text)
+    text = re.sub(r'\)\s*[jJ\]]\b', r')\\hat{j}', text)
+    text = re.sub(r'\b[zZ]\s*2\s*[kK]\b', r'z^{2}\\hat{k}', text)
+    text = re.sub(r'\b[zZ]\^\{?2\}?\s*[kK]\b', r'z^{2}\\hat{k}', text)
+    text = re.sub(r'(?<=\+)\s*[kK]\b', r' \\hat{k}', text)
+
+    # Matrix normalization and backslash repair
+    # e.g. left[begin{array}{cc} ... end{array}right] or begin{bmatrix} -> $\begin{bmatrix} ... \end{bmatrix}$
+    pat_array = r"\$?\s*(?:\\left\[|left\[)?\s*(?:\\begin|begin)\{array\}\{[a-z]+\}\s*([\s\S]+?)\s*(?:\\end|end)\{array\}\s*(?:\\right\]|right\])?\s*\$?"
+    def _repl_array(m):
+        inner = m.group(1).strip()
+        inner = re.sub(r"(?<!\\)\\(?!\\)", r"\\\\", inner)
+        return f"$\\begin{{bmatrix}} {inner} \\end{{bmatrix}}$"
+    text = re.sub(pat_array, _repl_array, text)
+
+    pat_mat = r"\$?\s*(?:\\begin|begin)\{(bmatrix|pmatrix|vmatrix|Vmatrix|matrix)\}\s*([\s\S]+?)\s*(?:\\end|end)\{\1\}\s*\$?"
+    def _repl_mat(m):
+        env = m.group(1)
+        inner = m.group(2).strip()
+        inner = re.sub(r"(?<!\\)\\(?!\\)", r"\\\\", inner)
+        return f"$\\begin{{{env}}} {inner} \\end{{{env}}}$"
+    text = re.sub(pat_mat, _repl_mat, text)
+
     # 8. Collapse multiple spaces into single spaces, but preserve newlines and tabs
     text = re.sub(r'[ \r\f\v]+', ' ', text).strip()
     text = re.sub(r'\n{3,}', '\n\n', text)
@@ -318,3 +461,110 @@ def sanity_check_malayalam_text(text: str) -> tuple[bool, dict]:
         return False, {"reason": "visual-order pre-base matra detected", "coverage": coverage}
 
     return True, {"coverage": coverage}
+
+
+def auto_fix_deterministic(text: str) -> tuple[str, list[str]]:
+    """
+    Deterministic, rule-based, safe auto-fix at $0 cost.
+    Fixes:
+      1. Extra/double spaces, space before punctuation, and space around combining signs.
+      2. Orphaned matras (reordering per convert_visual_to_logical rules to attach to nearest valid consonant).
+      3. Stray zero-width / control characters (ZWSP, BOM, dotted circle, non-virama ZWNJ/ZWJ, control codes).
+      4. Duplicate-character leaks from band merging (3+ repeated Malayalam consonants, duplicate subjoined signs, duplicate vowel signs).
+
+    Safety Guarantees:
+      - Transformations are rule-derived, NOT inferred ($0 cost, no Vision call, no validation gate needed).
+      - NEVER performs ambiguous single-glyph substitution ("this letter looks wrong"):
+        Any isolated Latin characters, unmapped symbols, numbers, or formula variables are strictly
+        preserved as-is so they remain visibly flagged for reviewers/Vision rather than silently
+        guessing plausible wrong letters that could alter exam answers.
+      - Protects all HTML tags (inline equation images, block diagrams) via placeholder masking.
+
+    Returns:
+        (fixed_text, list_of_applied_fixes)
+    """
+    if not text:
+        return text, []
+
+    fixes = []
+
+    # 0. Protect HTML tags and LaTeX math formulas from regex manipulation
+    html_tags = []
+    def _mask_tag(m):
+        idx = len(html_tags)
+        html_tags.append(m.group(0))
+        return f"%%HTMLTAG_{idx}%%"
+
+    s = re.sub(r'<div[^>]*>[\s\S]*?</div>|<img[^>]*\/?>|\$\$[\s\S]*?\$\$|\$[^$\n]+\$', _mask_tag, text, flags=re.IGNORECASE)
+
+    # 1. Stray zero-width and control characters
+    old_s = s
+    s = unicodedata.normalize("NFC", s)
+    s = re.sub(r'[\u200B\uFEFF\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u25CC]', '', s)
+    # Strip stray ZWNJ/ZWJ not preceded by virama (valid only after virama ് in Malayalam)
+    s = re.sub(r'(?<!\u0D4D)[\u200C\u200D]+', '', s)
+    s = re.sub(r'(?:^|\s)[\u200C\u200D]+', '', s)
+    if s != old_s:
+        fixes.append("stray_control_chars")
+
+    # 2. Duplicate-character leaks from band merging (never grammatically valid in Malayalam)
+    old_s = s
+    # 3+ repeated identical Malayalam consonants: collapse to single (or double for 'റ' which can represent 'റ്റ')
+    s = re.sub(r'റ{3,}', 'ററ', s)
+    s = re.sub(r'([ക-ഹ\u0D7A-\u0D7F])\1{2,}', r'\1', s)
+    # Collapse duplicate subjoined signs (e.g. ഇന്ത്യ്യ -> ഇന്ത്യ)
+    s = re.sub(r'(\u0D4D[\u200C\u200D]?[യവരല]){2,}', r'\1', s)
+    # Collapse duplicate vowel signs / viramas (e.g. ്് -> ്, ാാ -> ാ)
+    s = re.sub(r'([\u0D3E-\u0D4E\u0D57\u0D02\u0D03])\1+', r'\1', s)
+    if s != old_s:
+        fixes.append("duplicate_character_leak")
+
+    # 3. Orphaned matras and visual-to-logical reordering
+    old_s = s
+    C = r'[ക-ഹ\u0D7A-\u0D7F]'
+    CLUSTER = rf'(?:{C}്[\u200C\u200D]?)*{C}'
+    BOUNDARY = r'(?:^|[\s\(\[\{<>\-_.,;:!?"\'/\\=+])'
+
+    # Two-part split vowels with detached pre-base placement:
+    s = re.sub(rf'({BOUNDARY})[\u25CC]*െ[\s\u25CC]*({CLUSTER})[\s\u25CC]*ാ', r'\1\2ൊ', s)
+    s = re.sub(rf'({BOUNDARY})[\u25CC]*േ[\s\u25CC]*({CLUSTER})[\s\u25CC]*ാ', r'\1\2ോ', s)
+    s = re.sub(rf'({BOUNDARY})[\u25CC]*െ[\s\u25CC]*({CLUSTER})[\s\u25CC]*[ൗൌ]', r'\1\2ൌ', s)
+    s = re.sub(rf'({BOUNDARY})[\u25CC]*േ[\s\u25CC]*({CLUSTER})[\s\u25CC]*[ൗൌ]', r'\1\2ൌ', s)
+
+    # Double e-karam to ai (െെ -> ൈ):
+    s = re.sub(rf'({BOUNDARY})[\u25CC]*െെ[\s\u25CC]*({CLUSTER})', r'\1\2ൈ', s)
+
+    # Pre-base matras (single െ, േ, ൈ) at boundary:
+    s = re.sub(rf'({BOUNDARY})[\u25CC]*([െേൈ])[\s\u25CC]*({CLUSTER})', r'\1\3\2', s)
+    # Repair detached anusvara on Latin variables / quotes (e.g. 'A' ◌ം 'B' ◌ം -> 'A' യും 'B' യും)
+    s = re.sub(
+        r"((?:^|[\s\(\[\{])['\"]?[A-Za-z0-9]['\"]?)\s*[-–—]?\s*[\u25CC]?ം(?=[\s\.,;:!?\)\"'\\\]]|$)",
+        r"\1 യും",
+        s
+    )
+
+    # Remove spaces separating Malayalam base characters from dependent vowel signs, viramas, anusvaras, or visargas
+    s = re.sub(r'(?<=[\u0D00-\u0D7F])[\s\xa0]+([\u0D02\u0D03\u0D3E-\u0D4E\u0D57])', r'\1', s)
+    # Remove spaces separating subjoined consonant signs (ya, va, ra, la)
+    s = re.sub(r'(?<=[\u0D00-\u0D7F])[\s\xa0]+(്[\u200C\u200D]?[യവരല])', r'\1', s)
+
+    # Apply standard visual-to-logical reordering (infix suffixes, pre-base matras, etc.)
+    s = convert_visual_to_logical(s)
+    if s != old_s:
+        fixes.append("orphaned_matras")
+
+    # 4. Extra / double spaces
+    old_s = s
+    s = re.sub(r'[ \t\r\f\v]+', ' ', s)
+    s = re.sub(r'[ \t]+([,.:;!?])', r'\1', s)
+    lines = [line.strip() for line in s.split('\n')]
+    s = '\n'.join(lines).strip()
+    s = re.sub(r'\n{3,}', '\n\n', s)
+    if s != old_s:
+        fixes.append("whitespace_normalized")
+
+    # Restore protected HTML tags
+    for idx, tag in enumerate(html_tags):
+        s = s.replace(f"%%HTMLTAG_{idx}%%", tag)
+
+    return s, fixes

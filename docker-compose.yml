@@ -18,6 +18,12 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GEMINI_EXTRACT_MODEL=${GEMINI_EXTRACT_MODEL:-gemini-3.1-flash-lite}
       - GEMINI_SOLVE_MODEL=${GEMINI_SOLVE_MODEL:-gemini-3.1-pro-preview}
+      - ENABLE_GROQ=${ENABLE_GROQ:-false}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GROQ_MODEL=${GROQ_MODEL:-qwen/qwen3.8-27b}
+      - GROQ_VISION_MODEL=${GROQ_VISION_MODEL:-qwen/qwen3.8-27b}
+      - GROQ_SOLVE_MODEL=${GROQ_SOLVE_MODEL:-qwen/qwen3.8-27b}
+      - ENABLE_ANSWER_VALIDATION=${ENABLE_ANSWER_VALIDATION:-true}
 
   frontend:
     build:
