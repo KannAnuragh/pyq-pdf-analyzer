@@ -686,7 +686,14 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                     # Natural horizontal spacing gap - only between independent words/letters, never before combining signs or superscripts!
                     if bbox and prev_x1 is not None:
                         dist = bbox[0] - prev_x1
-                        if dist > font_size * 0.18 and not "".join(line_chars).endswith(" "):
+                        previous_text = "".join(line_chars)
+                        previous_is_malayalam = bool(re.search(r"[\u0D00-\u0D7F]$", previous_text))
+                        current_is_malayalam = bool(re.match(r"[\u0D00-\u0D7F]", resolved))
+                        if (
+                            dist > font_size * 0.18
+                            and not previous_text.endswith(" ")
+                            and not (previous_is_malayalam and current_is_malayalam)
+                        ):
                             if not is_combining and not is_superscript and resolved not in (" ", "\n", "\xa0"):
                                 line_chars.append(" ")
 
@@ -951,7 +958,14 @@ def extract_text_from_pdf(file_path: str) -> dict:
             except Exception:
                 pass
 
-        if font_map:
+        # Noto Malayalam embeds a valid Unicode text layer. Rebuilding those
+        # glyphs through the universal shape mapper can reinterpret real spaces
+        # and punctuation as legacy glyphs, so keep the native Unicode stream.
+        has_noto_malayalam = any(
+            "NotoSansMalayalam" in (font[3] or "")
+            for font in page_fonts
+        )
+        if font_map and not has_noto_malayalam:
             font_names = list(set(font_map.keys()))
             print(f"Page {page_idx + 1}: {len(font_names)} mapped fonts. Rebuilding text from CIDs...", flush=True)
             page_text, unmapped_codes = _rebuild_text_from_font_map(page, font_map, equation_items)

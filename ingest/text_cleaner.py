@@ -119,6 +119,17 @@ def convert_visual_to_logical(text: str) -> str:
     text = re.sub(r'വില[\s\u25CC]*[്്യ]?[\s\u25CC]*ം', 'വില്യം', text)
     text = re.sub(r'സംഖ[\s\u25CC]*[്്യ]?[\s\u25CC]*(?=[കയ])', 'സംഖ്യ', text)
 
+    # Repair stable encoding artifacts from this PDF's otherwise valid Unicode text layer.
+    text = re.sub(r'രണ്ടെ¬ണ്ണം', 'രണ്ടെണ്ണം', text)
+    text = re.sub(r'സ്ഥാനഭ്ര±ഷ്ട', 'സ്ഥാനഭ്രഷ്ട', text)
+    text = re.sub(r'സൾഫേµറ്റ', 'സൾഫേറ്റ', text)
+    text = re.sub(r'മാത്രമേ¸', 'മാത്രമേ', text)
+    text = re.sub(r'ഫµോക്കസ്', 'ഫോക്കസ്', text)
+    text = re.sub(r'സെÀന്റർ', 'സെന്റർ', text)
+    text = re.sub(r'മെ¸', 'മെ', text)
+    text = re.sub(r'ഹിസ്റ്റ¡', 'ഹിസ്റ്റ', text)
+    text = re.sub(r'സെÀ', 'സെ', text)
+
     # 4. Pre-base matras (single െ, േ, ൈ) preceded by non-consonant boundary or at word start:
     text = re.sub(rf'({NON_C})[\s\u25CC]*([െേൈ])[\s\u25CC]*({CLUSTER})', r'\1\3\2', text)
 
@@ -411,6 +422,7 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
 
     # 8. Collapse multiple spaces into single spaces, but preserve newlines and tabs
     text = re.sub(r'[ \r\f\v]+', ' ', text).strip()
+    text = re.sub(r'[ \t]+([,.:;!?])', r'\1', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
 
     # 9. Restore protected HTML tags
