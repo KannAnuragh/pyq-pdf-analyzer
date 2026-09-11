@@ -44,11 +44,11 @@ def convert_visual_to_logical(text: str) -> str:
     NON_C = rf'(?:^|[^\u0D15-\u0D3A])'
     END_B = r'(?=$|[\s\(\[\{<>\-_.,;:!?"\'/\\=+])'
 
-    # 1. Two-part split vowels with pre-base placement:
-    text = re.sub(rf'െ({SUB_CLUSTER})ാ', r'\1ൊ', text)
-    text = re.sub(rf'േ({SUB_CLUSTER})ാ', r'\1ോ', text)
-    text = re.sub(rf'െ({SUB_CLUSTER})[ൗൌ]', r'\1ൌ', text)
-    text = re.sub(rf'േ({SUB_CLUSTER})[ൗൌ]', r'\1ൌ', text)
+    # 1. Two-part split vowels with pre-base placement (requires non-consonant boundary before െ/േ):
+    text = re.sub(rf'({NON_C})െ({SUB_CLUSTER})ാ', r'\1\2ൊ', text)
+    text = re.sub(rf'({NON_C})േ({SUB_CLUSTER})ാ', r'\1\2ോ', text)
+    text = re.sub(rf'({NON_C})െ({SUB_CLUSTER})[ൗൌ]', r'\1\2ൌ', text)
+    text = re.sub(rf'({NON_C})േ({SUB_CLUSTER})[ൗൌ]', r'\1\2ൌ', text)
 
     # 2. Partially swapped split vowels (e/ee after cluster followed by aa):
     text = re.sub(rf'({SUB_CLUSTER})ൊ', r'\1ൊ', text)

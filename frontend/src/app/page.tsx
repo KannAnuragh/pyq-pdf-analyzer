@@ -1,7 +1,11 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { UploadCloud, FileText, CheckCircle2, AlertTriangle, Trash2, ExternalLink, RefreshCw, Type, X, Sparkles } from 'lucide-react';
+import { 
+  UploadCloud, FileText, CheckCircle2, AlertTriangle, Trash2, ExternalLink, 
+  RefreshCw, Type, X, Sparkles, ArrowLeft, Eye, Check, Clock, Cpu, ShieldCheck, 
+  ChevronRight, BarChart3, HelpCircle, Layers 
+} from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 
@@ -583,90 +587,50 @@ export default function Home() {
 
   return (
     <div className="container">
-      <header className="header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
-        <div>
-          <h1 style={{ margin: 0 }}>PDF QA Agent</h1>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '0.25rem', marginBottom: 0 }}>
-            Automated Question Extraction, Math OCR & AI Answer Verification
-          </p>
+      <header className="app-header">
+        <div className="brand-wrapper">
+          <div className="brand-icon">
+            <Layers size={22} />
+          </div>
+          <div>
+            <div className="brand-title">PDF QA Agent</div>
+            <div className="brand-sub">
+              Automated Question Extraction, Malayalam Font Engine &amp; Math LaTeX OCR
+            </div>
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
           <button
             onClick={() => { setShowFontModal(true); loadFonts(); }}
+            className="btn btn-secondary"
             style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '0.4rem',
               padding: '0.4rem 0.85rem',
-              borderRadius: '20px',
-              background: 'rgba(99, 102, 241, 0.12)',
-              border: '1px solid rgba(99, 102, 241, 0.35)',
-              fontSize: '0.82rem',
-              color: '#a5b4fc',
-              fontWeight: 600,
-              cursor: 'pointer'
+              borderRadius: '9999px',
+              fontSize: '0.8rem',
+              color: '#c7d2fe',
+              borderColor: 'rgba(99, 102, 241, 0.35)'
             }}
             title="View installed Malayalam fonts and install new font files"
           >
-            <Type size={14} />
-            Fonts {fontsData ? `(${fontsData.installed_count})` : ''}
+            <Type size={14} color="#818cf8" />
+            <span>Font Engine {fontsData ? `(${fontsData.installed_count})` : ''}</span>
           </button>
+
           {config?.groq_enabled ? (
-            <div
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                padding: '0.4rem 0.85rem',
-                borderRadius: '20px',
-                background: 'rgba(249, 115, 22, 0.12)',
-                border: '1px solid rgba(249, 115, 22, 0.35)',
-                fontSize: '0.82rem',
-                color: '#fb923c',
-                fontWeight: 600
-              }}
-              title="Groq AI is active. Fast inference via Groq LPU."
-            >
-              <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#f97316', boxShadow: '0 0 8px #f97316' }} />
-              Groq AI: Enabled
+            <div className="pill-badge" style={{ background: 'rgba(249, 115, 22, 0.12)', borderColor: 'rgba(249, 115, 22, 0.35)', color: '#fb923c' }} title="Groq AI is active. Ultra-fast inference.">
+              <span className="pill-dot" style={{ background: '#f97316', boxShadow: '0 0 8px #f97316' }} />
+              Groq AI Active
             </div>
           ) : config?.gemini_enabled ? (
-            <div
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                padding: '0.4rem 0.85rem',
-                borderRadius: '20px',
-                background: 'rgba(16, 185, 129, 0.12)',
-                border: '1px solid rgba(16, 185, 129, 0.35)',
-                fontSize: '0.82rem',
-                color: '#34d399',
-                fontWeight: 600
-              }}
-              title="Gemini AI is active. Questions will be solved and validated by Gemini."
-            >
-              <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#10b981', boxShadow: '0 0 8px #10b981' }} />
-              Gemini AI: Enabled
+            <div className="pill-badge valid" title="Gemini AI is active. Questions validated by Gemini.">
+              <span className="pill-dot" />
+              Gemini AI Active
             </div>
           ) : (
-            <div
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                padding: '0.4rem 0.85rem',
-                borderRadius: '20px',
-                background: 'rgba(239, 68, 68, 0.12)',
-                border: '1px solid rgba(239, 68, 68, 0.35)',
-                fontSize: '0.82rem',
-                color: '#f87171',
-                fontWeight: 600
-              }}
-              title={config?.groq_status?.reason || config?.gemini_status?.reason || 'AI is disabled in .env'}
-            >
-              <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#ef4444' }} />
-              AI: Disabled (.env)
+            <div className="pill-badge muted" title={config?.groq_status?.reason || config?.gemini_status?.reason || 'AI is disabled in .env (Offline Extraction Mode)'}>
+              <span className="pill-dot" style={{ background: '#94a3b8' }} />
+              Offline Mode (AI Disabled)
             </div>
           )}
         </div>
@@ -674,66 +638,120 @@ export default function Home() {
 
       {!selectedJobId ? (
         <>
-          <div className="card">
+          <div className="card" style={{ padding: '0.75rem', background: 'rgba(18, 24, 38, 0.4)' }}>
             <label className="upload-zone">
-              <UploadCloud size={48} color="var(--primary)" style={{ marginBottom: '1rem' }} />
-              <h3>{isUploading ? 'Uploading...' : 'Drag & Drop your PDF here'}</h3>
-              <p style={{ color: 'var(--text-muted)', marginTop: '0.5rem' }}>or click to browse files</p>
+              <div style={{
+                width: '60px',
+                height: '60px',
+                borderRadius: '16px',
+                background: 'rgba(99, 102, 241, 0.12)',
+                border: '1px solid rgba(99, 102, 241, 0.3)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                marginBottom: '1rem',
+                color: '#818cf8'
+              }}>
+                <UploadCloud size={30} className={isUploading ? "spin" : ""} />
+              </div>
+              <h3 style={{ fontSize: '1.15rem', fontWeight: 600, color: '#f8fafc' }}>
+                {isUploading ? 'Uploading & Indexing PDF Document...' : 'Upload Question Paper PDF'}
+              </h3>
+              <p style={{ color: 'var(--text-muted)', marginTop: '0.35rem', fontSize: '0.86rem' }}>
+                Drag and drop your document here, or click to browse files (.pdf)
+              </p>
               <input type="file" accept=".pdf" onChange={handleFileUpload} style={{ display: 'none' }} disabled={isUploading} />
             </label>
           </div>
 
-          <div className="jobs-grid">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '2rem', marginBottom: '0.5rem' }}>
+            <h3 style={{ fontSize: '0.92rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600 }}>
+              Recent Documents ({jobs.length})
+            </h3>
+          </div>
+
+          <div className="jobs-grid" style={{ marginTop: '0.5rem' }}>
             {jobs.map(job => (
-              <div key={job.job_id} className="card job-card" onClick={() => (job.status === 'done' || job.status === 'validating') && loadJobResult(job.job_id)}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <FileText size={20} color="var(--text-muted)" />
-                    <span style={{ fontWeight: 500 }}>{job.filename}</span>
+              <div 
+                key={job.job_id} 
+                className="card job-card" 
+                onClick={() => (job.status === 'done' || job.status === 'validating') && loadJobResult(job.job_id)}
+                style={{ padding: '1.25rem' }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.75rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', minWidth: 0 }}>
+                    <div style={{
+                      width: '36px',
+                      height: '36px',
+                      borderRadius: '8px',
+                      background: 'rgba(255, 255, 255, 0.04)',
+                      border: '1px solid rgba(255, 255, 255, 0.08)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#94a3b8',
+                      flexShrink: 0
+                    }}>
+                      <FileText size={18} />
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <div 
+                        style={{ fontWeight: 600, color: '#f1f5f9', fontSize: '0.92rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                        title={job.filename}
+                      >
+                        {job.filename}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', marginTop: '0.35rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                        <Clock size={12} />
+                        <span>{new Date(job.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                      </div>
+                    </div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <span className={`badge ${job.status}`}>{job.status}</span>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexShrink: 0 }}>
+                    {job.status === 'done' && (
+                      <span className="pill-badge valid" style={{ padding: '0.2rem 0.6rem', fontSize: '0.72rem' }}>
+                        <span className="pill-dot" /> Ready
+                      </span>
+                    )}
+                    {job.status === 'processing' && (
+                      <span className="pill-badge processing" style={{ padding: '0.2rem 0.6rem', fontSize: '0.72rem' }}>
+                        <span className="pill-dot" /> Scanning
+                      </span>
+                    )}
+                    {job.status === 'validating' && (
+                      <span className="pill-badge flagged" style={{ padding: '0.2rem 0.6rem', fontSize: '0.72rem' }}>
+                        <span className="pill-dot" /> Validating
+                      </span>
+                    )}
+                    {job.status === 'failed' && (
+                      <span className="pill-badge danger" style={{ padding: '0.2rem 0.6rem', fontSize: '0.72rem' }}>
+                        <span className="pill-dot" /> Failed
+                      </span>
+                    )}
+
                     {job.has_file && (
                       <a
                         href={`${API_BASE}/pdfs/${job.job_id}/file`}
                         target="_blank"
                         rel="noopener noreferrer"
                         onClick={(e) => e.stopPropagation()}
-                        style={{
-                          background: 'transparent',
-                          border: 'none',
-                          color: 'var(--text-muted)',
-                          cursor: 'pointer',
-                          padding: '4px',
-                          borderRadius: '4px',
-                          display: 'flex',
-                          alignItems: 'center'
-                        }}
-                        title="Open Scanned PDF"
+                        className="btn-ghost"
+                        style={{ padding: '4px', borderRadius: '6px' }}
+                        title="Open PDF"
                       >
-                        <ExternalLink size={16} />
+                        <ExternalLink size={15} />
                       </a>
                     )}
                     <button
                       onClick={(e) => deleteJob(e, job.job_id)}
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        color: 'var(--text-muted)',
-                        cursor: 'pointer',
-                        padding: '4px',
-                        borderRadius: '4px',
-                        display: 'flex',
-                        alignItems: 'center'
-                      }}
+                      className="btn-ghost"
+                      style={{ padding: '4px', borderRadius: '6px' }}
                       title="Delete PDF"
                     >
-                      <Trash2 size={16} color="#ef4444" />
+                      <Trash2 size={15} color="#ef4444" />
                     </button>
                   </div>
-                </div>
-                <div style={{ marginTop: '1rem', fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-                  {new Date(job.created_at).toLocaleString()}
                 </div>
               </div>
             ))}
@@ -741,165 +759,218 @@ export default function Home() {
         </>
       ) : (
         <div>
-          <button className="btn" onClick={() => { setSelectedJobId(null); setJobResult(null); }}>
-            ← Back to Dashboard
+          <button 
+            className="btn btn-secondary" 
+            onClick={() => { setSelectedJobId(null); setJobResult(null); }}
+            style={{ marginBottom: '1rem', borderRadius: '9999px', padding: '0.45rem 1rem' }}
+          >
+            <ArrowLeft size={15} />
+            <span>Back to Documents</span>
           </button>
           
           {jobResult ? (
-            <div className="card" style={{ marginTop: '2rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                  <h2>{jobResult.source_file}</h2>
-                  <a
-                    href={`${API_BASE}/pdfs/${selectedJobId}/file`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="btn"
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.4rem',
-                      padding: '0.35rem 0.75rem',
-                      fontSize: '0.85rem',
-                      textDecoration: 'none'
-                    }}
-                    title="Open Scanned PDF in new tab"
-                  >
-                    <ExternalLink size={14} />
-                    <span>View PDF</span>
-                  </a>
-                </div>
-                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-                  {jobResult.summary.validated > 0 || jobResult.summary.flagged > 0 ? (
-                    <>
-                      <div className="badge done">Validated: {jobResult.summary.validated}</div>
-                      <div className="badge pending">Flagged: {jobResult.summary.flagged}</div>
-                    </>
-                  ) : (
-                    <div
-                      className="badge"
+            <div>
+              {/* Document Hero Header */}
+              <div className="result-hero">
+                <div className="hero-top-row">
+                  <div className="hero-file-info">
+                    <div className="file-icon-box">
+                      <FileText size={22} />
+                    </div>
+                    <div className="file-title-wrap">
+                      <div className="hero-title" title={jobResult.source_file}>
+                        {jobResult.source_file}
+                      </div>
+                      <div className="hero-meta-subtitle">
+                        <span>Offline Question Extractor</span>
+                        <span>•</span>
+                        <span>{jobResult.summary.total || jobResult.questions?.length || 0} Questions</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="hero-actions">
+                    <a
+                      href={`${API_BASE}/pdfs/${selectedJobId}/file`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn btn-secondary"
                       style={{
-                        background: 'rgba(245, 158, 11, 0.12)',
-                        border: '1px solid rgba(245, 158, 11, 0.3)',
-                        color: '#fbbf24',
-                        fontWeight: 600
+                        padding: '0.45rem 0.95rem',
+                        borderRadius: '9999px',
+                        fontSize: '0.82rem',
+                        textDecoration: 'none'
                       }}
-                      title="AI validation was not executed because Gemini is disabled in .env"
+                      title="Open source PDF in new browser tab"
                     >
-                      AI Validation: Disabled
+                      <Eye size={14} color="#60a5fa" />
+                      <span>View PDF</span>
+                    </a>
+
+                    {selectedJobId && jobResult?.questions?.some((q: any) => {
+                      const hasMath = (text?: string) => {
+                        if (!text || !text.includes('<img')) return false;
+                        return text.includes('alt="math"') || text.includes('class="inline-math-img"') || !text.includes('alt="diagram"');
+                      };
+                      return hasMath(q.stem) || Object.values(q.options || {}).some((v: any) => typeof v === 'string' && hasMath(v));
+                    }) && (
+                      <button
+                        onClick={() => convertEquations(selectedJobId)}
+                        disabled={isConvertingMath}
+                        className="btn"
+                        style={{
+                          padding: '0.45rem 0.95rem',
+                          borderRadius: '9999px',
+                          fontSize: '0.82rem',
+                          background: isConvertingMath 
+                            ? 'rgba(234, 179, 8, 0.2)' 
+                            : 'linear-gradient(135deg, #8b5cf6, #6366f1)',
+                          borderColor: isConvertingMath ? 'rgba(234, 179, 8, 0.5)' : 'rgba(139, 92, 246, 0.4)',
+                          color: isConvertingMath ? '#facc15' : '#ffffff',
+                          cursor: isConvertingMath ? 'wait' : 'pointer',
+                          boxShadow: '0 2px 10px rgba(99, 102, 241, 0.3)'
+                        }}
+                        title="Converts equation image crops into KaTeX LaTeX formulas"
+                      >
+                        <Sparkles size={14} className={isConvertingMath ? "spin" : ""} />
+                        <span>{isConvertingMath ? (mathStatusText || 'Converting to LaTeX...') : 'Convert Math to LaTeX'}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Metric / Stat Pills Row */}
+                <div className="hero-stats-row">
+                  <div className="stat-chip">
+                    <span className="stat-chip-label">Total Questions</span>
+                    <span className="stat-chip-val">{jobResult.summary.total || jobResult.questions?.length || 0}</span>
+                  </div>
+
+                  {jobResult.summary.validated > 0 && (
+                    <div className="pill-badge valid">
+                      <span className="pill-dot" />
+                      <span>Validated: {jobResult.summary.validated}</span>
                     </div>
                   )}
-                  <div className="badge" style={{ background: 'rgba(255, 255, 255, 0.06)', color: 'var(--text-muted)' }}>
-                    Total: {jobResult.summary.total || jobResult.questions?.length || 0}
-                  </div>
-                  {jobs.find(j => j.job_id === selectedJobId)?.status === 'validating' && (
-                    <div className="badge validating">Validating...</div>
+
+                  {jobResult.summary.flagged > 0 && (
+                    <div className="pill-badge flagged">
+                      <span className="pill-dot" />
+                      <span>Flagged: {jobResult.summary.flagged}</span>
+                    </div>
                   )}
-                  {selectedJobId && jobResult?.questions?.some((q: any) => {
-                    const hasMath = (text?: string) => {
-                      if (!text || !text.includes('<img')) return false;
-                      return text.includes('alt="math"') || text.includes('class="inline-math-img"') || !text.includes('alt="diagram"');
-                    };
-                    return hasMath(q.stem) || Object.values(q.options || {}).some((v: any) => typeof v === 'string' && hasMath(v));
-                  }) && (
-                    <button
-                      onClick={() => convertEquations(selectedJobId)}
-                      disabled={isConvertingMath}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.35rem',
-                        padding: '0.25rem 0.65rem',
-                        borderRadius: '20px',
-                        background: isConvertingMath ? 'rgba(234, 179, 8, 0.15)' : 'rgba(168, 85, 247, 0.15)',
-                        border: isConvertingMath ? '1px solid rgba(234, 179, 8, 0.4)' : '1px solid rgba(168, 85, 247, 0.4)',
-                        color: isConvertingMath ? '#facc15' : '#c084fc',
-                        fontSize: '0.78rem',
-                        fontWeight: 600,
-                        cursor: isConvertingMath ? 'wait' : 'pointer',
-                        opacity: isConvertingMath ? 0.9 : 1
-                      }}
-                      title="Progressively converts equation image crops into native KaTeX LaTeX formulas"
-                    >
-                      <Sparkles size={13} className={isConvertingMath ? "spin" : ""} />
-                      {isConvertingMath ? (mathStatusText || 'Converting to LaTeX...') : 'Convert Equations to LaTeX'}
-                    </button>
+
+                  {!(jobResult.summary.validated > 0 || jobResult.summary.flagged > 0) && (
+                    <div className="pill-badge muted" title="AI Answer Verification is inactive (offline mode)">
+                      <span className="pill-dot" />
+                      <span>AI Validation: Offline / Inactive</span>
+                    </div>
+                  )}
+
+                  {jobs.find(j => j.job_id === selectedJobId)?.status === 'validating' && (
+                    <div className="pill-badge processing">
+                      <span className="pill-dot" />
+                      <span>AI Validating in background...</span>
+                    </div>
                   )}
                 </div>
               </div>
 
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th style={{ width: '50px' }}>Q#</th>
-                    <th>Stem Preview</th>
-                    <th style={{ width: '90px' }}>Marked</th>
-                    <th style={{ width: '100px' }}>AI Validated</th>
-                    <th style={{ width: '110px' }}>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {jobResult.questions.map((q: any) => (
-                    <tr key={q.question_number} onClick={() => setSelectedQuestion(q)} style={{ cursor: 'pointer' }}>
-                      <td>{q.question_number}</td>
-                      <td style={{ maxWidth: '350px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        <span dangerouslySetInnerHTML={{
-                          __html: renderLatex(
-                            ((q.stem || '')
-                              .replace(/<img[^>]*alt="math"[^>]*\/?>/gi, ' [Equation] ')
-                              .replace(/<img[^>]*alt="diagram"[^>]*\/?>/gi, ' [Diagram] ')
-                              .replace(/<[^>]+>/g, ' ')
-                              .trim()
-                              .slice(0, 100)) || '[Equation]'
-                          )
-                        }} />
-                      </td>
-                      <td style={{ fontWeight: 600 }}>{q.marked_correct_answer || q.marked_answer || '-'}</td>
-                      <td>
-                        {q.validated_answer ? (
-                          <span style={{ fontWeight: 600, color: q.is_valid ? 'var(--success)' : 'var(--warning)' }}>
-                            {q.validated_answer}
+              {/* Modern Question Table */}
+              <div className="table-card">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: '64px', textAlign: 'center' }}>Q#</th>
+                      <th>Question Stem Preview</th>
+                      <th style={{ width: '110px' }}>Marked Key</th>
+                      <th style={{ width: '130px' }}>AI Answer</th>
+                      <th style={{ width: '140px' }}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {jobResult.questions.map((q: any) => (
+                      <tr key={q.question_number} onClick={() => setSelectedQuestion(q)}>
+                        <td style={{ textAlign: 'center' }}>
+                          <span className="q-num-pill">
+                            {q.question_number}
                           </span>
-                        ) : (
-                          <span style={{ color: 'var(--text-muted)' }}>-</span>
-                        )}
-                      </td>
-                      <td>
-                        {q.validated_answer ? (
-                          q.is_valid ? (
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', color: 'var(--success)', fontSize: '0.85rem', fontWeight: 600 }}>
-                              <CheckCircle2 className="status-icon valid" size={16} /> Match
+                        </td>
+                        <td style={{ maxWidth: '420px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          <span 
+                            style={{ color: 'var(--text-secondary)' }}
+                            dangerouslySetInnerHTML={{
+                              __html: renderLatex(
+                                ((q.stem || '')
+                                  .replace(/<img[^>]*alt="math"[^>]*\/?>/gi, ' [Equation] ')
+                                  .replace(/<img[^>]*alt="diagram"[^>]*\/?>/gi, ' [Diagram] ')
+                                  .replace(/<[^>]+>/g, ' ')
+                                  .trim()
+                                  .slice(0, 110)) || '[Equation]'
+                              )
+                            }} 
+                          />
+                        </td>
+                        <td>
+                          <span style={{ 
+                            fontWeight: 700, 
+                            color: '#e2e8f0', 
+                            background: 'rgba(255, 255, 255, 0.06)',
+                            padding: '3px 9px',
+                            borderRadius: '6px',
+                            fontSize: '0.85rem'
+                          }}>
+                            {q.marked_correct_answer || q.marked_answer || '—'}
+                          </span>
+                        </td>
+                        <td>
+                          {q.validated_answer ? (
+                            <span style={{ 
+                              fontWeight: 700, 
+                              color: q.is_valid ? 'var(--success)' : 'var(--warning)',
+                              background: q.is_valid ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+                              padding: '3px 9px',
+                              borderRadius: '6px',
+                              fontSize: '0.85rem'
+                            }}>
+                              {q.validated_answer}
                             </span>
                           ) : (
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', color: 'var(--warning)', fontSize: '0.85rem', fontWeight: 600 }}>
-                              <AlertTriangle className="status-icon invalid" size={16} /> Mismatch
+                            <span style={{ color: 'var(--text-muted)' }}>—</span>
+                          )}
+                        </td>
+                        <td>
+                          {q.validated_answer ? (
+                            q.is_valid ? (
+                              <span className="pill-badge valid" style={{ padding: '0.2rem 0.55rem', fontSize: '0.74rem' }}>
+                                <CheckCircle2 size={13} /> Match
+                              </span>
+                            ) : (
+                              <span className="pill-badge flagged" style={{ padding: '0.2rem 0.55rem', fontSize: '0.74rem' }}>
+                                <AlertTriangle size={13} /> Mismatch
+                              </span>
+                            )
+                          ) : jobs.find(j => j.job_id === selectedJobId)?.status === 'validating' ? (
+                            <span className="pill-badge processing" style={{ padding: '0.2rem 0.55rem', fontSize: '0.74rem' }}>
+                              Validating...
                             </span>
-                          )
-                        ) : jobs.find(j => j.job_id === selectedJobId)?.status === 'validating' ? (
-                          <span style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>Validating...</span>
-                        ) : (
-                          <span
-                            style={{
-                              fontSize: '0.78rem',
-                              color: '#9ca3af',
-                              background: 'rgba(255, 255, 255, 0.05)',
-                              padding: '2px 8px',
-                              borderRadius: '4px',
-                              border: '1px solid rgba(255, 255, 255, 0.1)',
-                              whiteSpace: 'nowrap'
-                            }}
-                          >
-                            AI Disabled
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                          ) : (
+                            <span className="pill-badge muted" style={{ padding: '0.2rem 0.55rem', fontSize: '0.74rem' }}>
+                              Extracted
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ) : (
-            <div style={{ marginTop: '2rem' }}>Loading results...</div>
+            <div className="card" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+              <RefreshCw size={24} className="spin" style={{ margin: '0 auto 0.75rem', color: '#6366f1' }} />
+              <div>Loading question results...</div>
+            </div>
           )}
         </div>
       )}
@@ -909,45 +980,62 @@ export default function Home() {
       <div className={`detail-panel ${selectedQuestion ? 'open' : ''}`}>
         {selectedQuestion && (
           <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                <h2>Question {selectedQuestion.question_number}</h2>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.75rem', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+                <div style={{ 
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center',
+                  background: 'linear-gradient(135deg, #3b82f6, #6366f1)',
+                  color: '#fff',
+                  width: '38px',
+                  height: '38px',
+                  borderRadius: '10px',
+                  fontWeight: 800,
+                  fontSize: '0.95rem'
+                }}>
+                  Q{selectedQuestion.question_number}
+                </div>
+                <div>
+                  <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700 }}>Question Details</h2>
+                  <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>OCR Inspection &amp; Answer Verification</span>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
                 <button 
-                  className="btn" 
+                  className="btn btn-secondary" 
                   onClick={() => handleRescan(selectedQuestion.question_number)}
                   disabled={isRescanning}
                   style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '0.4rem',
-                    padding: '0.35rem 0.75rem',
-                    fontSize: '0.85rem',
-                    background: 'rgba(59, 130, 246, 0.15)',
-                    color: '#3b82f6',
-                    border: '1px solid rgba(59, 130, 246, 0.3)',
-                    opacity: isRescanning ? 0.6 : 1,
+                    padding: '0.4rem 0.85rem',
+                    borderRadius: '9999px',
+                    fontSize: '0.8rem',
+                    opacity: isRescanning ? 0.7 : 1,
                     cursor: isRescanning ? 'not-allowed' : 'pointer'
                   }}
                   title="Uses Gemini Vision to fix OCR errors by scanning the exact page"
                 >
-                  <RefreshCw size={14} className={isRescanning ? "spin" : ""} />
-                  {isRescanning ? 'Scanning...' : 'Rescan Image (AI)'}
+                  <RefreshCw size={13} className={isRescanning ? "spin" : ""} color="#60a5fa" />
+                  <span>{isRescanning ? 'Scanning...' : 'Rescan AI'}</span>
+                </button>
+                <button 
+                  className="btn btn-ghost" 
+                  onClick={() => setSelectedQuestion(null)}
+                  style={{ borderRadius: '50%', width: '36px', height: '36px', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <X size={18} />
                 </button>
               </div>
-              <button className="btn" onClick={() => setSelectedQuestion(null)}>Close</button>
             </div>
             
-            <div style={{ marginBottom: '1.5rem' }}>
-              <h4 style={{ color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Stem</h4>
+            {/* Question Stem Box */}
+            <div className="detail-box">
+              <div className="detail-box-title">Question Stem</div>
               <div
                 style={{
-                  background: 'rgba(255,255,255,0.03)',
-                  padding: '1.25rem',
-                  borderRadius: '8px',
-                  whiteSpace: 'pre-wrap',
                   lineHeight: '1.8',
-                  fontSize: '0.96rem',
-                  border: '1px solid var(--panel-border)',
+                  fontSize: '1rem',
+                  color: 'var(--text-main)',
                   tabSize: 4
                 }}
                 dangerouslySetInnerHTML={{
@@ -956,23 +1044,24 @@ export default function Home() {
               />
             </div>
 
-            <div style={{ marginBottom: '1.5rem' }}>
-              <h4 style={{ color: 'var(--text-muted)', marginBottom: '0.5rem' }}>Options</h4>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {/* Answer Options Box */}
+            <div className="detail-box">
+              <div className="detail-box-title">Multiple Choice Options</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
                 {Object.entries(selectedQuestion.options).map(([k, v]: [string, any]) => {
                   const isValidated = selectedQuestion.validated_answer?.toUpperCase() === k.toUpperCase();
                   const isMarked = (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer)?.toUpperCase() === k.toUpperCase();
                   
-                  let borderColor = 'var(--panel-border)';
-                  let bg = 'rgba(255,255,255,0.02)';
+                  let border = '1px solid rgba(255, 255, 255, 0.08)';
+                  let bg = 'rgba(255, 255, 255, 0.02)';
                   if (isValidated && isMarked) {
-                    borderColor = 'var(--success)';
+                    border = '1.5px solid rgba(16, 185, 129, 0.5)';
                     bg = 'rgba(16, 185, 129, 0.08)';
                   } else if (isValidated) {
-                    borderColor = 'var(--primary)';
+                    border = '1.5px solid rgba(59, 130, 246, 0.5)';
                     bg = 'rgba(59, 130, 246, 0.08)';
                   } else if (isMarked) {
-                    borderColor = '#f59e0b';
+                    border = '1.5px solid rgba(245, 158, 11, 0.5)';
                     bg = 'rgba(245, 158, 11, 0.08)';
                   }
 
@@ -982,43 +1071,49 @@ export default function Home() {
                       style={{
                         padding: '0.85rem 1rem',
                         background: bg,
-                        borderRadius: '8px',
-                        border: `1.5px solid ${borderColor}`,
+                        borderRadius: '10px',
+                        border: border,
                         display: 'flex',
                         justifyContent: 'space-between',
                         alignItems: 'flex-start',
                         gap: '1rem',
-                        whiteSpace: 'pre-wrap',
-                        lineHeight: '1.5'
+                        transition: 'all 0.2s ease'
                       }}
                     >
-                      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start', flex: 1 }}>
+                      <div style={{ display: 'flex', gap: '0.85rem', alignItems: 'flex-start', flex: 1 }}>
                         <span style={{
-                          background: isValidated ? 'var(--primary)' : isMarked ? '#f59e0b' : 'rgba(255,255,255,0.1)',
+                          background: (isValidated && isMarked) ? '#10b981' : isValidated ? '#3b82f6' : isMarked ? '#f59e0b' : 'rgba(255, 255, 255, 0.08)',
                           color: '#fff',
                           fontWeight: 700,
                           fontSize: '0.85rem',
                           padding: '0.2rem 0.55rem',
                           borderRadius: '6px',
                           minWidth: '28px',
-                          textAlign: 'center'
+                          textAlign: 'center',
+                          flexShrink: 0
                         }}>
                           {k}
                         </span>
                         <span
-                          style={{ fontSize: '0.95rem' }}
+                          style={{ fontSize: '0.96rem', lineHeight: '1.5', color: 'var(--text-secondary)' }}
                           dangerouslySetInnerHTML={{ __html: renderLatex(v) }}
                         />
                       </div>
-                      <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
+                      <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
                         {isValidated && isMarked && (
-                          <span className="badge done" style={{ fontSize: '0.7rem' }}>AI Match ✅</span>
+                          <span className="pill-badge valid" style={{ padding: '0.15rem 0.55rem', fontSize: '0.7rem' }}>
+                            <Check size={11} /> Verified Match
+                          </span>
                         )}
                         {isValidated && !isMarked && (
-                          <span className="badge processing" style={{ fontSize: '0.7rem' }}>AI Choice</span>
+                          <span className="pill-badge processing" style={{ padding: '0.15rem 0.55rem', fontSize: '0.7rem' }}>
+                            AI Choice
+                          </span>
                         )}
                         {isMarked && !isValidated && (
-                          <span className="badge pending" style={{ fontSize: '0.7rem', background: 'rgba(245, 158, 11, 0.2)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.4)' }}>Marked Key</span>
+                          <span className="pill-badge flagged" style={{ padding: '0.15rem 0.55rem', fontSize: '0.7rem' }}>
+                            Marked Key
+                          </span>
                         )}
                       </div>
                     </div>
@@ -1027,62 +1122,56 @@ export default function Home() {
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
-              <div style={{ flex: 1, padding: '1rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', border: '1px solid var(--panel-border)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                  <h4 style={{ color: 'var(--text-muted)', margin: 0 }}>Marked Answer</h4>
-                  <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.05)', padding: '1px 6px', borderRadius: '4px' }}>Exam Key</span>
+            {/* Answer Comparison Grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.25rem' }}>
+              <div className="detail-box" style={{ margin: 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                  <span className="detail-box-title" style={{ margin: 0 }}>Marked Exam Key</span>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.06)', padding: '2px 6px', borderRadius: '4px' }}>Ground Truth</span>
                 </div>
-                <div style={{ fontSize: '1.5rem', fontWeight: 'bold' }}>{selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer || 'None'}</div>
+                <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#f8fafc', marginTop: '0.35rem' }}>
+                  {selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer || '—'}
+                </div>
               </div>
-              <div style={{ flex: 1, padding: '1rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', border: '1px solid var(--panel-border)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                  <h4 style={{ color: 'var(--text-muted)', margin: 0 }}>AI Validated Answer</h4>
+
+              <div className="detail-box" style={{ margin: 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                  <span className="detail-box-title" style={{ margin: 0 }}>AI Verified Answer</span>
                   {selectedQuestion.validated_answer ? (
-                    <span style={{ fontSize: '0.72rem', color: selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)', fontWeight: 600 }}>
+                    <span style={{ fontSize: '0.7rem', color: selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)', fontWeight: 600 }}>
                       {selectedQuestion.is_valid ? 'Match' : 'Mismatch'}
                     </span>
                   ) : (
-                    <span style={{ fontSize: '0.72rem', color: '#f87171', background: 'rgba(239, 68, 68, 0.1)', padding: '1px 6px', borderRadius: '4px' }}>Disabled in .env</span>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.04)', padding: '2px 6px', borderRadius: '4px' }}>Offline / None</span>
                   )}
                 </div>
-                <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: selectedQuestion.validated_answer ? (selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)') : '#9ca3af' }}>
-                  {selectedQuestion.validated_answer || 'None'}
+                <div style={{ 
+                  fontSize: '1.75rem', 
+                  fontWeight: 800, 
+                  color: selectedQuestion.validated_answer ? (selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)') : 'var(--text-muted)',
+                  marginTop: '0.35rem'
+                }}>
+                  {selectedQuestion.validated_answer || '—'}
                 </div>
               </div>
             </div>
 
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                <h4 style={{ color: 'var(--text-muted)', margin: 0 }}>Solution / Description</h4>
-              </div>
+            {/* Solution / Explanation Box */}
+            <div className="detail-box">
+              <div className="detail-box-title">Solution &amp; Explanation</div>
               {selectedQuestion.explanation ? (
                 <div
                   style={{
-                    background: 'rgba(255,255,255,0.03)',
-                    padding: '1.25rem',
-                    borderRadius: '8px',
-                    fontSize: '0.92rem',
-                    lineHeight: '1.7',
-                    color: 'var(--text-main)',
-                    whiteSpace: 'pre-wrap',
-                    border: '1px solid var(--panel-border)'
+                    fontSize: '0.94rem',
+                    lineHeight: '1.75',
+                    color: 'var(--text-secondary)',
+                    whiteSpace: 'pre-wrap'
                   }}
                   dangerouslySetInnerHTML={{ __html: renderLatex(selectedQuestion.explanation) }}
                 />
               ) : (
-                <div
-                  style={{
-                    background: 'rgba(255,255,255,0.02)',
-                    padding: '1rem 1.25rem',
-                    borderRadius: '8px',
-                    fontSize: '0.88rem',
-                    color: 'var(--text-muted)',
-                    fontStyle: 'italic',
-                    border: '1px solid var(--panel-border)'
-                  }}
-                >
-                  Not available
+                <div style={{ fontSize: '0.88rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                  No automated explanation available for this offline question.
                 </div>
               )}
             </div>
