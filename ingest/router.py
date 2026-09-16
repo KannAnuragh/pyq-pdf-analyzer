@@ -21,6 +21,7 @@ import os
 import base64
 import hashlib
 import re
+from typing import Optional, List, Dict, Tuple
 from google import genai
 from google.genai import types
 from PIL import Image
@@ -105,13 +106,12 @@ def clean_latex_equation(raw_text: str) -> str:
     inner = re.sub(r'\bV(\d+)\b', r'\\sqrt{\1}', inner)
     inner = re.sub(r'\\x\b', 'x', inner)
 
-    # 3. Exponent / variable misrecognitions (e.g. \times 2 -> x^2)
-    inner = re.sub(r'(?<!\d)\s*\\times\s*([0-9])\b', r'x^{\1}', inner)
-    inner = re.sub(r'^\\times\s*([0-9])\b', r'x^{\1}', inner)
-    inner = re.sub(r'=\s*\\times\s*([0-9])\b', r'= x^{\1}', inner)
+    # 3. Multiplication & variable normalization
+    inner = re.sub(r'×', r'\\times ', inner)
+    inner = re.sub(r'(\d+(?:\^\d+)?)\s*[xX]\^([0-9])\b', r'\1 \\times \2', inner)
+    inner = re.sub(r'(\d+(?:\.\d+)?|\^\{?\d+\}?)\s*[xX]\s*(\d+(?:\.\d+)?)', r'\1 \\times \2', inner)
+    inner = re.sub(r'(\d+)\s+(?=\d+\s*=)', r'\1, ', inner)
     inner = re.sub(r'^\\times\s*=', 'x =', inner)
-    inner = re.sub(r'=\s*\\times\b', '= x', inner)
-    inner = re.sub(r'(?<=[=,\s])\\times(?=[=,\s]|$)', 'x', inner)
 
     # 4. Vector expressions: fix (= + y) -> (x + y) and (y = x) -> (y - x)
     inner = re.sub(r'\(\s*=\s*\+\s*([a-zA-Z0-9])\s*\)', r'(x + \1)', inner)
@@ -485,117 +485,331 @@ def ocr_math_image(pil_img: Image.Image) -> str:
     return ""
 
 
-def ocr_equation_clip(img_bytes: bytes) -> tuple[str, int, int]:
+def ocr_equation_clip(img_bytes: bytes, engine: Optional[str] = None) -> tuple[str, int, int]:
     """
-    Routes an equation / symbol image region:
-    1. Primary: High-accuracy local Tesseract OCR (fast, $0, offline fractions, roots, matrices, vectors)
-    2. Fallback: Cloud AI Vision OCR / Mathpix (only if local Tesseract returns empty or fails)
+    Routes an equation / symbol image region based on the requested engine or runtime config:
+    - 'tesseract': High-accuracy local Tesseract OCR ($0, offline fractions, roots, matrices, vectors)
+    - 'groq': Groq Vision OCR (Qwen/Llama)
+    - 'gemini': Gemini Vision OCR
+    - 'mathpix': Mathpix API
+    - 'off': Completely skips equation OCR
+    - 'auto': Waterfall fallback (Tesseract -> Mathpix -> Groq -> Gemini)
     """
-    global _quota_exhausted
+    global _quota_exhausted, _groq_vision_supported
 
-    # 1. Local Tesseract OCR (Primary)
-    try:
-        pil_img = Image.open(io.BytesIO(img_bytes))
-        math = ocr_math_image(pil_img)
-        if math:
-            clean_math = clean_latex_equation(math)
-            if clean_math:
-                return clean_math, 0, 0
-    except Exception as e:
-        print(f"[Equation OCR] Local Tesseract OCR failed: {e}. Trying cloud fallback...", flush=True)
-
-    # 2. Mathpix API (Fallback if configured)
-    app_id = os.getenv("MATHPIX_APP_ID")
-    app_key = os.getenv("MATHPIX_APP_KEY")
-    if app_id and app_key:
+    # Resolve active engine & enabled status
+    if engine is None:
         try:
-            import requests
-            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-            response = requests.post(
-                "https://api.mathpix.com/v3/text",
-                json={"src": f"data:image/png;base64,{img_b64}", "formats": ["text"]},
-                headers={"app_id": app_id, "app_key": app_key, "Content-Type": "application/json"},
-                timeout=10
-            )
-            if response.status_code == 200:
-                result_text = response.json().get("text", "").strip()
-                math = clean_latex_equation(result_text)
-                if math:
-                    return math, 0, 0
-        except Exception as e:
-            print(f"[Mathpix OCR] Failed: {e}. Using fallback OCR...", flush=True)
+            from ..storage.config_manager import get_setting
+            if not get_setting("math_ocr_enabled", True):
+                return "", 0, 0
+            engine = get_setting("math_ocr_engine", "auto")
+        except Exception:
+            engine = os.getenv("MATH_OCR_ENGINE", "auto")
 
-    # 3. AI Vision OCR Fallback (Groq Vision or Gemini Vision)
+    engine = str(engine or "auto").strip().lower()
+    if engine in ("off", "disabled"):
+        return "", 0, 0
+
     prompt = (
         "Transcribe the mathematical formula, equation, fraction, or symbol in this image snippet into standard inline LaTeX ($...$). "
         "Output ONLY the inline LaTeX enclosed in dollar signs (e.g. $\\frac{1}{3}$, $\\sqrt{x^2+y^2}$, $x^2$, or $\\chi^2$). "
         "No explanation, no extra text, no markdown backticks."
     )
 
-    # 3a. Groq Vision
-    global _groq_vision_supported
-    enable_groq = os.getenv("ENABLE_GROQ", "false").lower() in ("true", "1", "yes")
-    groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
-    if enable_groq and groq_key and not groq_key.startswith("your_") and _groq_vision_supported and Groq is not None:
+    def _try_tesseract() -> tuple[str, int, int]:
         try:
-            client = Groq(api_key=groq_key)
-            b64_img = base64.b64encode(img_bytes).decode("utf-8")
-            model_name = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
-            resp = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}}
-                        ]
-                    }
-                ],
-                temperature=0.1,
-                max_tokens=60,
-                timeout=8.0
-            )
-            raw_text = resp.choices[0].message.content.strip()
-            math = clean_latex_equation(raw_text)
-            p_tok = resp.usage.prompt_tokens if resp.usage else 0
-            c_tok = resp.usage.completion_tokens if resp.usage else 0
+            pil_img = Image.open(io.BytesIO(img_bytes))
+            math = ocr_math_image(pil_img)
             if math:
-                return math, p_tok, c_tok
+                clean_math = clean_latex_equation(math)
+                if clean_math:
+                    return clean_math, 0, 0
         except Exception as e:
-            err_str = str(e)
-            if "not support" in err_str.lower() or "invalid" in err_str.lower() or "400" in err_str or "429" in err_str or "rate_limit" in err_str.lower():
-                _groq_vision_supported = False
-                print(f"[Equation OCR] Groq Vision rate-limited/unsupported ({e}). Disabling Groq Vision.", flush=True)
-            else:
-                print(f"[Equation OCR] Groq Vision failed: {e}.", flush=True)
+            print(f"[Equation OCR] Tesseract OCR failed: {e}", flush=True)
+        return "", 0, 0
 
-    # 3b. Gemini Vision
-    enable_gemini = os.getenv("ENABLE_GEMINI", "false").lower() in ("true", "1", "yes")
-    google_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
-    if enable_gemini and google_key and not google_key.startswith("your_") and not _quota_exhausted:
-        try:
-            client = genai.Client(api_key=google_key)
-            model_name = os.getenv("GEMINI_EXTRACT_MODEL", "gemini-3.1-flash")
-            res = client.models.generate_content(
-                model=model_name,
-                contents=[
-                    types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
-                    prompt
-                ]
-            )
-            math = clean_latex_equation(res.text)
-            p_tok = res.usage_metadata.prompt_token_count if res.usage_metadata else 0
-            c_tok = res.usage_metadata.candidates_token_count if res.usage_metadata else 0
-            if math:
-                return math, p_tok, c_tok
-        except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                _quota_exhausted = True
-            print(f"[Equation OCR] Gemini Vision failed: {e}.", flush=True)
+    def _try_mathpix() -> tuple[str, int, int]:
+        app_id = os.getenv("MATHPIX_APP_ID")
+        app_key = os.getenv("MATHPIX_APP_KEY")
+        if app_id and app_key:
+            try:
+                import requests
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                response = requests.post(
+                    "https://api.mathpix.com/v3/text",
+                    json={"src": f"data:image/png;base64,{img_b64}", "formats": ["text"]},
+                    headers={"app_id": app_id, "app_key": app_key, "Content-Type": "application/json"},
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    result_text = response.json().get("text", "").strip()
+                    math = clean_latex_equation(result_text)
+                    if math:
+                        return math, 0, 0
+            except Exception as e:
+                print(f"[Mathpix OCR] Failed: {e}", flush=True)
+        return "", 0, 0
+
+    def _try_groq() -> tuple[str, int, int]:
+        global _groq_vision_supported
+        enable_groq = os.getenv("ENABLE_GROQ", "false").lower() in ("true", "1", "yes")
+        groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+        if enable_groq and groq_key and not groq_key.startswith("your_") and _groq_vision_supported and Groq is not None:
+            try:
+                client = Groq(api_key=groq_key, timeout=10.0)
+                b64_img = base64.b64encode(img_bytes).decode("utf-8")
+                model_name = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
+                resp = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}}
+                            ]
+                        }
+                    ],
+                    temperature=0.1,
+                    max_tokens=60,
+                    timeout=8.0
+                )
+                raw_text = resp.choices[0].message.content.strip()
+                math = clean_latex_equation(raw_text)
+                p_tok = resp.usage.prompt_tokens if resp.usage else 0
+                c_tok = resp.usage.completion_tokens if resp.usage else 0
+                if math:
+                    return math, p_tok, c_tok
+            except Exception as e:
+                err_str = str(e)
+                if "not support" in err_str.lower() or "invalid" in err_str.lower() or "400" in err_str or "429" in err_str or "rate_limit" in err_str.lower():
+                    _groq_vision_supported = False
+                    print(f"[Equation OCR] Groq Vision rate-limited/unsupported ({e}).", flush=True)
+                else:
+                    print(f"[Equation OCR] Groq Vision failed: {e}.", flush=True)
+        return "", 0, 0
+
+    def _try_gemini() -> tuple[str, int, int]:
+        global _quota_exhausted
+        enable_gemini = os.getenv("ENABLE_GEMINI", "false").lower() in ("true", "1", "yes")
+        google_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+        if enable_gemini and google_key and not google_key.startswith("your_") and not _quota_exhausted:
+            try:
+                client = genai.Client(api_key=google_key)
+                model_name = os.getenv("GEMINI_EXTRACT_MODEL", "gemini-3.1-flash")
+                res = client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+                        prompt
+                    ]
+                )
+                math = clean_latex_equation(res.text)
+                p_tok = res.usage_metadata.prompt_token_count if res.usage_metadata else 0
+                c_tok = res.usage_metadata.candidates_token_count if res.usage_metadata else 0
+                if math:
+                    return math, p_tok, c_tok
+            except Exception as e:
+                err_msg = str(e)
+                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    _quota_exhausted = True
+                print(f"[Equation OCR] Gemini Vision failed: {e}.", flush=True)
+        return "", 0, 0
+
+    # Targeted execution
+    if engine == "tesseract":
+        return _try_tesseract()
+    elif engine == "groq":
+        return _try_groq()
+    elif engine == "gemini":
+        return _try_gemini()
+    elif engine == "mathpix":
+        return _try_mathpix()
+
+    # Default: 'auto' waterfall
+    res, p, c = _try_tesseract()
+    if res:
+        return res, p, c
+
+    res, p, c = _try_mathpix()
+    if res:
+        return res, p, c
+
+    res, p, c = _try_groq()
+    if res:
+        return res, p, c
+
+    res, p, c = _try_gemini()
+    if res:
+        return res, p, c
 
     return "", 0, 0
+
+
+def ocr_page_vision(img_bytes: bytes, engine: Optional[str] = None, force: bool = False) -> tuple[str, int, int]:
+    """Fallback OCR for full pages (e.g. scanned image-only PDFs) using configured question OCR engine."""
+    try:
+        from ..storage.config_manager import get_setting
+        if not force and not get_setting("question_ocr_enabled", True) and engine is None:
+            return "", 0, 0
+        if engine is None:
+            engine = get_setting("auto_whole_pdf_ocr_engine", get_setting("question_ocr_engine", "auto"))
+    except Exception:
+        if engine is None:
+            engine = os.getenv("AUTO_WHOLE_PDF_OCR_ENGINE", os.getenv("QUESTION_OCR_ENGINE", "auto"))
+
+    engine = str(engine or "auto").strip().lower()
+    if engine in ("off", "disabled"):
+        return "", 0, 0
+
+    if engine == "auto":
+        # Waterfall auto resolution: Groq -> Gemini -> Tesseract
+        groq_on = os.getenv("ENABLE_GROQ", "false").lower() in ("true", "1", "yes")
+        groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+        gemini_on = os.getenv("ENABLE_GEMINI", "false").lower() in ("true", "1", "yes")
+        gemini_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+        if groq_on and groq_key and not groq_key.startswith("your_"):
+            engine = "groq"
+        elif gemini_on and gemini_key and not gemini_key.startswith("your_"):
+            engine = "gemini"
+        else:
+            engine = "tesseract"
+
+    if engine == "tesseract":
+        try:
+            import pytesseract
+            from PIL import Image
+            pil_img = Image.open(io.BytesIO(img_bytes))
+            try:
+                avail = pytesseract.get_languages()
+            except Exception:
+                avail = []
+            tess_lang = "mal+eng" if "mal" in avail else "eng"
+            text = pytesseract.image_to_string(pil_img, lang=tess_lang, config="--psm 6").strip()
+            return text, 0, 0
+        except Exception as e:
+            print(f"[Page OCR] Local Tesseract OCR failed: {e}", flush=True)
+            return "", 0, 0
+
+    prompt = (
+        "Extract all question paper text and multiple-choice questions from this scanned page faithfully. "
+        "Keep question numbers, Malayalam/English text, options (A, B, C, D), and answers verbatim. "
+        "Transcribe mathematical formulas into standard inline LaTeX ($...$)."
+    )
+
+    if engine == "groq":
+        enable_groq = os.getenv("ENABLE_GROQ", "false").lower() in ("true", "1", "yes")
+        groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+        if enable_groq and groq_key and not groq_key.startswith("your_") and Groq is not None:
+            try:
+                client = Groq(api_key=groq_key, timeout=25.0)
+                b64_img = base64.b64encode(img_bytes).decode("utf-8")
+                model_name = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
+                resp = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}}
+                            ]
+                        }
+                    ],
+                    temperature=0.1,
+                    max_tokens=2048,
+                    timeout=20.0
+                )
+                txt = resp.choices[0].message.content.strip()
+                p_tok = resp.usage.prompt_tokens if resp.usage else 0
+                c_tok = resp.usage.completion_tokens if resp.usage else 0
+                return txt, p_tok, c_tok
+            except Exception as e:
+                print(f"[Page OCR] Groq Vision failed: {e}", flush=True)
+
+    if engine == "gemini":
+        enable_gemini = os.getenv("ENABLE_GEMINI", "false").lower() in ("true", "1", "yes")
+        google_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+        if enable_gemini and google_key and not google_key.startswith("your_"):
+            try:
+                client = genai.Client(api_key=google_key)
+                model_name = os.getenv("GEMINI_EXTRACT_MODEL", "gemini-3.1-flash")
+                res = client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+                        prompt
+                    ]
+                )
+                txt = res.text.strip()
+                p_tok = res.usage_metadata.prompt_token_count if res.usage_metadata else 0
+                c_tok = res.usage_metadata.candidates_token_count if res.usage_metadata else 0
+                return txt, p_tok, c_tok
+            except Exception as e:
+                print(f"[Page OCR] Gemini Vision failed: {e}", flush=True)
+
+    return "", 0, 0
+
+
+def ocr_whole_pdf(file_path: str, engine: Optional[str] = None) -> dict:
+    """
+    Renders every page of the PDF at 200 DPI and extracts clean Unicode text
+    via Vision / Tesseract OCR when consecutive unreadable questions are detected.
+
+    Returns:
+        {
+            "full_text": str,
+            "pages": list[dict],
+            "prompt_tokens": int,
+            "completion_tokens": int,
+            "total_tokens": int,
+        }
+    """
+    doc = pymupdf.open(file_path)
+    full_pages = []
+    pages_metadata = []
+    total_p_tok = 0
+    total_c_tok = 0
+
+    print(f"[Whole PDF OCR] Triggered full document OCR scan on {len(doc)} pages: {file_path}", flush=True)
+
+    for page_idx, page in enumerate(doc):
+        print(f"[Whole PDF OCR] Processing page {page_idx + 1}/{len(doc)}...", flush=True)
+        pix = page.get_pixmap(dpi=200)
+        img_bytes = pix.tobytes("png")
+
+        txt, p_tok, c_tok = ocr_page_vision(img_bytes, engine=engine, force=True)
+        total_p_tok += p_tok
+        total_c_tok += c_tok
+
+        from .text_cleaner import clean_indic_text
+        cleaned_txt, _ = clean_indic_text(txt) if txt else ("", [])
+        final_page_text = cleaned_txt or txt or ""
+
+        full_pages.append(final_page_text)
+        pages_metadata.append({
+            "page_num": page_idx,
+            "text": final_page_text,
+            "font_hashes": {},
+            "char_confidences": {},
+            "unmapped_codes": [],
+            "validation_flags": [],
+            "has_text_layer": True,
+            "is_ocr_scanned": True,
+        })
+
+    doc.close()
+    full_text = "\n\n".join(full_pages)
+    print(f"[Whole PDF OCR] Completed full document scan. Total text extracted: {len(full_text)} chars", flush=True)
+
+    return {
+        "full_text": full_text,
+        "pages": pages_metadata,
+        "prompt_tokens": total_p_tok,
+        "completion_tokens": total_c_tok,
+        "total_tokens": total_p_tok + total_c_tok,
+    }
 
 
 def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict] = None) -> tuple[str, list[dict]]:
@@ -653,9 +867,7 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
 
                     # Whitespace characters and synthetic spaces must not be mapped through font maps,
                     # unless it is a wide non-blank glyph with an actual font mapping!
-                    if ch in ("\n", "\r", "\t"):
-                        resolved = ch
-                    elif (ch in (" ", "\xa0") or c.get("synthetic")) and not is_real_glyph:
+                    if (ch in ("\n", "\r", "\t", " ", "\xa0") or c.get("synthetic")) and not is_real_glyph:
                         resolved = ch
                     elif 0x0D00 <= code <= 0x0D7F:
                         # Character is already a valid standard Malayalam Unicode code point from PDF ToUnicode CMap!
@@ -673,12 +885,15 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                                 "bbox": list(bbox) if bbox else None
                             })
 
-                    # Combining signs that should never be preceded by a detached space
-                    COMBINING_SIGNS = (0x0D02, 0x0D03, 0x0D4D, 0x0D57)
+                    # Post-base combining signs that attach to the left consonant and must NEVER be preceded by a space.
+                    # Pre-base matras (െ, േ, ൈ) at the beginning of a word CAN be preceded by a space when there is a word gap.
+                    POST_BASE_SIGNS = (
+                        0x0D02, 0x0D03, 0x0D3E, 0x0D3F, 0x0D40, 0x0D41, 0x0D42, 0x0D43, 0x0D44,
+                        0x0D4A, 0x0D4B, 0x0D4C, 0x0D4D, 0x0D57
+                    )
                     is_combining = (
                         bool(resolved) and (
-                            (0x0D3E <= ord(resolved[0]) <= 0x0D4E) or 
-                            (ord(resolved[0]) in COMBINING_SIGNS) or
+                            (ord(resolved[0]) in POST_BASE_SIGNS) or
                             resolved.startswith("\u0D4D")
                         )
                     )
@@ -687,12 +902,9 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                     if bbox and prev_x1 is not None:
                         dist = bbox[0] - prev_x1
                         previous_text = "".join(line_chars)
-                        previous_is_malayalam = bool(re.search(r"[\u0D00-\u0D7F]$", previous_text))
-                        current_is_malayalam = bool(re.match(r"[\u0D00-\u0D7F]", resolved))
                         if (
                             dist > font_size * 0.18
                             and not previous_text.endswith(" ")
-                            and not (previous_is_malayalam and current_is_malayalam)
                         ):
                             if not is_combining and not is_superscript and resolved not in (" ", "\n", "\xa0"):
                                 line_chars.append(" ")
@@ -943,7 +1155,7 @@ def extract_text_from_pdf(file_path: str) -> dict:
         # Step 2: Universal font map detection and text rebuild
         # ---------------------------------------------------------------
         page_blocks = [b[4] for b in page.get_text("blocks") if len(b) > 4 and b[4].strip()]
-        font_map = get_or_create_font_map(doc, page_idx, affected_texts=page_blocks)
+        font_map, confidence_map = get_or_create_font_map(doc, page_idx, affected_texts=page_blocks)
 
         # Collect font hashes for this page (for downstream repair_node)
         page_font_hashes = {}
@@ -976,7 +1188,7 @@ def extract_text_from_pdf(file_path: str) -> dict:
         # Step 3: Clean and normalize
         # ---------------------------------------------------------------
         from .text_cleaner import clean_indic_text
-        page_text = clean_indic_text(page_text)
+        page_text, page_flags = clean_indic_text(page_text)
 
         # ---------------------------------------------------------------
         # Step 4: FML/ML-TT legacy font heuristic
@@ -986,7 +1198,8 @@ def extract_text_from_pdf(file_path: str) -> dict:
             print(f"Page {page_idx + 1}: FML/ML-TT legacy symbols detected. Transliterating...", flush=True)
             from .smc_fml_converter import convert_fml_to_unicode
             page_text = convert_fml_to_unicode(page_text)
-            page_text = clean_indic_text(page_text)
+            page_text, extra_flags = clean_indic_text(page_text)
+            page_flags.extend(extra_flags)
 
         # ---------------------------------------------------------------
         # Step 5: Check for image-only pages (no text layer at all)
@@ -1010,7 +1223,9 @@ def extract_text_from_pdf(file_path: str) -> dict:
             "page_num": page_idx,
             "text": page_text,
             "font_hashes": page_font_hashes,
+            "char_confidences": confidence_map,  # per-glyph resolution confidence for word routing
             "unmapped_codes": unmapped_codes,
+            "validation_flags": page_flags,
             "has_text_layer": has_text_layer,
         })
 

@@ -274,10 +274,17 @@ def is_indic_font(font_name: str, font_buffer: bytes = None) -> bool:
     return False
 
 
-def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
+def build_font_map_from_buffer(buffer: bytes, basefont: str) -> tuple[dict, dict]:
     """
     Builds a GID/CID/char-code -> Unicode mapping for a font buffer using
     the master hash database, topological signatures, and legacy fallbacks.
+
+    Returns:
+        (cid_to_unicode, cid_to_confidence)
+        where cid_to_confidence maps the same keys to their resolution source:
+        "exact_hash", "topo_sig", or "legacy_shree".
+        Downstream code uses this to distinguish high-confidence exact matches
+        from nearest-neighbor fallbacks that should route to LLM review.
     """
     master_hashes, topo_sigs = load_master_hashes()
 
@@ -286,10 +293,11 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
         tmp_path = tmp.name
 
     cid_to_unicode = {}
+    cid_to_confidence = {}  # parallel dict: same keys → resolution source
     try:
         font = TTFont(tmp_path)
         if 'glyf' not in font:
-            return {}
+            return {}, {}
         glyf = font['glyf']
         glyph_order = font.getGlyphOrder()
         cmap = font['cmap'].getBestCmap() if 'cmap' in font else {}
@@ -304,12 +312,17 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
         def _assign_mapping(gid, gname, text, source="exact_hash"):
             cid_to_unicode[gid] = text
             cid_to_unicode[str(gid)] = text
+            cid_to_confidence[gid] = source
+            cid_to_confidence[str(gid)] = source
             resolution_counts[source] = resolution_counts.get(source, 0) + 1
             for code in gname_to_codes.get(gname, []):
                 cid_to_unicode[code] = text
                 cid_to_unicode[str(code)] = text
+                cid_to_confidence[code] = source
+                cid_to_confidence[str(code)] = source
                 try:
                     cid_to_unicode[chr(code)] = text
+                    cid_to_confidence[chr(code)] = source
                 except Exception:
                     pass
 
@@ -371,7 +384,7 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> dict:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-    return cid_to_unicode
+    return cid_to_unicode, cid_to_confidence
 
 
 def get_or_create_font_map(doc: pymupdf.Document, page_idx: int, affected_texts: list[str] = None) -> dict:
@@ -386,6 +399,7 @@ def get_or_create_font_map(doc: pymupdf.Document, page_idx: int, affected_texts:
     page = doc[page_idx]
     fonts = page.get_fonts(full=True)
     result = {}
+    confidence_result = {}
 
     for font_info in fonts:
         xref = font_info[0]
@@ -410,18 +424,21 @@ def get_or_create_font_map(doc: pymupdf.Document, page_idx: int, affected_texts:
         cache_file = os.path.join(CACHE_DIR, f"{font_data_hash}_map.json")
 
         cid_to_correct = None
+        cid_to_conf = None
 
         # Check cache
         if os.path.exists(cache_file):
             try:
                 with open(cache_file, "r", encoding="utf-8") as cf:
-                    cid_to_correct = json.load(cf)
+                    data = json.load(cf)
+                    if isinstance(data, dict):
+                        cid_to_correct = {**data, **{int(k): v for k, v in data.items() if k.isdigit()}}
             except Exception:
                 cid_to_correct = None
 
         if not cid_to_correct:
             # 1. Build map via shape matching & topological signature
-            cid_to_correct = build_font_map_from_buffer(buffer, basefont)
+            cid_to_correct, cid_to_conf = build_font_map_from_buffer(buffer, basefont)
 
             # 2. If shape matching yields low coverage (< 10 glyphs) and Gemini is active,
             # autonomously analyze the unrecognized font and validate before committing!
@@ -465,4 +482,10 @@ def get_or_create_font_map(doc: pymupdf.Document, page_idx: int, affected_texts:
                     result[key] = {}
                 result[key].update(cid_to_correct)
 
-    return result
+        if cid_to_conf:
+            for key in (font_name, basefont, clean_name):
+                if key not in confidence_result:
+                    confidence_result[key] = {}
+                confidence_result[key].update(cid_to_conf)
+
+    return result, confidence_result

@@ -4,7 +4,8 @@ import { useState, useEffect } from 'react';
 import { 
   UploadCloud, FileText, CheckCircle2, AlertTriangle, Trash2, ExternalLink, 
   RefreshCw, Type, X, Sparkles, ArrowLeft, Eye, Check, Clock, Cpu, ShieldCheck, 
-  ChevronRight, BarChart3, HelpCircle, Layers 
+  ChevronRight, BarChart3, HelpCircle, Layers, Sliders, Settings, Save, CheckCircle,
+  ScanLine, Database, Bot, Zap
 } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
@@ -38,13 +39,16 @@ function sanitizeMathForKatex(math: string): string {
   m = m.replace(/\bV(\d+)\b/g, '\\sqrt{$1}');
   m = m.replace(/\\x\b/g, 'x');
 
-  // Exponent misrecognitions: \times 2 -> x^2 when not after a number
-  m = m.replace(/(?<!\d)\s*\\times\s*([0-9])\b/g, 'x^{$1}');
-  m = m.replace(/^\\times\s*([0-9])\b/g, 'x^{$1}');
-  m = m.replace(/=\s*\\times\s*([0-9])\b/g, '= x^{$1}');
+  // Normalize Unicode multiplication sign × to \times
+  m = m.replace(/×/g, '\\times ');
+  // Heal any corrupted x^3 after number/power to \times (e.g. 2^5 x^3 -> 2^5 \times 3)
+  m = m.replace(/(\d+(?:\^\d+)?)\s*[xX]\^([0-9])\b/g, '$1 \\times $2');
+  // Heal any number x number to \times (e.g. 2^2 x 101 -> 2^2 \times 101, 96 x 404 -> 96 \times 404)
+  m = m.replace(/(\d+(?:\.\d+)?|\^\{?\d+\}?)\s*[xX]\s*(\d+(?:\.\d+)?)/g, '$1 \\times $2');
+  // Separate adjacent equations that lost comma: "3 404 =" -> "3, 404 ="
+  m = m.replace(/(\d+)\s+(?=\d+\s*=)/g, '$1, ');
+  // Standalone \times at start of equation: \times = -> x =
   m = m.replace(/^\\times\s*=/g, 'x =');
-  m = m.replace(/=\s*\\times\b/g, '= x');
-  m = m.replace(/(?<=[=,\s])\\times(?=[=,\s]|$)/g, 'x');
 
   // Vector expressions: fix (= + y) -> (x + y) and (y = x) -> (y - x)
   m = m.replace(/\(\s*=\s*\+\s*([a-zA-Z0-9])\s*\)/g, '(x + $1)');
@@ -105,6 +109,41 @@ function sanitizeMathForKatex(math: string): string {
   return m;
 }
 
+function formatTokenCost(usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; estimated_cost_usd?: number }): string {
+  if (!usage) return '$0.00';
+  if (typeof usage.estimated_cost_usd === 'number' && usage.estimated_cost_usd > 0) {
+    if (usage.estimated_cost_usd < 0.0001) return '<$0.0001';
+    return `$${usage.estimated_cost_usd.toFixed(4)}`;
+  }
+  const p = usage.prompt_tokens || 0;
+  const c = usage.completion_tokens || 0;
+  const est = (p * 0.59 + c * 0.79) / 1000000;
+  if (est === 0) return '$0.00';
+  if (est < 0.0001) return '<$0.0001';
+  return `$${est.toFixed(4)}`;
+}
+
+function formatQuestionStem(text: string): string {
+  if (!text) return '';
+  let s = text.replace(/\u00a0/g, ' ');
+
+  // Remove redundant leading Question prefix if duplicated in stem (e.g. "Q1: ", "Question 1:- ", "1. ")
+  s = s.replace(/^(?:Question\s*|Q\.?\s*|ചോദ്യം\s*)\d+\s*(?::\-?|[\.\):-])\s*/i, '');
+  s = s.replace(/^\d+\s*[\.\):-]\s+/, '');
+
+  // Ensure Roman numerals like (i), (ii), (iii), (iv), (v) or i), ii) have a newline before them
+  s = s.replace(/(?<=[^\n])\s+(\([ivxlcdmIVXLCDM]+\))\s*/g, '\n$1 ');
+  s = s.replace(/(?<=[?.!:;])\s*([ivxlcdmIVXLCDM]+\))\s*/g, '\n$1 ');
+
+  // Ensure numbered sub-statements like (1), (2), (3) or (a), (b), (c) after sentence endings have newlines
+  s = s.replace(/(?<=[?.!:;])\s*(\([1-9a-dA-D]\))\s*/g, '\n$1 ');
+
+  // Trim extra blank lines (maximum 2 consecutive newlines)
+  s = s.replace(/\n{3,}/g, '\n\n');
+
+  return s.trim();
+}
+
 function renderLatex(text: string): string {
   if (!text) return '';
 
@@ -126,8 +165,11 @@ function renderLatex(text: string): string {
   s = s.replace(/\bVX\b/g, '\\sqrt{x}');
   s = s.replace(/\bVx\b/g, '\\sqrt{x}');
   s = s.replace(/\\x\b/g, 'x');
-  s = s.replace(/(?<=[=,\s])\s*\\times\s*([0-9])\b/g, ' x^{$1}');
-  s = s.replace(/\$\\times\s*([0-9])\b/g, '$x^{$1}');
+  // Normalize Unicode multiplication sign × to \times and heal multiplication
+  s = s.replace(/×/g, '\\times ');
+  s = s.replace(/(\d+(?:\^\d+)?)\s*[xX]\^([0-9])\b/g, '$1 \\times $2');
+  s = s.replace(/(\d+(?:\.\d+)?|\^\{?\d+\}?)\s*[xX]\s*(\d+(?:\.\d+)?)/g, '$1 \\times $2');
+  s = s.replace(/(\d+)\s+(?=\d+\s*=)/g, '$1, ');
   s = s.replace(/\(\s*=\s*\+\s*([a-zA-Z0-9])\s*\)/g, '(x + $1)');
   s = s.replace(/\(\s*([a-zA-Z])\s*=\s*([a-zA-Z0-9])\s*\)/g, '($1 - $2)');
   s = s.replace(/\)\s*[iI]\b/g, ')\\hat{i}');
@@ -317,13 +359,17 @@ function renderLatex(text: string): string {
     }
   });
 
-  // 8. Superscript exponents: x², x³, x⁴, etc.
-  s = s.replace(/([a-zA-Z0-9\)])([²³⁴ⁿ])/g, (_, base, sup) => {
-    const map: Record<string, string> = { '²': '^2', '³': '^3', '⁴': '^4', 'ⁿ': '^n' };
+  // 8. Superscript exponents: x², x³, 2⁵, etc.
+  s = s.replace(/([a-zA-Z0-9\)])([⁰¹²³⁴⁵⁶⁷⁸⁹ⁿ]+)/g, (_, base, sup) => {
+    const map: Record<string, string> = {
+      '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
+      '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9', 'ⁿ': 'n'
+    };
+    const supStr = Array.from(sup).map((c: any) => map[c] || c).join('');
     try {
-      return katex.renderToString(`${base}${map[sup]}`, { displayMode: false, throwOnError: false, strict: false });
+      return katex.renderToString(`${base}^{${supStr}}`, { displayMode: false, throwOnError: false, strict: false });
     } catch {
-      return `${base}${sup}`;
+      return `${base}^{${supStr}}`;
     }
   });
 
@@ -366,6 +412,74 @@ interface AppConfig {
   llm_enabled?: boolean;
   active_provider?: string;
   answer_validation_enabled?: boolean;
+  validation_enabled?: boolean;
+  validation_provider?: string;
+  correction_enabled?: boolean;
+  correction_provider?: string;
+  repair_enabled?: boolean;
+  math_ocr_enabled?: boolean;
+  math_ocr_engine?: string;
+  question_ocr_enabled?: boolean;
+  question_ocr_engine?: string;
+  auto_convert_math?: boolean;
+  available_math_engines?: string[];
+  available_question_engines?: string[];
+  available_providers?: string[];
+}
+
+interface PipelineStepItem {
+  name: string;
+  label: string;
+  status: 'completed' | 'skipped' | 'not_needed' | 'in_progress' | 'error' | string;
+  details: string;
+}
+
+const PIPELINE_STEP_CONFIGS = [
+  { key: 'scanned', shortLabel: 'Scan', label: 'Scanned', icon: ScanLine },
+  { key: 'checked_with_caches', shortLabel: 'Cache', label: 'Checked with Caches', icon: Database },
+  { key: 'send_errors_to_llms', shortLabel: 'LLM', label: 'Send Errors to LLMs', icon: Bot },
+  { key: 'ocr_scanned', shortLabel: 'OCR', label: 'OCR Scanned', icon: Cpu },
+];
+
+function getQuestionPipelineSteps(q: any): Record<string, PipelineStepItem> {
+  if (q?.pipeline_steps && typeof q.pipeline_steps === 'object') {
+    return q.pipeline_steps;
+  }
+
+  // Graceful fallback for legacy questions stored before pipeline_steps instrumentation
+  const hasStem = Boolean(q?.stem && q.stem.trim().length > 0);
+  const hasValidation = Boolean(q?.validated_answer);
+  const hasMath = Boolean(
+    (q?.stem && (q.stem.includes('<img') || q.stem.includes('$') || q.stem.includes('\\frac'))) ||
+    Object.values(q?.options || {}).some((v: any) => typeof v === 'string' && (v.includes('<img') || v.includes('$') || v.includes('\\frac')))
+  );
+
+  return {
+    scanned: {
+      name: 'scanned',
+      label: 'Scanned',
+      status: hasStem ? 'completed' : 'not_needed',
+      details: hasStem ? `Extracted from PDF Page ${(q.page_number || 0) + 1}` : 'Pending scan'
+    },
+    checked_with_caches: {
+      name: 'checked_with_caches',
+      label: 'Checked with Caches',
+      status: 'completed',
+      details: 'Malayalam dictionary checked & font bug cache applied'
+    },
+    send_errors_to_llms: {
+      name: 'send_errors_to_llms',
+      label: 'Send Errors to LLMs',
+      status: hasValidation ? 'completed' : 'skipped',
+      details: hasValidation ? `Validated with AI (${q.validated_answer})` : 'LLM validation skipped or offline'
+    },
+    ocr_scanned: {
+      name: 'ocr_scanned',
+      label: 'OCR Scanned',
+      status: hasMath ? 'completed' : 'not_needed',
+      details: hasMath ? 'Math equations / OCR clips processed' : 'Text-only question (no image OCR required)'
+    }
+  };
 }
 
 export default function Home() {
@@ -420,18 +534,64 @@ export default function Home() {
     }
   };
 
+  // Pipeline Settings Modal State
+  const [showConfigModal, setShowConfigModal] = useState(false);
+  const [configForm, setConfigForm] = useState<Partial<AppConfig>>({});
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [configSaveMsg, setConfigSaveMsg] = useState('');
+  const [selectedRescanEngine, setSelectedRescanEngine] = useState<string>('default');
+
+  const openConfigModal = () => {
+    if (config) {
+      setConfigForm({ ...config });
+    }
+    setConfigSaveMsg('');
+    setShowConfigModal(true);
+  };
+
+  const handleSaveConfig = async () => {
+    setIsSavingConfig(true);
+    setConfigSaveMsg('');
+    try {
+      const res = await fetch(`${API_BASE}/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(configForm)
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.detail || 'Failed to update settings');
+      }
+      const updated = await res.json();
+      setConfig(updated);
+      setConfigSaveMsg('Settings saved successfully!');
+      setTimeout(() => {
+        setConfigSaveMsg('');
+        setShowConfigModal(false);
+      }, 1000);
+    } catch (e: any) {
+      console.error('Failed to update config:', e);
+      setConfigSaveMsg(e.message || 'Failed to save settings');
+    } finally {
+      setIsSavingConfig(false);
+    }
+  };
+
   const [isRescanning, setIsRescanning] = useState(false);
+  const [isRewriting, setIsRewriting] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
 
-  const handleRescan = async (questionNumber: number) => {
+  const handleRescan = async (questionNumber: number, engineOverride?: string) => {
     if (!selectedJobId) return;
     setIsRescanning(true);
     try {
-      const res = await fetch(`${API_BASE}/pdfs/${selectedJobId}/rescan/${questionNumber}`, {
+      const engineParam = engineOverride && engineOverride !== 'default' ? `?engine=${engineOverride}` : '';
+      const res = await fetch(`${API_BASE}/pdfs/${selectedJobId}/rescan/${questionNumber}${engineParam}`, {
         method: 'POST'
       });
       if (!res.ok) {
-        throw new Error('Failed to rescan question');
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to rescan question');
       }
       const updatedQuestion = await res.json();
       
@@ -446,11 +606,97 @@ export default function Home() {
         );
         return { ...prev, questions: newQuestions };
       });
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to rescan', err);
-      alert('Failed to rescan question. Please check server logs.');
+      alert(err.message || 'Failed to rescan question. Please check server logs.');
     } finally {
       setIsRescanning(false);
+    }
+  };
+
+  const handleAiRewrite = async (qData: any) => {
+    setIsRewriting(true);
+    try {
+      const res = await fetch(`${API_BASE}/fix_question_with_ai`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: selectedJobId,
+          question_number: qData.question_number,
+          stem: qData.stem,
+          options: qData.options,
+          marked_answer: qData.marked_answer || qData.marked_correct_answer,
+          explanation: qData.explanation || qData.reasoning
+        })
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to rewrite question with AI');
+      }
+      
+      const result = await res.json();
+      if (!result.success) {
+        throw new Error(result.error || 'LLM failed to return a valid correction');
+      }
+      
+      const valAns = result.validated_answer || (result.is_valid ? (qData.marked_answer || qData.marked_correct_answer) : null);
+      const markedAns = qData.marked_answer || qData.marked_correct_answer;
+      const isValid = result.is_valid !== undefined ? result.is_valid : Boolean(valAns && markedAns && valAns.toUpperCase() === markedAns.toUpperCase());
+
+      const updatedQuestion = {
+        ...qData,
+        stem: result.corrected_stem,
+        options: result.corrected_options,
+        is_valid: isValid,
+        validated_answer: valAns,
+        reasoning: result.reasoning,
+        explanation: result.reasoning || qData.explanation,
+        token_usage: result.token_usage,
+        pipeline_steps: {
+          ...(qData.pipeline_steps || {}),
+          send_errors_to_llms: {
+            name: "send_errors_to_llms",
+            label: "Send Errors to LLMs",
+            status: "completed",
+            details: isValid 
+              ? `AI verified answer (Agreed: Option ${valAns || 'Match'}). Text & options rewritten.`
+              : `AI disagreed: verified Option ${valAns || 'different'} vs marked ${markedAns || '—'}.`
+          }
+        }
+      };
+      
+      setSelectedQuestion(updatedQuestion);
+      setJobResult((prev: any) => {
+        if (!prev) return prev;
+        const newQuestions = prev.questions.map((q: any) => 
+          q.question_number === qData.question_number ? updatedQuestion : q
+        );
+        const prevUsage = prev.summary?.token_usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
+        const addedUsage = result.token_usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
+        const newUsage = {
+          prompt_tokens: (prevUsage.prompt_tokens || 0) + (addedUsage.prompt_tokens || 0),
+          completion_tokens: (prevUsage.completion_tokens || 0) + (addedUsage.completion_tokens || 0),
+          total_tokens: (prevUsage.total_tokens || 0) + (addedUsage.total_tokens || 0),
+          estimated_cost_usd: Math.round(((prevUsage.estimated_cost_usd || 0) + (addedUsage.estimated_cost_usd || 0)) * 1000000) / 1000000,
+        };
+        const validatedCount = newQuestions.filter((q: any) => q.is_valid).length;
+        const flaggedCount = newQuestions.filter((q: any) => q.validated_answer && !q.is_valid).length;
+        return { 
+          ...prev, 
+          questions: newQuestions,
+          summary: {
+            ...prev.summary,
+            validated: validatedCount,
+            flagged: flaggedCount,
+            token_usage: newUsage
+          }
+        };
+      });
+    } catch (err: any) {
+      console.error('Failed to rewrite with AI', err);
+      alert(err.message || 'Failed to rewrite question. Please check server logs.');
+    } finally {
+      setIsRewriting(false);
     }
   };
 
@@ -602,6 +848,23 @@ export default function Home() {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
           <button
+            onClick={openConfigModal}
+            className="btn btn-secondary"
+            style={{
+              padding: '0.4rem 0.85rem',
+              borderRadius: '9999px',
+              fontSize: '0.8rem',
+              color: '#e2e8f0',
+              borderColor: 'rgba(56, 189, 248, 0.35)',
+              background: 'rgba(56, 189, 248, 0.08)'
+            }}
+            title="Configure Math OCR, Question OCR, AI models, and validation"
+          >
+            <Sliders size={14} color="#38bdf8" />
+            <span>OCR &amp; Model Settings</span>
+          </button>
+
+          <button
             onClick={() => { setShowFontModal(true); loadFonts(); }}
             className="btn btn-secondary"
             style={{
@@ -701,9 +964,15 @@ export default function Home() {
                       >
                         {job.filename}
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', marginTop: '0.35rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.35rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                         <Clock size={12} />
                         <span>{new Date(job.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                        {job.question_count != null && (
+                          <>
+                            <span>•</span>
+                            <span style={{ fontWeight: 600, color: '#93c5fd' }}>{job.question_count} Qs</span>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -860,6 +1129,48 @@ export default function Home() {
                     </div>
                   )}
 
+                  {/* LLM Token Usage & Cost Chip */}
+                  {jobResult.summary?.token_usage && (
+                    <div 
+                      className="stat-chip" 
+                      style={{ 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: '0.65rem',
+                        border: '1px solid rgba(56, 189, 248, 0.25)',
+                        background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.08) 0%, rgba(99, 102, 241, 0.06) 100%)',
+                        padding: '0.45rem 0.85rem'
+                      }}
+                      title={`Prompt Tokens: ${jobResult.summary.token_usage.prompt_tokens?.toLocaleString() || 0} | Output Tokens: ${jobResult.summary.token_usage.completion_tokens?.toLocaleString() || 0}`}
+                    >
+                      <div style={{ 
+                        width: '26px', 
+                        height: '26px', 
+                        borderRadius: '6px', 
+                        background: 'rgba(56, 189, 248, 0.15)', 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        justifyContent: 'center',
+                        color: '#38bdf8'
+                      }}>
+                        <Zap size={14} />
+                      </div>
+                      <div>
+                        <span className="stat-chip-label" style={{ display: 'block', fontSize: '0.68rem', color: '#94a3b8' }}>
+                          Token Cost
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: '6px' }}>
+                          <span style={{ fontSize: '0.92rem', fontWeight: 700, color: '#34d399' }}>
+                            {formatTokenCost(jobResult.summary.token_usage)}
+                          </span>
+                          <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                            ({(jobResult.summary.token_usage.total_tokens || 0).toLocaleString()} tok)
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {!(jobResult.summary.validated > 0 || jobResult.summary.flagged > 0) && (
                     <div className="pill-badge muted" title="AI Answer Verification is inactive (offline mode)">
                       <span className="pill-dot" />
@@ -883,9 +1194,10 @@ export default function Home() {
                     <tr>
                       <th style={{ width: '64px', textAlign: 'center' }}>Q#</th>
                       <th>Question Stem Preview</th>
-                      <th style={{ width: '110px' }}>Marked Key</th>
-                      <th style={{ width: '130px' }}>AI Answer</th>
-                      <th style={{ width: '140px' }}>Status</th>
+                      <th style={{ width: '100px' }}>Marked Key</th>
+                      <th style={{ width: '110px' }}>AI Answer</th>
+                      <th style={{ width: '250px' }}>Pipeline Steps</th>
+                      <th style={{ width: '130px' }}>Status</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -924,20 +1236,82 @@ export default function Home() {
                           </span>
                         </td>
                         <td>
-                          {q.validated_answer ? (
-                            <span style={{ 
-                              fontWeight: 700, 
-                              color: q.is_valid ? 'var(--success)' : 'var(--warning)',
-                              background: q.is_valid ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
-                              padding: '3px 9px',
-                              borderRadius: '6px',
-                              fontSize: '0.85rem'
-                            }}>
-                              {q.validated_answer}
-                            </span>
-                          ) : (
-                            <span style={{ color: 'var(--text-muted)' }}>—</span>
-                          )}
+                          {(() => {
+                            const valAns = q.validated_answer || (q.is_valid ? (q.marked_correct_answer || q.marked_answer) : null);
+                            if (valAns) {
+                              return (
+                                <span style={{ 
+                                  fontWeight: 700, 
+                                  color: q.is_valid ? 'var(--success)' : 'var(--warning)',
+                                  background: q.is_valid ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+                                  padding: '3px 9px',
+                                  borderRadius: '6px',
+                                  fontSize: '0.85rem'
+                                }}>
+                                  {valAns} {q.is_valid ? '✓' : '≠'}
+                                </span>
+                              );
+                            }
+                            return <span style={{ color: 'var(--text-muted)' }}>—</span>;
+                          })()}
+                        </td>
+                        <td>
+                          {(() => {
+                            const steps = getQuestionPipelineSteps(q);
+                            return (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'nowrap' }}>
+                                {PIPELINE_STEP_CONFIGS.map(cfg => {
+                                  const step = steps[cfg.key];
+                                  const status = step?.status || 'completed';
+                                  const isDone = status === 'completed';
+                                  const isSkipped = status === 'skipped';
+                                  const isNotNeeded = status === 'not_needed';
+                                  const Icon = cfg.icon;
+
+                                  let color = '#10b981';
+                                  let bg = 'rgba(16, 185, 129, 0.12)';
+                                  let border = 'rgba(16, 185, 129, 0.25)';
+
+                                  if (isSkipped) {
+                                    color = '#f59e0b';
+                                    bg = 'rgba(245, 158, 11, 0.12)';
+                                    border = 'rgba(245, 158, 11, 0.25)';
+                                  } else if (isNotNeeded) {
+                                    color = '#94a3b8';
+                                    bg = 'rgba(148, 163, 184, 0.08)';
+                                    border = 'rgba(148, 163, 184, 0.18)';
+                                  } else if (status === 'error') {
+                                    color = '#f87171';
+                                    bg = 'rgba(248, 113, 113, 0.12)';
+                                    border = 'rgba(248, 113, 113, 0.25)';
+                                  }
+
+                                  return (
+                                    <span
+                                      key={cfg.key}
+                                      title={`${step?.label || cfg.label}: ${status.toUpperCase()}\n${step?.details || ''}`}
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '3px',
+                                        padding: '2px 5px',
+                                        borderRadius: '5px',
+                                        fontSize: '0.67rem',
+                                        fontWeight: 600,
+                                        color,
+                                        background: bg,
+                                        border: `1px solid ${border}`,
+                                        cursor: 'help'
+                                      }}
+                                    >
+                                      <Icon size={11} />
+                                      {cfg.shortLabel}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
                         </td>
                         <td>
                           {q.validated_answer ? (
@@ -1002,22 +1376,97 @@ export default function Home() {
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
-                <button 
-                  className="btn btn-secondary" 
-                  onClick={() => handleRescan(selectedQuestion.question_number)}
-                  disabled={isRescanning}
+                <button
+                  className="btn btn-primary"
+                  onClick={() => handleAiRewrite(selectedQuestion)}
+                  disabled={isRewriting}
                   style={{
-                    padding: '0.4rem 0.85rem',
+                    padding: '0.35rem 0.75rem',
                     borderRadius: '9999px',
-                    fontSize: '0.8rem',
-                    opacity: isRescanning ? 0.7 : 1,
-                    cursor: isRescanning ? 'not-allowed' : 'pointer'
+                    fontSize: '0.78rem',
+                    background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                    color: 'white',
+                    border: 'none',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    opacity: isRewriting ? 0.7 : 1,
+                    cursor: isRewriting ? 'not-allowed' : 'pointer',
+                    boxShadow: '0 2px 8px rgba(16, 185, 129, 0.3)'
                   }}
-                  title="Uses Gemini Vision to fix OCR errors by scanning the exact page"
+                  title="Sends the current text to AI to completely rewrite it with perfect spelling and formatting"
                 >
-                  <RefreshCw size={13} className={isRescanning ? "spin" : ""} color="#60a5fa" />
-                  <span>{isRescanning ? 'Scanning...' : 'Rescan AI'}</span>
+                  {isRewriting ? (
+                    <>
+                      <RefreshCw size={12} className="spin" color="white" />
+                      <span>Rewriting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles size={12} color="white" />
+                      <span>Rewrite with AI</span>
+                    </>
+                  )}
                 </button>
+                {config?.question_ocr_enabled !== false ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'rgba(255,255,255,0.04)', padding: '0.2rem 0.4rem', borderRadius: '9999px', border: '1px solid rgba(255,255,255,0.08)' }}>
+                    <select
+                      value={selectedRescanEngine}
+                      onChange={(e) => setSelectedRescanEngine(e.target.value)}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: '#94a3b8',
+                        fontSize: '0.75rem',
+                        outline: 'none',
+                        cursor: 'pointer',
+                        padding: '0.2rem 0.4rem'
+                      }}
+                      title="Select which OCR model/engine to use for rescanning"
+                    >
+                      <option value="default" style={{ background: '#18181b', color: '#f8fafc' }}>
+                        Default ({config?.question_ocr_engine || 'Configured'})
+                      </option>
+                      <option value="groq" style={{ background: '#18181b', color: '#f8fafc' }}>Groq Vision</option>
+                      <option value="gemini" style={{ background: '#18181b', color: '#f8fafc' }}>Gemini Vision</option>
+                      <option value="tesseract" style={{ background: '#18181b', color: '#f8fafc' }}>Tesseract (Local $0)</option>
+                      <option value="off" style={{ background: '#18181b', color: '#f87171' }}>Turn Off / Disabled</option>
+                    </select>
+
+                    <button 
+                      className="btn btn-secondary" 
+                      onClick={() => handleRescan(selectedQuestion.question_number, selectedRescanEngine)}
+                      disabled={isRescanning}
+                      style={{
+                        padding: '0.35rem 0.75rem',
+                        borderRadius: '9999px',
+                        fontSize: '0.78rem',
+                        opacity: isRescanning ? 0.7 : 1,
+                        cursor: isRescanning ? 'not-allowed' : 'pointer'
+                      }}
+                      title="Rescans question crop directly from PDF using selected OCR engine"
+                    >
+                      <RefreshCw size={12} className={isRescanning ? "spin" : ""} color="#60a5fa" />
+                      <span>{isRescanning ? 'Scanning...' : 'Rescan Question'}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <button 
+                    className="btn btn-secondary"
+                    onClick={openConfigModal}
+                    style={{
+                      padding: '0.35rem 0.75rem',
+                      borderRadius: '9999px',
+                      fontSize: '0.78rem',
+                      opacity: 0.7,
+                      color: '#94a3b8',
+                      cursor: 'pointer'
+                    }}
+                    title="Question OCR is disabled in Pipeline Settings. Click to enable."
+                  >
+                    <span>OCR Disabled (Settings)</span>
+                  </button>
+                )}
                 <button 
                   className="btn btn-ghost" 
                   onClick={() => setSelectedQuestion(null)}
@@ -1028,18 +1477,130 @@ export default function Home() {
               </div>
             </div>
             
+            {/* Pipeline Execution Steps */}
+            {(() => {
+              const steps = getQuestionPipelineSteps(selectedQuestion);
+              return (
+                <div className="detail-box" style={{ marginBottom: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <span className="detail-box-title" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Layers size={14} color="#38bdf8" /> Pipeline Execution Steps
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      Question Processing Lifecycle
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem' }}>
+                    {PIPELINE_STEP_CONFIGS.map(cfg => {
+                      const step = steps[cfg.key];
+                      const status = step?.status || 'completed';
+                      const isDone = status === 'completed';
+                      const isSkipped = status === 'skipped';
+                      const isNotNeeded = status === 'not_needed';
+                      const Icon = cfg.icon;
+
+                      let badgeBg = 'rgba(16, 185, 129, 0.15)';
+                      let badgeColor = '#34d399';
+                      let border = 'rgba(16, 185, 129, 0.25)';
+                      let statusText = 'Completed';
+
+                      if (isSkipped) {
+                        badgeBg = 'rgba(245, 158, 11, 0.15)';
+                        badgeColor = '#fbbf24';
+                        border = 'rgba(245, 158, 11, 0.25)';
+                        statusText = 'Skipped';
+                      } else if (isNotNeeded) {
+                        badgeBg = 'rgba(148, 163, 184, 0.12)';
+                        badgeColor = '#94a3b8';
+                        border = 'rgba(148, 163, 184, 0.2)';
+                        statusText = 'Not Needed';
+                      } else if (status === 'in_progress') {
+                        badgeBg = 'rgba(56, 189, 248, 0.15)';
+                        badgeColor = '#38bdf8';
+                        border = 'rgba(56, 189, 248, 0.25)';
+                        statusText = 'In Progress';
+                      } else if (status === 'error') {
+                        badgeBg = 'rgba(248, 113, 113, 0.15)';
+                        badgeColor = '#f87171';
+                        border = 'rgba(248, 113, 113, 0.25)';
+                        statusText = 'Error';
+                      }
+
+                      return (
+                        <div
+                          key={cfg.key}
+                          style={{
+                            background: 'rgba(255, 255, 255, 0.02)',
+                            border: `1px solid ${border}`,
+                            borderRadius: '8px',
+                            padding: '0.75rem 0.85rem',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '0.4rem'
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, fontSize: '0.82rem', color: '#f1f5f9' }}>
+                              <Icon size={14} color={badgeColor} />
+                              {step?.label || cfg.label}
+                            </div>
+                            <span style={{
+                              fontSize: '0.65rem',
+                              fontWeight: 700,
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.04em',
+                              background: badgeBg,
+                              color: badgeColor
+                            }}>
+                              {statusText}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', lineHeight: '1.4' }}>
+                            {step?.details || 'No details available'}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Question Stem Box */}
             <div className="detail-box">
-              <div className="detail-box-title">Question Stem</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.65rem' }}>
+                <div className="detail-box-title" style={{ margin: 0 }}>Question Stem</div>
+                {selectedQuestion.token_usage && (
+                  <span style={{ 
+                    fontSize: '0.72rem', 
+                    color: '#38bdf8', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: '4px',
+                    background: 'rgba(56, 189, 248, 0.08)',
+                    padding: '2px 8px',
+                    borderRadius: '9999px',
+                    border: '1px solid rgba(56, 189, 248, 0.2)'
+                  }} title={`Prompt: ${selectedQuestion.token_usage.prompt_tokens || 0} | Completion: ${selectedQuestion.token_usage.completion_tokens || 0}`}>
+                    <Zap size={11} />
+                    {selectedQuestion.token_usage.total_tokens || 0} tokens • {formatTokenCost(selectedQuestion.token_usage)}
+                  </span>
+                )}
+              </div>
               <div
                 style={{
                   lineHeight: '1.8',
                   fontSize: '1rem',
                   color: 'var(--text-main)',
+                  whiteSpace: 'pre-line',
+                  wordBreak: 'break-word',
                   tabSize: 4
                 }}
                 dangerouslySetInnerHTML={{
-                  __html: renderLatex(selectedQuestion.stem.trim())
+                  __html: renderLatex(formatQuestionStem(selectedQuestion.stem))
                 }}
               />
             </div>
@@ -1049,9 +1610,15 @@ export default function Home() {
               <div className="detail-box-title">Multiple Choice Options</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
                 {Object.entries(selectedQuestion.options).map(([k, v]: [string, any]) => {
-                  const isValidated = selectedQuestion.validated_answer?.toUpperCase() === k.toUpperCase();
-                  const isMarked = (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer)?.toUpperCase() === k.toUpperCase();
+                  const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
+                  const markedAns = selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer;
+                  const isValidated = Boolean(valAns && valAns.toUpperCase() === k.toUpperCase());
+                  const isMarked = Boolean(markedAns && markedAns.toUpperCase() === k.toUpperCase());
                   
+                  const rawVal = typeof v === 'string' ? v : String(v || '');
+                  // Clean redundant leading option key if already present in text (e.g. "A. option text" -> "option text")
+                  const cleanVal = rawVal.replace(new RegExp(`^\\(?[${k}${k.toLowerCase()}]\\)?[\\.\\):-]?\\s*`), '').trim();
+
                   let border = '1px solid rgba(255, 255, 255, 0.08)';
                   let bg = 'rgba(255, 255, 255, 0.02)';
                   if (isValidated && isMarked) {
@@ -1095,8 +1662,8 @@ export default function Home() {
                           {k}
                         </span>
                         <span
-                          style={{ fontSize: '0.96rem', lineHeight: '1.5', color: 'var(--text-secondary)' }}
-                          dangerouslySetInnerHTML={{ __html: renderLatex(v) }}
+                          style={{ fontSize: '0.96rem', lineHeight: '1.5', color: 'var(--text-secondary)', whiteSpace: 'pre-line', wordBreak: 'break-word' }}
+                          dangerouslySetInnerHTML={{ __html: renderLatex(cleanVal) }}
                         />
                       </div>
                       <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
@@ -1137,21 +1704,31 @@ export default function Home() {
               <div className="detail-box" style={{ margin: 0 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
                   <span className="detail-box-title" style={{ margin: 0 }}>AI Verified Answer</span>
-                  {selectedQuestion.validated_answer ? (
-                    <span style={{ fontSize: '0.7rem', color: selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)', fontWeight: 600 }}>
-                      {selectedQuestion.is_valid ? 'Match' : 'Mismatch'}
-                    </span>
-                  ) : (
-                    <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.04)', padding: '2px 6px', borderRadius: '4px' }}>Offline / None</span>
-                  )}
+                  {(() => {
+                    const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
+                    if (valAns) {
+                      return (
+                        <span style={{ fontSize: '0.7rem', color: selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)', fontWeight: 600 }}>
+                          {selectedQuestion.is_valid ? 'Match' : 'Mismatch'}
+                        </span>
+                      );
+                    }
+                    return (
+                      <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.04)', padding: '2px 6px', borderRadius: '4px' }}>Offline / None</span>
+                    );
+                  })()}
                 </div>
                 <div style={{ 
                   fontSize: '1.75rem', 
                   fontWeight: 800, 
-                  color: selectedQuestion.validated_answer ? (selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)') : 'var(--text-muted)',
+                  color: (() => {
+                    const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
+                    if (!valAns) return 'var(--text-muted)';
+                    return selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)';
+                  })(),
                   marginTop: '0.35rem'
                 }}>
-                  {selectedQuestion.validated_answer || '—'}
+                  {selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null) || '—'}
                 </div>
               </div>
             </div>
@@ -1178,6 +1755,358 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {/* Pipeline & OCR Settings Modal */}
+      {showConfigModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.75)',
+            backdropFilter: 'blur(6px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: '1.5rem'
+          }}
+          onClick={() => setShowConfigModal(false)}
+        >
+          <div
+            style={{
+              background: 'var(--panel-bg, #18181b)',
+              border: '1px solid var(--panel-border, #27272a)',
+              borderRadius: '14px',
+              width: '100%',
+              maxWidth: '680px',
+              maxHeight: '85vh',
+              overflowY: 'auto',
+              padding: '1.75rem',
+              boxShadow: '0 20px 50px rgba(0,0,0,0.6)'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <Sliders size={22} color="#38bdf8" />
+                <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 600 }}>Pipeline &amp; OCR Engine Settings</h2>
+              </div>
+              <button
+                onClick={() => setShowConfigModal(false)}
+                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem', lineHeight: '1.5', marginTop: 0, marginBottom: '1.5rem' }}>
+              Configure models, OCR toggles, and processing behaviors. Changes persist immediately in the server database.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              {/* SECTION 1: Whole Question OCR */}
+              <div style={{ background: 'rgba(255, 255, 255, 0.03)', padding: '1.25rem', borderRadius: '10px', border: '1px solid rgba(255, 255, 255, 0.07)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                  <div>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#f8fafc', margin: 0 }}>Whole Question OCR</h3>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0.2rem 0 0' }}>
+                      Controls scanned image fallback &amp; on-demand question rescanning
+                    </p>
+                  </div>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={configForm.question_ocr_enabled ?? true}
+                      onChange={(e) => setConfigForm({ ...configForm, question_ocr_enabled: e.target.checked })}
+                      style={{ width: '18px', height: '18px', accentColor: '#38bdf8', cursor: 'pointer' }}
+                    />
+                    <span style={{ fontSize: '0.85rem', fontWeight: 600, color: (configForm.question_ocr_enabled ?? true) ? '#38bdf8' : '#94a3b8' }}>
+                      {(configForm.question_ocr_enabled ?? true) ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </label>
+                </div>
+
+                <div style={{ marginTop: '0.85rem' }}>
+                  <label style={{ fontSize: '0.82rem', color: '#cbd5e1', display: 'block', marginBottom: '0.4rem' }}>
+                    Question OCR Model / Provider:
+                  </label>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.65rem' }}>
+                    {[
+                      { id: 'groq', name: 'Groq Vision', desc: 'Ultra-fast Cloud', badge: 'Fastest' },
+                      { id: 'gemini', name: 'Gemini Vision', desc: 'Google Flash/Pro', badge: 'High Accuracy' },
+                      { id: 'tesseract', name: 'Tesseract', desc: 'Local Offline', badge: '$0 Cost' },
+                      { id: 'off', name: 'Turn Off', desc: 'Disable Question OCR', badge: 'Off' },
+                    ].map((eng) => {
+                      const isSelected = eng.id === 'off'
+                        ? (configForm.question_ocr_enabled === false || configForm.question_ocr_engine === 'off')
+                        : (configForm.question_ocr_enabled !== false && configForm.question_ocr_engine === eng.id);
+                      return (
+                        <div
+                          key={eng.id}
+                          onClick={() => {
+                            if (eng.id === 'off') {
+                              setConfigForm({ ...configForm, question_ocr_enabled: false, question_ocr_engine: 'off' });
+                            } else {
+                              setConfigForm({ ...configForm, question_ocr_enabled: true, question_ocr_engine: eng.id });
+                            }
+                          }}
+                          style={{
+                            border: isSelected ? (eng.id === 'off' ? '2px solid #ef4444' : '2px solid #38bdf8') : '1px solid rgba(255,255,255,0.08)',
+                            background: isSelected ? (eng.id === 'off' ? 'rgba(239, 68, 68, 0.12)' : 'rgba(56, 189, 248, 0.1)') : 'rgba(0,0,0,0.2)',
+                            padding: '0.75rem',
+                            borderRadius: '8px',
+                            cursor: 'pointer',
+                            position: 'relative'
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontWeight: 600, fontSize: '0.88rem', color: isSelected && eng.id === 'off' ? '#f87171' : '#f8fafc' }}>
+                              {eng.name}
+                            </span>
+                            <span style={{ fontSize: '0.68rem', padding: '0.1rem 0.4rem', borderRadius: '4px', background: isSelected && eng.id === 'off' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(255,255,255,0.08)', color: isSelected && eng.id === 'off' ? '#f87171' : '#94a3b8' }}>
+                              {eng.badge}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>{eng.desc}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* SECTION 2: Mathematical Equations OCR */}
+              <div style={{ background: 'rgba(255, 255, 255, 0.03)', padding: '1.25rem', borderRadius: '10px', border: '1px solid rgba(255, 255, 255, 0.07)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                  <div>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#f8fafc', margin: 0 }}>Math Equations OCR</h3>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0.2rem 0 0' }}>
+                      Transcribes equation &amp; formula image snippets into clean LaTeX
+                    </p>
+                  </div>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={(configForm.math_ocr_enabled ?? true) && configForm.math_ocr_engine !== 'off'}
+                      onChange={(e) => setConfigForm({ 
+                        ...configForm, 
+                        math_ocr_enabled: e.target.checked,
+                        math_ocr_engine: e.target.checked ? (configForm.math_ocr_engine === 'off' ? 'auto' : configForm.math_ocr_engine || 'auto') : 'off'
+                      })}
+                      style={{ width: '18px', height: '18px', accentColor: '#10b981', cursor: 'pointer' }}
+                    />
+                    <span style={{ fontSize: '0.85rem', fontWeight: 600, color: ((configForm.math_ocr_enabled ?? true) && configForm.math_ocr_engine !== 'off') ? '#10b981' : '#94a3b8' }}>
+                      {((configForm.math_ocr_enabled ?? true) && configForm.math_ocr_engine !== 'off') ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </label>
+                </div>
+
+                <div style={{ marginTop: '0.85rem' }}>
+                  <label style={{ fontSize: '0.82rem', color: '#cbd5e1', display: 'block', marginBottom: '0.4rem' }}>
+                    Equation OCR Engine:
+                  </label>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.55rem' }}>
+                    {[
+                      { id: 'tesseract', name: 'Tesseract', desc: 'Local parser ($0)' },
+                      { id: 'groq', name: 'Groq Vision', desc: 'Qwen 3.8B' },
+                      { id: 'gemini', name: 'Gemini', desc: 'Google Vision' },
+                      { id: 'auto', name: 'Auto Waterfall', desc: 'Tess → Groq → Gem' },
+                      { id: 'off', name: 'Turn Off', desc: 'Disable Math OCR' }
+                    ].map((eng) => {
+                      const isSelected = eng.id === 'off'
+                        ? (configForm.math_ocr_enabled === false || configForm.math_ocr_engine === 'off')
+                        : (configForm.math_ocr_enabled !== false && configForm.math_ocr_engine === eng.id);
+                      return (
+                        <div
+                          key={eng.id}
+                          onClick={() => {
+                            if (eng.id === 'off') {
+                              setConfigForm({ ...configForm, math_ocr_enabled: false, math_ocr_engine: 'off' });
+                            } else {
+                              setConfigForm({ ...configForm, math_ocr_enabled: true, math_ocr_engine: eng.id });
+                            }
+                          }}
+                          style={{
+                            border: isSelected ? (eng.id === 'off' ? '2px solid #ef4444' : '2px solid #10b981') : '1px solid rgba(255,255,255,0.08)',
+                            background: isSelected ? (eng.id === 'off' ? 'rgba(239, 68, 68, 0.12)' : 'rgba(16, 185, 129, 0.1)') : 'rgba(0,0,0,0.2)',
+                            padding: '0.65rem',
+                            borderRadius: '8px',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          <div style={{ fontWeight: 600, fontSize: '0.85rem', color: isSelected && eng.id === 'off' ? '#f87171' : '#f8fafc' }}>
+                            {eng.name}
+                          </div>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>{eng.desc}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div style={{ marginTop: '0.9rem', paddingTop: '0.8rem', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={configForm.auto_convert_math ?? false}
+                      onChange={(e) => setConfigForm({ ...configForm, auto_convert_math: e.target.checked })}
+                      style={{ width: '16px', height: '16px', accentColor: '#818cf8', cursor: 'pointer' }}
+                    />
+                    <span style={{ fontSize: '0.82rem', color: 'var(--text-main)' }}>
+                      Automatically convert math equation images to LaTeX in background on upload
+                    </span>
+                  </label>
+                </div>
+              </div>
+
+              {/* SECTION 3: Answer Validation & Word Correction */}
+              <div style={{ background: 'rgba(255, 255, 255, 0.03)', padding: '1.25rem', borderRadius: '10px', border: '1px solid rgba(255, 255, 255, 0.07)' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#f8fafc', margin: '0 0 0.75rem' }}>AI Validation &amp; Malayalam Correction</h3>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                  {/* Validation */}
+                  <div style={{ background: 'rgba(0,0,0,0.2)', padding: '0.85rem', borderRadius: '8px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                      <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#f8fafc' }}>Answer Verification</span>
+                      <input
+                        type="checkbox"
+                        checked={configForm.validation_enabled ?? true}
+                        onChange={(e) => setConfigForm({ ...configForm, validation_enabled: e.target.checked })}
+                        style={{ width: '16px', height: '16px', accentColor: '#f97316' }}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.4rem' }}>
+                      {[
+                        { id: 'groq', label: 'Groq' },
+                        { id: 'gemini', label: 'Gemini' },
+                        { id: 'off', label: 'Turn Off' }
+                      ].map((item) => {
+                        const isSelected = item.id === 'off' 
+                          ? configForm.validation_enabled === false 
+                          : (configForm.validation_enabled !== false && configForm.validation_provider === item.id);
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              if (item.id === 'off') {
+                                setConfigForm({ ...configForm, validation_enabled: false });
+                              } else {
+                                setConfigForm({ ...configForm, validation_enabled: true, validation_provider: item.id });
+                              }
+                            }}
+                            style={{
+                              flex: 1,
+                              padding: '0.3rem',
+                              borderRadius: '6px',
+                              border: isSelected ? (item.id === 'off' ? '1px solid #ef4444' : '1px solid #f97316') : '1px solid rgba(255,255,255,0.1)',
+                              background: isSelected ? (item.id === 'off' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(249, 115, 22, 0.2)') : 'transparent',
+                              color: isSelected ? (item.id === 'off' ? '#f87171' : '#fb923c') : '#94a3b8',
+                              fontSize: '0.78rem',
+                              cursor: 'pointer'
+                            }}
+                          >
+                            {item.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Correction */}
+                  <div style={{ background: 'rgba(0,0,0,0.2)', padding: '0.85rem', borderRadius: '8px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                      <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#f8fafc' }}>Word Correction</span>
+                      <input
+                        type="checkbox"
+                        checked={configForm.correction_enabled ?? true}
+                        onChange={(e) => setConfigForm({ ...configForm, correction_enabled: e.target.checked })}
+                        style={{ width: '16px', height: '16px', accentColor: '#818cf8' }}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.4rem' }}>
+                      {[
+                        { id: 'groq', label: 'Groq' },
+                        { id: 'gemini', label: 'Gemini' },
+                        { id: 'off', label: 'Turn Off' }
+                      ].map((item) => {
+                        const isSelected = item.id === 'off' 
+                          ? configForm.correction_enabled === false 
+                          : (configForm.correction_enabled !== false && configForm.correction_provider === item.id);
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              if (item.id === 'off') {
+                                setConfigForm({ ...configForm, correction_enabled: false });
+                              } else {
+                                setConfigForm({ ...configForm, correction_enabled: true, correction_provider: item.id });
+                              }
+                            }}
+                            style={{
+                              flex: 1,
+                              padding: '0.3rem',
+                              borderRadius: '6px',
+                              border: isSelected ? (item.id === 'off' ? '1px solid #ef4444' : '1px solid #818cf8') : '1px solid rgba(255,255,255,0.1)',
+                              background: isSelected ? (item.id === 'off' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(99, 102, 241, 0.2)') : 'transparent',
+                              color: isSelected ? (item.id === 'off' ? '#f87171' : '#c7d2fe') : '#94a3b8',
+                              fontSize: '0.78rem',
+                              cursor: 'pointer'
+                            }}
+                          >
+                            {item.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+              <div style={{ fontSize: '0.85rem', color: configSaveMsg.includes('success') ? '#34d399' : '#f87171' }}>
+                {configSaveMsg}
+              </div>
+              <div style={{ display: 'flex', gap: '0.75rem' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowConfigModal(false)}
+                  className="btn btn-secondary"
+                  style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveConfig}
+                  disabled={isSavingConfig}
+                  className="btn btn-primary"
+                  style={{
+                    padding: '0.5rem 1.25rem',
+                    fontSize: '0.85rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    background: '#38bdf8',
+                    color: '#0f172a',
+                    fontWeight: 600,
+                    border: 'none',
+                    borderRadius: '8px',
+                    cursor: isSavingConfig ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  <Save size={16} />
+                  <span>{isSavingConfig ? 'Saving...' : 'Save & Apply'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Font Manager Modal */}
       {showFontModal && (

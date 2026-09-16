@@ -39,6 +39,18 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
+
+def init_db():
+    """Create all tables that don't yet exist (idempotent)."""
+    # Import models so their table definitions are registered on Base.metadata
+    from . import models  # noqa: F401
+    Base.metadata.create_all(bind=engine)
+
+
+# Auto-create tables on first import
+init_db()
+
+
 def get_db():
     db = SessionLocal()
     try:

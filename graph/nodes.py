@@ -63,18 +63,29 @@ def is_llm_enabled() -> bool:
 
 
 def is_answer_validation_enabled() -> bool:
-    """Checks whether AI answer solving & verification is enabled via environment configuration."""
-    val = os.getenv("ENABLE_ANSWER_VALIDATION", os.getenv("ENABLE_VALIDATION", "true"))
-    return val.strip().lower() in ("true", "1", "yes")
+    """Checks whether AI answer solving & verification is enabled via runtime configuration or env."""
+    try:
+        from ..storage.config_manager import get_setting
+        return bool(get_setting("validation_enabled", True))
+    except Exception:
+        val = os.getenv("ENABLE_ANSWER_VALIDATION", os.getenv("ENABLE_VALIDATION", "true"))
+        return val.strip().lower() in ("true", "1", "yes")
 
 
-def get_extract_llm():
+def get_extract_llm(provider: Optional[str] = None):
     """Returns an extraction LLM from Groq (if enabled) or Gemini."""
-    llm_st = get_llm_status()
-    if not llm_st["enabled"]:
-        return None
+    if not provider:
+        try:
+            from ..storage.config_manager import get_setting
+            provider = get_setting("validation_provider")
+        except Exception:
+            pass
+
+    if not provider or provider not in ("groq", "gemini"):
+        llm_st = get_llm_status()
+        provider = llm_st.get("provider", "none")
     
-    if llm_st["provider"] == "groq":
+    if provider == "groq":
         try:
             from langchain_groq import ChatGroq
             model_name = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
@@ -83,7 +94,7 @@ def get_extract_llm():
         except Exception as e:
             print(f"Warning: Failed to initialize Groq extract_llm: {e}", flush=True)
             return None
-    elif llm_st["provider"] == "gemini":
+    elif provider == "gemini":
         try:
             model_name = os.getenv("GEMINI_EXTRACT_MODEL", os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"))
             key = (os.getenv("GOOGLE_API_KEY") or "").strip()
@@ -98,13 +109,20 @@ def get_extract_llm():
     return None
 
 
-def get_solve_llm():
+def get_solve_llm(provider: Optional[str] = None):
     """Returns a solving & validation LLM from Groq (if enabled) or Gemini."""
-    llm_st = get_llm_status()
-    if not llm_st["enabled"]:
-        return None
+    if not provider:
+        try:
+            from ..storage.config_manager import get_setting
+            provider = get_setting("validation_provider")
+        except Exception:
+            pass
 
-    if llm_st["provider"] == "groq":
+    if not provider or provider not in ("groq", "gemini"):
+        llm_st = get_llm_status()
+        provider = llm_st.get("provider", "none")
+
+    if provider == "groq":
         try:
             from langchain_groq import ChatGroq
             model_name = os.getenv("GROQ_SOLVE_MODEL", os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"))
@@ -113,7 +131,7 @@ def get_solve_llm():
         except Exception as e:
             print(f"Warning: Failed to initialize Groq solve_llm: {e}", flush=True)
             return None
-    elif llm_st["provider"] == "gemini":
+    elif provider == "gemini":
         try:
             model_name = os.getenv("GEMINI_SOLVE_MODEL", "gemini-3.1-pro-preview")
             key = (os.getenv("GOOGLE_API_KEY") or "").strip()
@@ -352,25 +370,22 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
     return stem, options, marked_answer, explanation
 
 
-def extract_node(state: GraphState) -> GraphState:
-    """Extracts question blocks from raw text using a lightweight Regex parser."""
-    raw_text = state.get("raw_text", "")
+def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list[dict]:
+    """Extracts question blocks from raw text using regex with LLM fallback."""
     extracted = []
     
     # 1. Determine if the document explicitly uses 'Question' or 'Q' markers
-    explicit_matches = list(re.finditer(r'(?i)(?:^|\n)\s*(?:Question\s*|Q\.?\s*)(\d+)\s*(?::\-?|[\.\):-])\s*', raw_text))
+    explicit_matches = list(re.finditer(r'(?i)(?:^|\n|\s+)\s*(?:Question\s*|Q\.?\s*)(\d+)\s*(?::\-?|[\.\):-])\s*', raw_text))
     if len(explicit_matches) >= 3:
         # Document uses explicit Question/Q markers (e.g. 'Question 1:-', 'Question20:-', 'Q.1:')
-        # Strictly require Question/Q prefix so numbers inside options/stems (like '52-ാം', dates, etc.) are never treated as question delimiters!
         q_prefix_pattern = r'(?:Question\s*|Q\.?\s*)\d+\s*(?::\-?|[\.\):-])\s*'
         q_extract_pattern = r'^(?:Question\s*|Q\.?\s*)(\d+)\s*(?::\-?|[\.\):-])\s*(.*)'
+        blocks = re.split(fr'(?:\n|\s+|^)(?={q_prefix_pattern})', raw_text, flags=re.MULTILINE | re.IGNORECASE)
     else:
         # Fallback for documents with simple numeric numbering (e.g. '1. ', '2. ', '1) ')
-        # Require delimiter to be followed by whitespace; NEVER treat solitary hyphen '-' without Question as a question delimiter!
         q_prefix_pattern = r'\d+\s*(?:[\.\)]|:-)\s+'
         q_extract_pattern = r'^(\d+)\s*(?:[\.\)]|:-)\s+(.*)'
-
-    blocks = re.split(fr'\n(?={q_prefix_pattern})|^(?={q_prefix_pattern})', raw_text, flags=re.MULTILINE | re.IGNORECASE)
+        blocks = re.split(fr'\n(?={q_prefix_pattern})|^(?={q_prefix_pattern})', raw_text, flags=re.MULTILINE | re.IGNORECASE)
     
     for block in blocks:
         block = block.strip()
@@ -413,11 +428,10 @@ def extract_node(state: GraphState) -> GraphState:
                 p_tokens = response.usage_metadata.get("input_tokens", 0) if hasattr(response, "usage_metadata") and response.usage_metadata else 0
                 c_tokens = response.usage_metadata.get("output_tokens", 0) if hasattr(response, "usage_metadata") and response.usage_metadata else 0
                 
-                if "token_usage" not in state:
-                    state["token_usage"] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-                state["token_usage"]["prompt_tokens"] += p_tokens
-                state["token_usage"]["completion_tokens"] += c_tokens
-                state["token_usage"]["total_tokens"] += (p_tokens + c_tokens)
+                if token_tracker is not None:
+                    token_tracker["prompt_tokens"] = token_tracker.get("prompt_tokens", 0) + p_tokens
+                    token_tracker["completion_tokens"] = token_tracker.get("completion_tokens", 0) + c_tokens
+                    token_tracker["total_tokens"] = token_tracker.get("total_tokens", 0) + (p_tokens + c_tokens)
                 
                 cleaned = _clean_json_output(response.content)
                 extracted = json.loads(cleaned)
@@ -432,9 +446,15 @@ def extract_node(state: GraphState) -> GraphState:
         else:
             print("Gemini extraction is disabled or API key not set. Using regex extracted questions.", flush=True)
 
-        if not extracted:
-            extracted = []
+    return extracted or []
 
+
+def extract_node(state: GraphState) -> GraphState:
+    """Extracts question blocks from raw text using a lightweight Regex parser."""
+    raw_text = state.get("raw_text", "")
+    if "token_usage" not in state:
+        state["token_usage"] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    extracted = parse_questions_from_text(raw_text, state["token_usage"])
     return {"extracted_blocks": extracted, "token_usage": state.get("token_usage", {})}
 
 
@@ -462,6 +482,11 @@ def quality_score_node(state: GraphState) -> GraphState:
     raw_text = state.get("raw_text", "")
     has_malayalam = bool(re.search(r'[\u0D00-\u0D7F]', raw_text))
 
+    # Gather all validation flags across pages
+    all_page_flags = []
+    for p in pages:
+        all_page_flags.extend(p.get("validation_flags", []))
+
     for b in blocks:
         q_num = b.get("question_number", 0)
         stem = b.get("stem", "")
@@ -470,12 +495,13 @@ def quality_score_node(state: GraphState) -> GraphState:
         # Combine stem + options for scoring
         full_text = stem + "\n" + "\n".join(f"({k}) {v}" for k, v in options.items())
 
-        score = score_question_text(full_text, has_malayalam_expected=has_malayalam)
+        score = score_question_text(full_text, has_malayalam_expected=has_malayalam, page_flags=all_page_flags)
         score_dict = {
             "coverage_pct": score.coverage_pct,
             "unmapped_glyph_count": score.unmapped_glyph_count,
             "suspicious_gap_count": score.suspicious_gap_count,
             "structural_anomalies": score.structural_anomalies,
+            "validation_flags": score.validation_flags,
             "status": score.status,
         }
         quality_scores[q_num] = score_dict
@@ -521,12 +547,107 @@ def repair_node(state: GraphState) -> GraphState:
 
     max_ocr = int(os.getenv("MAX_TARGETED_OCR_PER_DOCUMENT", "10"))
 
+    # Check if repair is enabled via configuration
+    try:
+        from ..storage.config_manager import get_setting
+        if not get_setting("repair_enabled", True):
+            print("[Repair] Question quality repair disabled by configuration. Skipping.", flush=True)
+            return {"repair_log": repair_log, "vision_calls_count": vision_calls}
+    except Exception:
+        pass
+
     # Find questions needing repair
     failing_q_nums = [qn for qn, s in quality_scores.items() if s.get("status") != "ok"]
 
     if not failing_q_nums:
         print("[Repair] No questions need repair.", flush=True)
         return {"repair_log": repair_log, "vision_calls_count": vision_calls}
+
+    # -----------------------------------------------------------------------
+    # AUTOMATIC WHOLE PDF OCR ESCALATION
+    # Check if 3-5 consecutive questions are unreadable or severely corrupted
+    # -----------------------------------------------------------------------
+    try:
+        from ..storage.config_manager import get_setting
+        streak_threshold = int(get_setting("auto_whole_pdf_ocr_threshold", 3))
+    except Exception:
+        streak_threshold = int(os.getenv("AUTO_WHOLE_PDF_OCR_THRESHOLD", "3"))
+
+    def _is_unreadable_question(qn: int) -> bool:
+        sc = quality_scores.get(qn, {})
+        st = sc.get("status", "")
+        cov = sc.get("coverage_pct", 1.0)
+        unmapped = sc.get("unmapped_glyph_count", 0)
+        blk = next((b for b in blocks if b.get("question_number") == qn), None)
+        return (
+            st in ("unreadable", "scan_quality")
+            or (st == "font_issue" and cov < 0.60)
+            or unmapped >= 10
+            or (blk is not None and not blk.get("stem", "").strip())
+        )
+
+    sorted_q_nums = sorted([b.get("question_number", 0) for b in blocks])
+    longest_unreadable_streak = []
+    curr_unreadable_streak = []
+    for qn in sorted_q_nums:
+        if _is_unreadable_question(qn):
+            curr_unreadable_streak.append(qn)
+            if len(curr_unreadable_streak) > len(longest_unreadable_streak):
+                longest_unreadable_streak = list(curr_unreadable_streak)
+        else:
+            curr_unreadable_streak = []
+
+    if streak_threshold > 0 and len(longest_unreadable_streak) >= streak_threshold:
+        file_path = state.get("file_path", "")
+        if file_path and os.path.exists(file_path):
+            print(
+                f"[Repair] Detected {len(longest_unreadable_streak)} consecutive unreadable questions "
+                f"(Q{longest_unreadable_streak[0]}-Q{longest_unreadable_streak[-1]}). "
+                f"Escalating to full PDF OCR scan...",
+                flush=True
+            )
+            from ..ingest.router import ocr_whole_pdf
+            try:
+                ocr_engine = get_setting("auto_whole_pdf_ocr_engine", "auto")
+            except Exception:
+                ocr_engine = os.getenv("AUTO_WHOLE_PDF_OCR_ENGINE", "auto")
+
+            ocr_res = ocr_whole_pdf(file_path, engine=ocr_engine)
+            recovered_blocks = parse_questions_from_text(ocr_res["full_text"])
+            if recovered_blocks and len(recovered_blocks) >= max(1, int(len(blocks) * 0.4)):
+                print(
+                    f"[Repair] Full PDF OCR successfully recovered {len(recovered_blocks)} questions. "
+                    f"Replacing corrupted document blocks.",
+                    flush=True
+                )
+                blocks = recovered_blocks
+                state["extracted_blocks"] = blocks
+                state["raw_text"] = ocr_res["full_text"]
+                state["pages"] = ocr_res["pages"]
+
+                p_tok = ocr_res.get("prompt_tokens", 0)
+                c_tok = ocr_res.get("completion_tokens", 0)
+                if "token_usage" not in state:
+                    state["token_usage"] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                state["token_usage"]["prompt_tokens"] += p_tok
+                state["token_usage"]["completion_tokens"] += c_tok
+                state["token_usage"]["total_tokens"] += (p_tok + c_tok)
+
+                repair_log.append({
+                    "action": "ocr_whole_pdf_escalation",
+                    "result": f"rescanned_{len(recovered_blocks)}_questions",
+                    "unreadable_streak": longest_unreadable_streak,
+                })
+
+                return {
+                    "extracted_blocks": blocks,
+                    "raw_text": ocr_res["full_text"],
+                    "pages": ocr_res["pages"],
+                    "quality_scores": {},
+                    "repair_log": repair_log,
+                    "vision_calls_count": vision_calls + 1,
+                    "token_usage": state["token_usage"],
+                }
 
     print(f"[Repair] {len(failing_q_nums)} questions need repair. Diagnosing...", flush=True)
 
@@ -561,11 +682,17 @@ def repair_node(state: GraphState) -> GraphState:
         all_unmapped = []
         for codes in page_unmapped.values():
             all_unmapped.extend(codes)
+            
+        # Gather validation flags across all pages
+        all_page_flags = []
+        for p in pages:
+            all_page_flags.extend(p.get("validation_flags", []))
 
         failure_type = diagnose_failure_type(
             full_text, [], {},
             unmapped_codes=all_unmapped if score.get("status") == "font_issue" else None,
             has_text_layer=any(p.get("has_text_layer", True) for p in pages),
+            validation_flags=score.get("validation_flags", []) if score.get("status") == "word_level_corruption" else None,
         )
 
         # -------------------------------------------------------------
@@ -614,12 +741,13 @@ def repair_node(state: GraphState) -> GraphState:
                 new_full_text = fixed_stem + "\n" + "\n".join(
                     f"({k}) {v}" for k, v in fixed_options.items()
                 )
-                new_score = score_question_text(new_full_text, has_malayalam_expected=has_malayalam)
+                new_score = score_question_text(new_full_text, has_malayalam_expected=has_malayalam, page_flags=all_page_flags)
                 quality_scores[q_num] = {
                     "coverage_pct": new_score.coverage_pct,
                     "unmapped_glyph_count": new_score.unmapped_glyph_count,
                     "suspicious_gap_count": new_score.suspicious_gap_count,
                     "structural_anomalies": new_score.structural_anomalies,
+                    "validation_flags": new_score.validation_flags,
                     "status": new_score.status,
                 }
 
@@ -640,6 +768,7 @@ def repair_node(state: GraphState) -> GraphState:
                         new_full_text, [], {},
                         unmapped_codes=all_unmapped if new_score.status == "font_issue" else None,
                         has_text_layer=any(p.get("has_text_layer", True) for p in pages),
+                        validation_flags=new_score.validation_flags if new_score.status == "word_level_corruption" else None,
                     )
                     full_text = new_full_text
 
@@ -688,18 +817,28 @@ def repair_node(state: GraphState) -> GraphState:
                 entry["result"] = "batched"
                 print(f"  Q{q_num}: {failure_type} — batched for glyph repair (Tier 1)", flush=True)
 
-            case "scan_quality":
+            case "scan_quality" | "word_level_corruption":
                 # Tier 2 — last resort, circuit breaker protected
-                if vision_calls >= max_ocr:
+                try:
+                    from ..storage.config_manager import get_setting
+                    q_ocr_enabled = get_setting("question_ocr_enabled", True)
+                except Exception:
+                    q_ocr_enabled = True
+
+                if not q_ocr_enabled:
+                    entry["action"] = "ocr_disabled"
+                    entry["result"] = "skipped"
+                    print(f"  Q{q_num}: {failure_type} — skipped (Question OCR disabled in settings)", flush=True)
+                elif vision_calls >= max_ocr:
                     entry["action"] = "circuit_breaker_halt"
                     entry["result"] = "halted"
-                    print(f"  Q{q_num}: scan_quality — HALTED by circuit breaker "
+                    print(f"  Q{q_num}: {failure_type} — HALTED by circuit breaker "
                           f"({vision_calls}/{max_ocr} Vision calls used)", flush=True)
                 else:
                     entry["action"] = "targeted_crop_ocr"
                     entry["result"] = "flagged_for_ocr"
                     vision_calls += 1
-                    print(f"  Q{q_num}: scan_quality — flagged for targeted OCR "
+                    print(f"  Q{q_num}: {failure_type} — flagged for targeted OCR "
                           f"(Tier 2, call {vision_calls}/{max_ocr})", flush=True)
 
             case _:
@@ -825,14 +964,65 @@ def rule_check_node(state: GraphState) -> GraphState:
     print(f"Rule check validated {len(valid_blocks)} out of {len(blocks)} blocks.", flush=True)
     return {"extracted_blocks": valid_blocks}
 
-def rescan_question_vision(image_bytes: bytes, question_number: int):
-    """Uses Groq Vision or Gemini Vision to re-extract a specific question accurately."""
+def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Optional[str] = None):
+    """Uses Groq Vision, Gemini Vision, or Local Tesseract OCR to re-extract a specific question accurately."""
     import base64
-    prompt = f"""
+    import io
+
+    # Resolve active OCR engine & enabled status
+    try:
+        from ..storage.config_manager import get_setting
+        ocr_enabled = get_setting("question_ocr_enabled", True)
+        if not ocr_enabled and engine is None:
+            raise ValueError("Whole Question OCR is disabled in Pipeline Settings.")
+        if engine is None:
+            engine = get_setting("question_ocr_engine", "groq")
+    except Exception as err:
+        if "disabled in Pipeline Settings" in str(err):
+            raise
+    engine = str(engine or "groq").strip().lower()
+    if engine in ("off", "disabled"):
+        raise ValueError("Whole Question OCR is disabled.")
+
+    # --- Engine 1: Tesseract Local ($0, offline Malayalam & English) ---
+    if engine == "tesseract":
+        try:
+            import pytesseract
+            from PIL import Image
+            pil_img = Image.open(io.BytesIO(image_bytes))
+
+            # Detect available Malayalam traineddata
+            try:
+                avail_langs = pytesseract.get_languages()
+            except Exception:
+                avail_langs = []
+
+            tess_lang = "mal+eng" if "mal" in avail_langs else "eng"
+            raw_text = pytesseract.image_to_string(pil_img, lang=tess_lang, config="--psm 6").strip()
+
+            # Separate stem, options, marked answer, explanation
+            stem, options, marked_ans, explanation = separate_stem_and_options(raw_text)
+
+            # Strip leading question number if present in stem (e.g. '12.' or '12:-')
+            stem = re.sub(rf'^(?:Question\s*|Q\.?\s*)?{question_number}\s*[\.\):-]\s*', '', stem, flags=re.IGNORECASE).strip()
+
+            data = {
+                "question_number": question_number,
+                "stem": stem or raw_text,
+                "options": options or {},
+                "marked_answer": marked_ans,
+                "explanation": explanation
+            }
+            return data, 0, 0
+        except Exception as e:
+            print(f"[Question OCR] Tesseract OCR failed: {e}", flush=True)
+            raise
+
+    prompt = """
 Extract ONLY Question {question_number} from this page exactly as it appears.
 CRITICAL INSTRUCTIONS:
-1. Transcribe and preserve all mathematical equations, fractions, formulas, and symbols into standard inline LaTeX ($...) or display LaTeX ($$...$$), just like non-image math equations (e.g. $\\frac{1}{2}$, $\\sqrt{x^2+y^2}$, $x^2$, $\\chi^2$). Never output raw image tags or placeholders for mathematical formulas.
-2. Extract all options into 'options': {{"A": "...", "B": "...", "C": "...", "D": "..."}}.
+1. Transcribe and preserve all mathematical equations, fractions, formulas, and symbols into standard inline LaTeX ($...) or display LaTeX ($$...$$), just like non-image math equations (e.g. $\frac{1}{2}$, $\sqrt{x^2+y^2}$, $x^2$, $\chi^2$). For multiplication, ALWAYS use LaTeX `\times` (e.g., $96 = 2^5 \times 3$, $404 = 2^2 \times 101$). Never use the letter 'x' or 'x^3' for multiplication! Preserve punctuation (commas, periods) between separate equations. Never output raw image tags or placeholders for mathematical formulas.
+2. Extract all options into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}.
    - NEVER include options (e.g. A:-, B:-, C:-, D:-) or option contents inside the question 'stem'.
 3. Extract the given 'Correct Answer' into 'marked_answer' if present (e.g. if an option letter or option text is highlighted in yellow/color, marked with a tick mark, circled, or explicitly printed as answer / ഉത്തരം). Set to null if not marked.
 4. Extract the given 'Solution', 'Explanation', or 'Description' into 'explanation' if present below the question or options (e.g. 'Solution:', 'Explanation:', 'Description:', 'വിശദീകരണം:', 'പരിഹാരം:'). Set to null if not present in the document.
@@ -840,89 +1030,102 @@ CRITICAL INSTRUCTIONS:
 6. Transcribe Malayalam and Indic text faithfully into standard Unicode script. Do not invent or summarize.
 
 Output ONLY a valid JSON object exactly matching this schema, with no markdown code blocks or extra text:
-{{
+{
   "question_number": {question_number},
-  "stem": "Question stem text here\\na. $\\\\chi^2$ test\\nb. 't' test",
-  "options": {{
+  "stem": "Question stem text here\\na. $\\chi^2$ test\\nb. 't' test",
+  "options": {
     "A": "Option A text",
     "B": "Option B text",
     "C": "Option C text",
     "D": "Option D text"
-  }},
+  },
   "marked_answer": "B",
   "explanation": "Solution or explanation text here"
-}}
-"""
-    # Priority 1: Groq Vision if enabled
-    if is_groq_enabled():
-        try:
-            from groq import Groq
-            groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
-            client = Groq(api_key=groq_key)
-            b64_img = base64.b64encode(image_bytes).decode("utf-8")
-            model_name = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
-            chat_completion = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{b64_img}"
+}
+""".replace("{question_number}", str(question_number))
+    # --- Engine 2: Groq Vision ---
+    if engine == "groq" or (engine not in ("gemini", "tesseract") and is_groq_enabled()):
+        if is_groq_enabled():
+            try:
+                from groq import Groq
+                groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+                client = Groq(api_key=groq_key)
+                b64_img = base64.b64encode(image_bytes).decode("utf-8")
+                model_name = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
+                chat_completion = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{b64_img}"
+                                    }
                                 }
-                            }
-                        ]
-                    }
-                ],
-                temperature=0.1,
-                response_format={"type": "json_object"}
-            )
-            resp_text = chat_completion.choices[0].message.content
-            cleaned = _clean_json_output(resp_text)
-            data = json.loads(cleaned)
-            p_tok = chat_completion.usage.prompt_tokens if chat_completion.usage else 0
-            c_tok = chat_completion.usage.completion_tokens if chat_completion.usage else 0
-            return data, p_tok, c_tok
-        except Exception as e:
-            print(f"Groq vision rescan failed: {e}", flush=True)
-            if not is_gemini_enabled():
-                raise
+                            ]
+                        }
+                    ],
+                    temperature=0.1,
+                    max_tokens=600,
+                    response_format={"type": "json_object"}
+                )
+                resp_text = chat_completion.choices[0].message.content
+                cleaned = _clean_json_output(resp_text)
+                data = json.loads(cleaned)
+                p_tok = chat_completion.usage.prompt_tokens if chat_completion.usage else 0
+                c_tok = chat_completion.usage.completion_tokens if chat_completion.usage else 0
+                return data, p_tok, c_tok
+            except Exception as e:
+                print(f"Groq vision rescan failed: {e}", flush=True)
+                if engine == "groq":
+                    raise
 
-    # Priority 2: Gemini Vision if enabled
-    if is_gemini_enabled():
-        google_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
-        client = genai.Client(api_key=google_key)
-        model_name = os.getenv("GEMINI_EXTRACT_MODEL", "gemini-3.1-flash") 
-        res = client.models.generate_content(
-            model=model_name,
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-                prompt
-            ],
-            config=types.GenerateContentConfig(temperature=0.1)
-        )
-        cleaned = _clean_json_output(res.text)
-        data = json.loads(cleaned)
-        p_tok = res.usage_metadata.prompt_token_count if res.usage_metadata else 0
-        c_tok = res.usage_metadata.candidates_token_count if res.usage_metadata else 0
-        return data, p_tok, c_tok
+    # --- Engine 3: Gemini Vision ---
+    if engine == "gemini" or is_gemini_enabled():
+        if is_gemini_enabled():
+            google_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+            client = genai.Client(api_key=google_key)
+            model_name = os.getenv("GEMINI_EXTRACT_MODEL", "gemini-3.1-flash") 
+            res = client.models.generate_content(
+                model=model_name,
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                    prompt
+                ],
+                config=types.GenerateContentConfig(temperature=0.1)
+            )
+            cleaned = _clean_json_output(res.text)
+            data = json.loads(cleaned)
+            p_tok = res.usage_metadata.prompt_token_count if res.usage_metadata else 0
+            c_tok = res.usage_metadata.candidates_token_count if res.usage_metadata else 0
+            return data, p_tok, c_tok
 
     groq_st = get_groq_status()
     gemini_st = get_gemini_status()
-    raise ValueError(f"No AI vision provider is enabled. Groq: {groq_st['reason']}; Gemini: {gemini_st['reason']}")
+    raise ValueError(f"Selected question OCR engine '{engine}' is unavailable. Groq: {groq_st['reason']}; Gemini: {gemini_st['reason']}")
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def _solve_single_block(b: dict, total: int) -> dict:
+
+def _solve_single_block(b: dict, total: int = 1) -> dict:
+    """Validates/solves a single question block using configured LLM provider."""
     q_num = b.get("question_number", "?")
     stem = b.get("stem", "")
     options = b.get("options", {})
     marked = b.get("marked_correct_answer") or b.get("marked_answer")
 
-    if not is_answer_validation_enabled():
+    try:
+        from ..storage.config_manager import get_setting
+        validation_enabled = get_setting("validation_enabled", True)
+        provider = get_setting("validation_provider", "groq")
+    except Exception:
+        validation_enabled = True
+        provider = "groq"
+
+    if not validation_enabled or not is_llm_enabled():
         return {
             **b,
             "marked_correct_answer": marked,
@@ -930,17 +1133,14 @@ def _solve_single_block(b: dict, total: int) -> dict:
             "validated_answer": None,
             "is_valid": False,
             "confidence": "none",
-            "reasoning": "AI answer validation is disabled (ENABLE_ANSWER_VALIDATION=false).",
+            "reasoning": "Answer validation disabled or AI provider unavailable.",
             "used_web_search": False,
             "_p_tokens": 0,
             "_c_tokens": 0
         }
 
-    llm_st = get_llm_status()
-    solve_llm = get_solve_llm() if llm_st["enabled"] else None
+    solve_llm = get_solve_llm(provider)
     if not solve_llm:
-        reason = llm_st["reason"]
-        print(f"Skipping AI validation for Q{q_num}: {reason}", flush=True)
         return {
             **b,
             "marked_correct_answer": marked,
@@ -948,18 +1148,16 @@ def _solve_single_block(b: dict, total: int) -> dict:
             "validated_answer": None,
             "is_valid": False,
             "confidence": "none",
-            "reasoning": f"AI answer validation was not performed ({reason}).",
+            "reasoning": f"No LLM client available for provider '{provider}'.",
             "used_web_search": False,
             "_p_tokens": 0,
             "_c_tokens": 0
         }
 
-    provider = llm_st.get("provider", "AI").capitalize()
-    print(f"Solving Q{q_num} (out of {total}) with {provider}...", flush=True)
     prompt = SOLVE_PROMPT.replace("{stem}", stem).replace("{options}", json.dumps(options))
     p_tokens, c_tokens = 0, 0
-
     try:
+        from langchain_core.messages import HumanMessage
         resp = solve_llm.invoke([HumanMessage(content=prompt)])
         if hasattr(resp, "usage_metadata") and resp.usage_metadata:
             p_tokens += resp.usage_metadata.get("input_tokens", 0)
@@ -969,39 +1167,10 @@ def _solve_single_block(b: dict, total: int) -> dict:
         solve_result = json.loads(cleaned)
         
         validated_answer = solve_result.get("validated_answer")
-        confidence = solve_result.get("confidence", "low")
+        confidence = solve_result.get("confidence", "medium")
         reasoning = solve_result.get("reasoning", "")
-        used_web_search = False
         
-        # Web search fallback if confidence is low
-        if str(confidence).lower() == "low":
-            used_web_search = True
-            try:
-                with DDGS() as ddgs:
-                    results = [r for r in ddgs.text(stem, max_results=3)]
-                    search_context = "\n".join([r.get("body", "") for r in results])
-                    
-                if search_context.strip():
-                    retry_prompt = f"Context from web:\n{search_context}\n\n{prompt}"
-                    retry_resp = solve_llm.invoke([HumanMessage(content=retry_prompt)])
-                    if hasattr(retry_resp, "usage_metadata") and retry_resp.usage_metadata:
-                        p_tokens += retry_resp.usage_metadata.get("input_tokens", 0)
-                        c_tokens += retry_resp.usage_metadata.get("output_tokens", 0)
-                        
-                    retry_cleaned = _clean_json_output(retry_resp.content)
-                    retry_result = json.loads(retry_cleaned)
-                    
-                    validated_answer = retry_result.get("validated_answer", validated_answer)
-                    confidence = retry_result.get("confidence", confidence)
-                    reasoning = f"[Web Search Used] {retry_result.get('reasoning', reasoning)}"
-            except Exception as search_err:
-                print(f"Web search fallback failed for Q{q_num}: {search_err}", flush=True)
-        
-        marked = b.get("marked_correct_answer") or b.get("marked_answer")
         is_valid = (str(validated_answer).strip().upper() == str(marked).strip().upper()) if marked and validated_answer else False
-        status_str = "MATCH" if is_valid else f"FLAGGED (marked={marked}, validated={validated_answer})"
-        print(f"Done Q{q_num}: {status_str}", flush=True)
-        
         return {
             **b,
             "marked_correct_answer": marked,
@@ -1010,11 +1179,10 @@ def _solve_single_block(b: dict, total: int) -> dict:
             "is_valid": is_valid,
             "confidence": confidence,
             "reasoning": reasoning,
-            "used_web_search": used_web_search,
+            "used_web_search": False,
             "_p_tokens": p_tokens,
             "_c_tokens": c_tokens
         }
-        
     except Exception as e:
         print(f"Solve failed for Q{q_num}: {e}", flush=True)
         return {
@@ -1022,82 +1190,9 @@ def _solve_single_block(b: dict, total: int) -> dict:
             "validated_answer": None,
             "is_valid": False,
             "confidence": "low",
-            "reasoning": f"Error solving question: {str(e)}",
+            "reasoning": f"Error validating answer: {e}",
             "used_web_search": False,
             "_p_tokens": p_tokens,
             "_c_tokens": c_tokens
         }
 
-def solve_and_validate_node(state: GraphState) -> GraphState:
-    """Solves blocks concurrently using stronger model and compares with marked answer."""
-    blocks = state.get("extracted_blocks", [])
-    total = len(blocks)
-
-    if not is_answer_validation_enabled():
-        print(f"AI answer validation is disabled (ENABLE_ANSWER_VALIDATION=false). Skipping solve for {total} questions.", flush=True)
-        processed = []
-        for b in blocks:
-            marked = b.get("marked_correct_answer") or b.get("marked_answer")
-            processed.append({
-                **b,
-                "marked_correct_answer": marked,
-                "marked_answer": marked,
-                "validated_answer": None,
-                "is_valid": False,
-                "confidence": "none",
-                "reasoning": "AI answer validation is disabled (ENABLE_ANSWER_VALIDATION=false).",
-                "used_web_search": False,
-            })
-        processed.sort(key=lambda x: x.get("question_number", 0))
-        summary = {
-            "total": len(processed),
-            "validated": 0,
-            "flagged": 0,
-            "unvalidated": len(processed),
-            "gemini_enabled": is_gemini_enabled(),
-            "answer_validation_enabled": False,
-        }
-        return {
-            "processed_questions": processed,
-            "summary": summary,
-            "token_usage": state.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
-        }
-
-    print(f"Starting parallel solve for {total} questions...", flush=True)
-    
-    processed = []
-    total_p = state.get("token_usage", {}).get("prompt_tokens", 0)
-    total_c = state.get("token_usage", {}).get("completion_tokens", 0)
-    
-    # Use 5 concurrent workers for quick solving
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(_solve_single_block, b, total): b for b in blocks}
-        for future in as_completed(futures):
-            res = future.result()
-            total_p += res.pop("_p_tokens", 0)
-            total_c += res.pop("_c_tokens", 0)
-            processed.append(res)
-            
-    # Sort by question number to preserve document order
-    processed.sort(key=lambda x: x.get("question_number", 0))
-    
-    gemini_on = is_gemini_enabled()
-    summary = {
-        "total": len(processed),
-        "validated": sum(1 for p in processed if p.get("is_valid")),
-        "flagged": sum(1 for p in processed if (p.get("validated_answer") and not p.get("is_valid"))),
-        "unvalidated": sum(1 for p in processed if not p.get("validated_answer")),
-        "gemini_enabled": gemini_on,
-        "answer_validation_enabled": True
-    }
-    
-    print(f"Solve complete: {summary['validated']} validated, {summary['flagged']} flagged.", flush=True)
-    return {
-        "processed_questions": processed, 
-        "summary": summary,
-        "token_usage": {
-            "prompt_tokens": total_p,
-            "completion_tokens": total_c,
-            "total_tokens": total_p + total_c
-        }
-    }

@@ -27,10 +27,11 @@ class QualityScore:
     unmapped_glyph_count: int = 0
     suspicious_gap_count: int = 0
     structural_anomalies: list[str] = field(default_factory=list)
-    status: Literal["ok", "font_issue", "structural_issue", "unreadable"] = "ok"
+    validation_flags: list = field(default_factory=list)
+    status: Literal["ok", "font_issue", "structural_issue", "unreadable", "word_level_corruption"] = "ok"
 
 
-def score_question_text(raw_text: str, has_malayalam_expected: bool = True) -> QualityScore:
+def score_question_text(raw_text: str, has_malayalam_expected: bool = True, page_flags: list = None) -> QualityScore:
     """
     Runs sanity analysis per-question (not per-page). Reuses the same
     coverage/artifact logic as sanity_check_malayalam_text() but returns
@@ -87,9 +88,17 @@ def score_question_text(raw_text: str, has_malayalam_expected: bool = True) -> Q
     # 4. Run structural anomaly detection
     score.structural_anomalies = flag_structural_anomalies(text_only)
 
+    # 4.5 Check if any validation flags from the page apply to this question
+    if page_flags:
+        for flag in page_flags:
+            if flag.span in raw_text or (hasattr(flag, 'suggestion') and flag.suggestion and flag.suggestion in raw_text):
+                score.validation_flags.append(flag)
+
     # 5. Classify overall status
     if score.unmapped_glyph_count > 0:
         score.status = "font_issue"
+    elif score.validation_flags:
+        score.status = "word_level_corruption"
     elif score.coverage_pct < 0.85:
         score.status = "font_issue"
     elif score.suspicious_gap_count > 3 or len(score.structural_anomalies) > 2:
@@ -113,6 +122,7 @@ FailureType = Literal[
     "equation_crop_fail",
     "unknown_font",
     "scan_quality",
+    "word_level_corruption",
 ]
 
 
@@ -122,6 +132,7 @@ def diagnose_failure_type(
     font_map: dict,
     unmapped_codes: list[dict] = None,
     has_text_layer: bool = True,
+    validation_flags: list = None,
 ) -> str:
     """
     Classifies the root cause of a failing question.
@@ -143,6 +154,9 @@ def diagnose_failure_type(
     # 1. Check for unmapped glyphs (ASCII chars wedged in Malayalam context)
     if unmapped_codes and len(unmapped_codes) > 0:
         return "unmapped_glyph"
+        
+    if validation_flags and len(validation_flags) > 0:
+        return "word_level_corruption"
 
     wedged = re.findall(
         r'[\u0D00-\u0D7F]\s*'

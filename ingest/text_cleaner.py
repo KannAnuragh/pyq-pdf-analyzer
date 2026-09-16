@@ -44,11 +44,14 @@ def convert_visual_to_logical(text: str) -> str:
     NON_C = rf'(?:^|[^\u0D15-\u0D3A])'
     END_B = r'(?=$|[\s\(\[\{<>\-_.,;:!?"\'/\\=+])'
 
-    # 1. Two-part split vowels with pre-base placement (requires non-consonant boundary before െ/േ):
+    # 1. Two-part split vowels with pre-base placement:
     text = re.sub(rf'({NON_C})െ({SUB_CLUSTER})ാ', r'\1\2ൊ', text)
     text = re.sub(rf'({NON_C})േ({SUB_CLUSTER})ാ', r'\1\2ോ', text)
     text = re.sub(rf'({NON_C})െ({SUB_CLUSTER})[ൗൌ]', r'\1\2ൌ', text)
     text = re.sub(rf'({NON_C})േ({SUB_CLUSTER})[ൗൌ]', r'\1\2ൌ', text)
+    # Split vowels inside words attached to consonants (e.g. ഉപേയാഗിക്കുന്നത് -> ഉപയോഗിക്കുന്നത്)
+    text = re.sub(rf'േ({SUB_CLUSTER})ാ', r'\1ോ', text)
+    text = re.sub(rf'െ({SUB_CLUSTER})ാ', r'\1ൊ', text)
 
     # 2. Partially swapped split vowels (e/ee after cluster followed by aa):
     text = re.sub(rf'({SUB_CLUSTER})ൊ', r'\1ൊ', text)
@@ -76,14 +79,15 @@ def convert_visual_to_logical(text: str) -> str:
 
     # f. Genitive suffix -de: െ + ട -> ട + െ (ടെ)
     # (Must NOT match when da already has another vowel sign like du in thiranjedukkuka or ariyappedunnu!)
-    text = re.sub(rf'({NON_C})െ(ട)(?!{VOWELS})', r'\1\2െ', text)
+    text = re.sub(rf'({NON_C}|{C})െ(ട)(?!{VOWELS})', r'\1\2െ', text)
 
     # g. Accusative suffix -ye / -yellaam: െ + യ -> യ + െ (യെ / യെല്ലാം)
-    text = re.sub(rf'({NON_C})െ(യ)(?:ല്ലാം|െല്ലാം){END_B}', r'\1\2െല്ലാം', text)
-    text = re.sub(rf'({NON_C})െ(യ(?:ൽ|ിൽ|േ)?){END_B}', r'\1\2െ', text)
+    text = re.sub(rf'({NON_C}|{C})െ(യ)(?:ല്ലാം|െല്ലാം){END_B}', r'\1\2െല്ലാം', text)
+    text = re.sub(rf'({NON_C}|{C})െ(യ(?:ൽ|ിൽ|േ)?){END_B}', r'\1\2െ', text)
 
-    # h. Accusative plural suffix -le: െ + ള -> ള + െ (ളെ)
-    text = re.sub(rf'({NON_C})െ(ള){END_B}', r'\1\2െ', text)
+    # h. Accusative plural suffix -le: െ/േ + ള -> ള + െ (ളെ, ളെക്കുറിച്ച്, ളെക്കാൾ)
+    text = re.sub(r'([കങ്ങ])[െേ]ള', r'\1ളെ', text)
+    text = re.sub(rf'({NON_C}|{C})[െേ](ള)(ക്കാൾ|ൽ|ക്കുറിച്ച്)?{END_B}', r'\1\2െ\3', text)
 
     # i. Pre-base ai-karam before consonant clusters:
     text = re.sub(rf'({NON_C})ൈ({CLUSTER})', r'\1\2ൈ', text)
@@ -130,11 +134,14 @@ def convert_visual_to_logical(text: str) -> str:
     text = re.sub(r'ഹിസ്റ്റ¡', 'ഹിസ്റ്റ', text)
     text = re.sub(r'സെÀ', 'സെ', text)
 
+    NON_C_NO_SPACE = rf'(?:^|[^\u0D15-\u0D3A\s])'
+
     # 4. Pre-base matras (single െ, േ, ൈ) preceded by non-consonant boundary or at word start:
-    text = re.sub(rf'({NON_C})[\s\u25CC]*([െേൈ])[\s\u25CC]*({CLUSTER})', r'\1\3\2', text)
+    # Preserves preceding whitespace so words are never concatenated!
+    text = re.sub(rf'({NON_C_NO_SPACE})(\s*)[\u25CC]*([െേൈ])[\s\u25CC]*({CLUSTER})', r'\1\2\4\3', text)
 
     # 5. Second pass for newly exposed pre-base matras:
-    text = re.sub(rf'({NON_C})[\s\u25CC]*([െേൈ])[\s\u25CC]*({CLUSTER})', r'\1\3\2', text)
+    text = re.sub(rf'({NON_C_NO_SPACE})(\s*)[\u25CC]*([െേൈ])[\s\u25CC]*({CLUSTER})', r'\1\2\4\3', text)
 
     # 6. Safety cleanup for impossible vowel collisions caused by visual typesetting
     text = re.sub(r'പ്പടെു', 'പ്പെടു', text)
@@ -145,13 +152,13 @@ def convert_visual_to_logical(text: str) -> str:
     return text
 
 
-def clean_indic_text(text: str, fonts: list[str] = None) -> str:
+def clean_indic_text(text: str, fonts: list[str] = None) -> tuple[str, list]:
     """
     Universal cleaner for Indic text from PDF extractions.
     Handles: Unicode normalization, control char removal, visual-to-logical reorder, whitespace collapse.
     """
     if not text:
-        return text
+        return text, []
 
     # 0. Protect HTML tags (inline equation images, diagrams) so cleaning never alters them
     html_tags = []
@@ -341,6 +348,8 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     # 6. Collapse duplicate subjoined signs (e.g. ഇന്ത്യ്യ -> ഇന്ത്യ)
     text = re.sub(r'(\u0D4D\u0D2F){2,}', r'\1', text)
     text = re.sub(r'(\u0D4D\u0D35){2,}', r'\1', text)
+    # Collapse duplicate chandrakkala / virama (e.g. ്് or ് ് -> ്)
+    text = re.sub(r'(\u0D4D\s*){2,}', '\u0D4D', text)
     # 7. Strip dotted circle artifacts (U+25CC) and repair detached combining signs/chillus/ligatures
     text = text.replace('\u25CC', '')
     # Remove spaces erroneously separating Malayalam base characters from dependent vowel signs, viramas, anusvaras, or visargas
@@ -390,8 +399,11 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     text = re.sub(r'\bVx\b', r'\\sqrt{x}', text)
     text = re.sub(r'\bV(\d+)\b', r'\\sqrt{\1}', text)
     text = re.sub(r'\\x\b', 'x', text)
-    text = re.sub(r'(?<=[=,\s])\s*\\times\s*([0-9])\b', r' x^{\1}', text)
-    text = re.sub(r'\$\\times\s*([0-9])\b', r'$x^{\1}', text)
+    # Normalize multiplication signs and heal corrupted exponents/missing commas
+    text = re.sub(r'×', r'\\times ', text)
+    text = re.sub(r'(\d+(?:\^\d+)?)\s*[xX]\^([0-9])\b', r'\1 \\times \2', text)
+    text = re.sub(r'(\d+(?:\.\d+)?|\^\{?\d+\}?)\s*[xX]\s*(\d+(?:\.\d+)?)', r'\1 \\times \2', text)
+    text = re.sub(r'(\d+)\s+(?=\d+\s*=)', r'\1, ', text)
 
     # Vector arrows and unit vectors
     text = re.sub(r'\\frac\{[=><\-—~^d2\s|!_]+\}\{([A-Za-z])(?:\s*[A-Za-z]*)\}', r'\\vec{\1}', text)
@@ -425,11 +437,17 @@ def clean_indic_text(text: str, fonts: list[str] = None) -> str:
     text = re.sub(r'[ \t]+([,.:;!?])', r'\1', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
 
+    # 8.5 Validate and Repair word-level anomalies
+    from .malayalam_validator import validate_and_repair
+    validation_result = validate_and_repair(text)
+    text = validation_result.repaired_text
+    flags = validation_result.flags
+
     # 9. Restore protected HTML tags
     for idx, tag in enumerate(html_tags):
         text = text.replace(f"___HTML_TAG_{idx}___", tag)
 
-    return text
+    return text, flags
 
 
 def sanity_check_malayalam_text(text: str) -> tuple[bool, dict]:
@@ -585,6 +603,10 @@ def auto_fix_deterministic(text: str) -> tuple[str, list[str]]:
     s = re.sub(r'(?<=[\u0D00-\u0D7F])[\s\xa0]+([\u0D02\u0D03\u0D3E-\u0D4E\u0D57])', r'\1', s)
     # Remove spaces separating subjoined consonant signs (ya, va, ra, la)
     s = re.sub(r'(?<=[\u0D00-\u0D7F])[\s\xa0]+(്[\u200C\u200D]?[യവരല])', r'\1', s)
+
+    # Unglue Malayalam characters from Latin letters and Digits (common extraction artifact)
+    s = re.sub(r'([A-Za-z0-9])([\u0D00-\u0D7F])', r'\1 \2', s)
+    s = re.sub(r'([\u0D00-\u0D7F])([A-Za-z0-9])', r'\1 \2', s)
 
     # Apply standard visual-to-logical reordering (infix suffixes, pre-base matras, etc.)
     s = convert_visual_to_logical(s)
