@@ -18,10 +18,14 @@ the cheapest viable fix before resorting to Vision calls.
 import pymupdf
 import unicodedata
 import os
+import pytesseract
 import base64
 import hashlib
 import re
 from typing import Optional, List, Dict, Tuple
+from .text_cleaner import convert_visual_to_logical, clean_indic_text, sanity_check_malayalam_text
+from .quality_check import validate_equation_crop
+from ..storage.cloudflare import upload_image_to_cloudflare
 from google import genai
 from google.genai import types
 from PIL import Image
@@ -58,6 +62,73 @@ KNOWN_LATEX_COMMANDS = {
     'text', 'mathrm', 'mathbf', 'mathbb', 'mathit', 'quad', 'qquad', 'equiv', 'propto', 'perp', 'parallel',
     'cup', 'cap', 'subset', 'subseteq', 'supset', 'supseteq', 'emptyset', 'forall', 'exists', 'implies', 'iff'
 }
+
+
+# ---------------------------------------------------------------------------
+# Anchor token helpers
+# ---------------------------------------------------------------------------
+
+# Images and equations are stored as canonical anchor tokens in the span
+# stream (and in the DB).  The API layer calls expand_anchor_tokens() at
+# serialisation time so the frontend always receives ready-to-render HTML.
+#
+# Token formats:
+#   {{IMG:https://cdn.example.com/abc.png}}   — Cloudflare R2 image
+#   {{EQ:$\frac{1}{2}$}}                      — inline LaTeX equation
+
+_ANCHOR_IMG_RE = re.compile(r'\{\{IMG:([^}]+)\}\}')
+_ANCHOR_EQ_RE  = re.compile(r'\{\{EQ:([^}]+)\}\}')
+
+
+def expand_anchor_tokens(text: str) -> str:
+    """
+    Convert anchor tokens to HTML for frontend consumption.
+
+    {{IMG:url}}         -> <img src="url" class="inline-math-img" ...>
+    {{EQ:$latex$}}      -> $latex$   (kept as-is; KaTeX renders it)
+    {{IMG_BLOCK:url}}   -> <div class="..."><img ...></div>
+    """
+    if not text:
+        return text
+
+    # Block diagram token (large images)
+    text = re.sub(
+        r'\{\{IMG_BLOCK:([^}]+)\}\}',
+        lambda m: (
+            f'<div class="my-3 flex flex-col items-center">'
+            f'<img src="{m.group(1)}" alt="diagram" '
+            f'class="max-h-64 rounded shadow-sm border border-slate-200" /></div>'
+        ),
+        text,
+    )
+
+    # Inline image token
+    text = _ANCHOR_IMG_RE.sub(
+        lambda m: (
+            f'<img src="{m.group(1)}" alt="math" class="inline-math-img" '
+            f'style="vertical-align:-0.38em;max-height:2.2em;display:inline-block;margin:0 1px;" />'
+        ),
+        text,
+    )
+
+    # Equation token — already valid LaTeX, just unwrap the outer token wrapper
+    text = _ANCHOR_EQ_RE.sub(lambda m: m.group(1), text)
+
+    # Strip any un-restored QAI_IMAGE tokens so raw placeholders never show to users
+    text = re.sub(r'\[\[\s*QAI_IMAGE:[^\]]+\]\]', '', text)
+
+    return text
+
+
+def _make_img_anchor(img_url: str, h: float, w: float, is_block: bool,
+                     page_idx: int, owner_number=None) -> str:
+    """
+    Build the canonical anchor token for an image.  Block images use
+    {{IMG_BLOCK:url}} so expand_anchor_tokens() can wrap them in a <div>.
+    """
+    if is_block:
+        return f'{{{{IMG_BLOCK:{img_url}}}}}'
+    return f'{{{{IMG:{img_url}}}}}'
 
 
 def clean_latex_equation(raw_text: str) -> str:
@@ -112,108 +183,20 @@ def clean_latex_equation(raw_text: str) -> str:
     inner = re.sub(r'(\d+(?:\.\d+)?|\^\{?\d+\}?)\s*[xX]\s*(\d+(?:\.\d+)?)', r'\1 \\times \2', inner)
     inner = re.sub(r'(\d+)\s+(?=\d+\s*=)', r'\1, ', inner)
     inner = re.sub(r'^\\times\s*=', 'x =', inner)
-
-    # 4. Vector expressions: fix (= + y) -> (x + y) and (y = x) -> (y - x)
-    inner = re.sub(r'\(\s*=\s*\+\s*([a-zA-Z0-9])\s*\)', r'(x + \1)', inner)
-    inner = re.sub(r'\(\s*([a-zA-Z])\s*=\s*([a-zA-Z0-9])\s*\)', r'(\1 - \2)', inner)
-
-    # 5. Unit vectors: i, j, k (or J, ]) after parentheses or coefficients
-    inner = re.sub(r'\)\s*[iI]\b', r')\\hat{i}', inner)
-    inner = re.sub(r'\)\s*[jJ\]]\b', r')\\hat{j}', inner)
-    inner = re.sub(r'\b[zZ]\s*2\s*[kK]\b', r'z^{2}\\hat{k}', inner)
-    inner = re.sub(r'\b[zZ]\^\{?2\}?\s*[kK]\b', r'z^{2}\\hat{k}', inner)
-    inner = re.sub(r'(?<=\+)\s*[kK]\b', r' \\hat{k}', inner)
-
-    # 6. Radian fractions and angle variables
-    inner = re.sub(r'\\frac\{(?:iy|n|tt|IT|5|p)\}\{([2346])\}', r'\\frac{\\pi}{\1}', inner)
-    inner = re.sub(r'\b0\s*=\s*\\frac\{\\pi\}', r'\\theta = \\frac{\\pi}', inner)
-
-    # 7. Standardize spacing around equals
+    # 4. Standardize spacing around equals
     inner = re.sub(r'\s*=\s*', ' = ', inner)
 
-    # 7.5 Matrix healing: restore missing backslashes for begin/end/left/right and normalize array to bmatrix
+    # 5. Matrix healing: restore missing backslashes for begin/end/left/right and normalize array to bmatrix
     inner = re.sub(r"(?<!\\)\b(begin|end|left|right)\b", r"\\\1", inner)
     inner = re.sub(r"\\left\[\s*\\begin\{array\}\{[a-z]+\}\s*([\s\S]+?)\s*\\end\{array\}\s*\\right\]", r"\\begin{bmatrix} \1 \\end{bmatrix}", inner)
 
-    # 7.4 Differential Equations, Integrals & Vector Calculus
-    inner = re.sub(r'\bV\s*aydyay\b', r'\\frac{dy}{dx} + \\frac{1}{x}y = x^{2}', inner)
-    if re.search(r'\bdy\b', inner, re.I) and re.search(r'\bdx\b', inner, re.I):
-        if "1" in inner and "x" in inner.lower() and "=" in inner:
-            inner = r'\frac{dy}{dx} + \frac{1}{x}y = x^{2}'
-        else:
-            inner = re.sub(r'(?<!\\frac\{)\bdy(?:\s*[\n/]|\\n)\s*dx\b', r'\\frac{dy}{dx}', inner)
-            inner = re.sub(r'(?<!\\frac\{)\bdx(?:\s*[\n/]|\\n)\s*dy\b', r'\\frac{dx}{dy}', inner)
-    inner = re.sub(r'(?<!\\frac\{)\bdy[\s\n/]+dx\b', r'\\frac{dy}{dx}', inner)
-    inner = re.sub(r'(?<!\\frac\{)\bdx[\s\n/]+dy\b', r'\\frac{dx}{dy}', inner)
-    inner = re.sub(r'(?<!\\frac\{)\bd\^?2y[\s\n/]+dx\^?2\b', r'\\frac{d^{2}y}{dx^{2}}', inner)
-    inner = re.sub(r'(?<!\\frac\{)\bd\^?2x[\s\n/]+dt\^?2\b', r'\\frac{d^{2}x}{dt^{2}}', inner)
-    inner = re.sub(r'(?<!\\frac\{)\bdy[\s\n/]+dt\b', r'\\frac{dy}{dt}', inner)
-    inner = re.sub(r'(?<!\\frac\{)\bdx[\s\n/]+dt\b', r'\\frac{dx}{dt}', inner)
-    inner = re.sub(r'\b(?:ou|0u|eu)\b\s*=\s*', r'\\frac{dy}{dx} = ', inner)
+    # 6. Heal corrupted fractions (e.g. \frac{-q{4\pi -> \frac{-q}{4\pi})
+    inner = re.sub(r'\\frac\{\\text\{([^{}]+)\}\{([^{}]+?)(?=\s*=\s*|\$|\\\\|\n|$)', r'\\frac{\\text{\1}}{\2}', inner)
+    inner = re.sub(r'\\frac\{([^{}]+)\{([^{}]+?)(?=\s*=\s*|\$|\\\\|\n|$)', r'\\frac{\1}{\2}', inner)
+    inner = re.sub(r'\\frac\s+([^{}\s]+)\{([^{}]+)\}', r'\\frac{\1}{\2}', inner)
+    inner = re.sub(r'\\frac\s+([^{}\s]+)\{([^{}]+?)(?=\s*=\s*|\$|\\\\|\n|$)', r'\\frac{\1}{\2}', inner)
 
-    # Integrals & Vector Theorems
-    inner = re.sub(r'\[\s*f\s*F\s*sas\s*=\s*\[\s*o>\s*F\s*\)\s*dV', r'\\iint_S \\vec{F} \\cdot d\\vec{S} = \\iiint_V (\\nabla \\cdot \\vec{F}) dV', inner)
-    inner = re.sub(r'\[\s*f\s*F\s*sas\s*=\s*\[\s*fv\s*F\s*dV', r'\\iint_S \\vec{F} \\cdot d\\vec{S} = \\iiint_V (\\nabla \\cdot \\vec{F}) dV', inner)
-    inner = re.sub(r'\b(?:vVxF|vx\s*F)\s*=\s*0\b', r'\\nabla \\times \\vec{F} = \\vec{0}', inner)
-    inner = re.sub(r'\b(?:V\.F|v\.F)\s*=\s*0\b', r'\\nabla \\cdot \\vec{F} = 0', inner)
-    inner = re.sub(r'\|\s*Jt\s*dx\s*=\s*1\b', r'\\int f(x) dx = 1', inner)
-    inner = re.sub(r'\[\s*te\s*dx\s*>\s*1\b', r'\\int f(x) dx > 1', inner)
-    inner = re.sub(r'lax\s*ol\s*[-–—]\s*\(@\.b\)\s*=\s*1dhibP', r'|\\vec{a} \\times \\vec{b}|^{2} + (\\vec{a} \\cdot \\vec{b})^{2} = |\\vec{a}|^{2} |\\vec{b}|^{2}', inner)
-    inner = re.sub(r'lax\s*or\s*\+\s*\(@\.b\)\s*=\s*I@hbP', r'|\\vec{a} \\times \\vec{b}|^{2} + (\\vec{a} \\cdot \\vec{b})^{2} = |\\vec{a}|^{2} |\\vec{b}|^{2}', inner)
-    inner = re.sub(r'Vy\)\s*<\s*V\(ye\)', r'V(\\bar{y}_{st}) < V(\\bar{y}_{sys})', inner)
-    inner = re.sub(r'\b2\s*a\b(?=\s*-\s*ടെസ്റ്റ്)', r'\\chi^{2}', inner)
-    inner = re.sub(r'\bX\s*~\s*y\s*\(2\)', r'X \\sim \\chi^{2}(2)', inner)
-
-    # 7.45 Powers, Exponentials & Fractions
-    inner = re.sub(r'\bx\\ne\b', r'e^{x}', inner)
-    inner = re.sub(r'(?<!\\frac\{)\b1[\s\n/]+x\b', r'\\frac{1}{x}', inner)
-    inner = re.sub(r'(?<!\\frac\{)\b1[\s\n/]+y\b', r'\\frac{1}{y}', inner)
-    inner = re.sub(r'(?<!\\frac\{)\b1[\s\n/]+B\b', r'\\frac{1}{B}', inner)
-    inner = re.sub(r'(?<!\\frac\{)\b1[\s\n/]+n\b', r'\\frac{1}{n}', inner)
-    inner = re.sub(r'\b2[\s\n/]+X[xX]?\b', r'x^{2}', inner)
-    inner = re.sub(r'\be\^\{?x\}?\s*Ty\b', r'e^{x+y}', inner)
-
-    # 7.46 Trigonometric Powers
-    inner = re.sub(r'\btan[’\'"]+\s*[@0θ]?', r'\\tan^{2}\\theta', inner)
-    inner = re.sub(r'\bsec[’\'"]+\s*[@0θ]?', r'\\sec^{2}\\theta', inner)
-    inner = re.sub(r'\bsin[’\'"]+\s*[@0θ]?', r'\\sin^{2}\\theta', inner)
-    inner = re.sub(r'\bcos[’\'"]+\s*[@0θ]?', r'\\cos^{2}\\theta', inner)
-
-    # 7.6 Mathematics & Statistics Normalization:
-    # Statistical distribution: X ~ N(theta, sigma^2)
-    inner = re.sub(r'([A-Za-z])\s*[=~—–-]{1,2}\s*[\(=]?\s*[0-9oOnN\(\)\s=]*[,\s=]+[0oO©\s=]*\b2\s*\)', r'\1 \\sim N(\\theta, \\sigma^{2})', inner)
-    inner = re.sub(r'([A-Za-z])\s*[~—–-]\s*([nN])\s*\(', r'\1 \\sim N(', inner)
-    inner = re.sub(r'\(\s*[90oOθ]\s*,', r'(\\theta, ', inner)
-    inner = re.sub(r'\(\s*μ\s*,', r'(\\mu, ', inner)
-    inner = re.sub(r'([,\(])\s*[0oO©]\s*[\^]?\s*2\s*([,\)])', r'\1 \\sigma^{2}\2', inner)
-    
-    # Standalone sigma^2 and variance: ONLY copyright symbol © / \u00A9 or explicit caret 0^2 / O^2
-    inner = re.sub(r'[\u00A9©]\s*(?:\^\{?2\}?|2)', r'\\sigma^{2}', inner)
-    inner = re.sub(r'(?<![A-Za-z0-9])[0oO]\s*\^\s*\{?2\}?(?![0-9])', r'\\sigma^{2}', inner)
-    
-    # Sum of squared deviations: sum (x_i - \bar{x})^2
-    inner = re.sub(r'(?:\\frac\{id\}\{1\}|\\frac\{a\}\{1\}|\bhn\b)?\s*\(\s*x\s*(?:\\hat\{i\}|[I\]i1])?\s*[-–—=]\s*x[X\s]*\)\s*2\b', r'\\sum (x_i - \\bar{x})^{2}', inner)
-    inner = re.sub(r'\b\\frac\{1\}\{7\}\b', r'\\frac{1}{n}', inner)
-    inner = re.sub(r'\\begin\{bmatrix\}\s*1vV\s*\\\\\s*1-1\s*&\s*hn\s*\\end\{bmatrix\}', r'\\frac{1}{n-1}', inner)
-    inner = re.sub(r'\b1-1\b', r'n-1', inner)
-    inner = re.sub(r'\bxX\b', r'\\bar{x}', inner)
-
-    # 7.7 Physics & Chemistry Formulas:
-    # Chemistry subscripts: H2O, CO2, H2SO4, KMnO4, CaCO3, O2, N2, etc.
-    inner = re.sub(r'\bH\s*2\s*O\b', r'H_2O', inner)
-    inner = re.sub(r'\bC\s*O\s*2\b', r'CO_2', inner)
-    inner = re.sub(r'\bO\s*2\b', r'O_2', inner)
-    inner = re.sub(r'\bN\s*2\b', r'N_2', inner)
-    inner = re.sub(r'\bH\s*2\s*S\s*O\s*4\b', r'H_2SO_4', inner)
-    inner = re.sub(r'\bK\s*Mn\s*O\s*4\b', r'KMnO_4', inner)
-    inner = re.sub(r'\bCa\s*C\s*O\s*3\b', r'CaCO_3', inner)
-    
-    # Physics formulas: E = mc^2, v^2 = u^2 + 2as
-    inner = re.sub(r'\b[eE]\s*=\s*m\s*c\s*[\^]?\s*2\b', r'E = mc^{2}', inner)
-    inner = re.sub(r'\b[vV]\s*[\^]?\s*2\s*=\s*[uU]\s*[\^]?\s*2\b', r'v^{2} = u^{2}', inner)
-    inner = re.sub(r'\b[hH]\s*\\nu\b', r'h\\nu', inner)
-
-    # 8. Sanitize unknown control sequences that break KaTeX
+    # 7. Sanitize unknown control sequences that break KaTeX
     def _sanitize_cmd(match):
         cmd = match.group(1)
         if cmd in KNOWN_LATEX_COMMANDS:
@@ -222,9 +205,23 @@ def clean_latex_equation(raw_text: str) -> str:
             return cmd.lower()
         return cmd
 
-    inner = re.sub(r'\\([a-zA-Z]+)', _sanitize_cmd, inner)
+    from .math_normalizer import sanitize_math_expression
+    inner = sanitize_math_expression(inner)
+    result = f"${inner}$"
 
-    return f"${inner}$"
+    # Structural sanity check on the way out: OCR'd math (ocr_math_image / Vision) is the
+    # single biggest source of brace/delimiter corruption feeding into option text later
+    # in the pipeline (e.g. "$\frac{\sqrt{2}}$kqq_0}{a^2}"). Catch it here, at the source,
+    # rather than relying solely on the downstream option_answer_separator pass to notice.
+    try:
+        from .option_answer_separator import validate_and_repair_latex
+        result, had_issue = validate_and_repair_latex(result)
+        if had_issue:
+            print(f"clean_latex_equation: repaired malformed LaTeX braces/delimiters in {result!r}", flush=True)
+    except Exception:
+        pass
+
+    return result
 
 
 def ocr_math_image(pil_img: Image.Image) -> str:
@@ -695,7 +692,8 @@ def ocr_page_vision(img_bytes: bytes, engine: Optional[str] = None, force: bool 
     prompt = (
         "Extract all question paper text and multiple-choice questions from this scanned page faithfully. "
         "Keep question numbers, Malayalam/English text, options (A, B, C, D), and answers verbatim. "
-        "Transcribe mathematical formulas into standard inline LaTeX ($...$)."
+        "Transcribe mathematical formulas into standard inline LaTeX ($...$). "
+        "DO NOT include any conversational text, pleasantries, or explanations. Output ONLY the extracted text and nothing else."
     )
 
     if engine == "groq":
@@ -813,8 +811,8 @@ def ocr_whole_pdf(file_path: str, engine: Optional[str] = None) -> dict:
 
 
 def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict] = None) -> tuple[str, list[dict]]:
-    """
-    Rebuilds page text non-destructively using 2D spatial reading order.
+    r"""
+    Rebuilds page text non-destructively using 2D spatial reading order and mathematical equation reconstruction.
 
     Returns:
         (page_text, unmapped_codes) where unmapped_codes is a list of
@@ -825,37 +823,54 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
     - Preserves all already-valid Malayalam Unicode characters.
     - Preserves natural spacing and Latin text (headers, English terms).
     - Substitutes unmapped ligatures/symbols from the resolved Indic font map.
+    - Synthesizes mathematical fractions from horizontal vector drawing bars (page.get_drawings())
+      and spatial numerator/denominator span clusters into LaTeX \frac{...}{...}.
+    - Formats subscripts (_{...}) and superscripts (^{...}) based on font metrics and vertical displacement.
+    - Normalizes radical symbols (√) into LaTeX \sqrt{...} and Unicode minus into standard hyphens.
     - Spatially interleaves inline math/equation images based on bounding box alignment.
-    - Groups text into horizontal visual bands and sorts elements left-to-right (x0),
-      placing equations exactly inside sentences and options.
+    - Groups text into horizontal visual bands and sorts elements left-to-right (x0).
     - Displays diagrams and figures as centered block elements.
     """
     rawdict = page.get_text("rawdict")
     unmapped_codes = []
     eq_items = list(equation_items) if equation_items else []
-    text_lines = []
 
-    for b in rawdict.get("blocks", []):
+    # ------------------------------------------------------------------
+    # Step 0: Extract candidate fraction division bars from vector drawings
+    # ------------------------------------------------------------------
+    candidate_bars = []
+    try:
+        drawings = page.get_drawings()
+        for d in drawings:
+            r = d.get("rect")
+            if r and r.height <= 2.5 and 3.5 <= r.width <= 320.0:
+                candidate_bars.append(r)
+        candidate_bars.sort(key=lambda r: (r.y0, r.x0))
+    except Exception:
+        candidate_bars = []
+
+    # ------------------------------------------------------------------
+    # Step 1: Pre-process and resolve all glyph spans across blocks and lines
+    # ------------------------------------------------------------------
+    all_spans = []
+    for bi, b in enumerate(rawdict.get("blocks", [])):
         if "lines" not in b:
             continue
-        for l in b["lines"]:
-            line_chars = []
-            prev_x1 = None
-            font_size = 10
-            for s in l["spans"]:
+        for li, l in enumerate(b["lines"]):
+            for si, s in enumerate(l["spans"]):
                 span_font = s["font"]
                 base_font = span_font.split("+")[-1]
                 font_size = s["size"]
                 f_map = font_map.get(span_font) or font_map.get(base_font) if font_map else None
-                is_superscript = bool(s.get("flags", 0) & 1)
-                super_chars = []
+                is_legacy_font = "ML-TT" in span_font or "FML" in span_font
+                flags = s.get("flags", 0)
 
-                for c in s["chars"]:
+                resolved_chars = []
+                for c in s.get("chars", []):
                     ch = c["c"]
                     code = ord(ch) if len(ch) == 1 else 0
                     bbox = c.get("bbox")
 
-                    # Check if this character is a wide non-blank glyph misreported as whitespace
                     w = (bbox[2] - bbox[0]) if bbox else 0
                     is_real_glyph = (
                         not c.get("synthetic")
@@ -865,19 +880,16 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                         and (w / font_size) > 0.45
                     )
 
-                    # Whitespace characters and synthetic spaces must not be mapped through font maps,
-                    # unless it is a wide non-blank glyph with an actual font mapping!
                     if (ch in ("\n", "\r", "\t", " ", "\xa0") or c.get("synthetic")) and not is_real_glyph:
                         resolved = ch
                     elif 0x0D00 <= code <= 0x0D7F:
-                        # Character is already a valid standard Malayalam Unicode code point from PDF ToUnicode CMap!
-                        # Never overwrite already-valid Malayalam with GID shape lookups.
+                        resolved = ch
+                    elif 32 <= code <= 126 and not is_legacy_font and re.match(r'^[a-zA-Z0-9\s\!\#\$\%\&\'\(\)\*\+\,\-\.\/\:\;\<\=\>\?\@\[\\\]\^\_\`\{\|\}\~]+$', ch):
                         resolved = ch
                     elif f_map and (str(code) in f_map or code in f_map):
                         resolved = f_map.get(str(code)) or f_map.get(code)
                     else:
                         resolved = ch
-                        # Track unmapped codes for downstream diagnosis
                         if f_map and code > 32 and ch not in (' ', '\n', '\t', '\r', '\xa0'):
                             unmapped_codes.append({
                                 "code": code,
@@ -885,164 +897,355 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
                                 "bbox": list(bbox) if bbox else None
                             })
 
-                    # Post-base combining signs that attach to the left consonant and must NEVER be preceded by a space.
-                    # Pre-base matras (െ, േ, ൈ) at the beginning of a word CAN be preceded by a space when there is a word gap.
-                    POST_BASE_SIGNS = (
-                        0x0D02, 0x0D03, 0x0D3E, 0x0D3F, 0x0D40, 0x0D41, 0x0D42, 0x0D43, 0x0D44,
-                        0x0D4A, 0x0D4B, 0x0D4C, 0x0D4D, 0x0D57
-                    )
-                    is_combining = (
-                        bool(resolved) and (
-                            (ord(resolved[0]) in POST_BASE_SIGNS) or
-                            resolved.startswith("\u0D4D")
-                        )
-                    )
+                    resolved_chars.append({
+                        "ch": resolved,
+                        "bbox": bbox,
+                        "code": code
+                    })
 
-                    # Natural horizontal spacing gap - only between independent words/letters, never before combining signs or superscripts!
-                    if bbox and prev_x1 is not None:
-                        dist = bbox[0] - prev_x1
-                        previous_text = "".join(line_chars)
-                        if (
-                            dist > font_size * 0.18
-                            and not previous_text.endswith(" ")
-                        ):
-                            if not is_combining and not is_superscript and resolved not in (" ", "\n", "\xa0"):
-                                line_chars.append(" ")
+                span_text = "".join(rc["ch"] for rc in resolved_chars)
+                if not span_text.strip():
+                    continue
 
-                    if is_superscript:
-                        super_chars.append(resolved)
-                    else:
-                        line_chars.append(resolved)
+                all_spans.append({
+                    "id": f"{bi}_{li}_{si}",
+                    "bi": bi,
+                    "li": li,
+                    "si": si,
+                    "text": span_text,
+                    "bbox": list(s["bbox"]),
+                    "size": font_size,
+                    "flags": flags,
+                    "font": span_font,
+                    "chars": resolved_chars
+                })
 
-                    if bbox:
-                        prev_x1 = bbox[2]
+    POST_BASE_SIGNS = (
+        0x0D02, 0x0D03, 0x0D3E, 0x0D3F, 0x0D40, 0x0D41, 0x0D42, 0x0D43, 0x0D44,
+        0x0D4A, 0x0D4B, 0x0D4C, 0x0D4D, 0x0D57
+    )
 
-                if is_superscript and super_chars:
-                    st = "".join(super_chars).strip()
-                    if st:
-                        if st.startswith("^"):
-                            line_chars.append(st)
-                        else:
-                            line_chars.append(f"^{{{st}}}")
+    def format_span_tokens(span_list):
+        if not span_list:
+            return ""
+        out = []
+        base_y1 = None
+        base_sz = None
+        prev_x1 = None
 
-            line_str = "".join(line_chars).strip()
-            l_bbox = l.get("bbox", [0, 0, 0, 0])
-            l_y_center = (l_bbox[1] + l_bbox[3]) / 2
+        for s in span_list:
+            t = s["text"]
+            sz = s["size"]
+            bb = s["bbox"]
+            fl = s.get("flags", 0)
 
-            if line_str:
-                text_lines.append({
-                    "text": line_str,
-                    "bbox": l_bbox,
-                    "y_center": l_y_center,
-                    "x0": l_bbox[0],
-                    "x1": l_bbox[2],
-                    "y0": l_bbox[1],
-                    "y1": l_bbox[3],
+            is_combining = (
+                bool(t) and (
+                    (ord(t[0]) in POST_BASE_SIGNS) or
+                    t.startswith("\u0D4D")
+                )
+            )
+
+            is_delim = t.strip() in ("]", ")", "}", "[", "(", "{", ",", ";", ":", "|")
+
+            if prev_x1 is not None and bb:
+                gap = bb[0] - prev_x1
+                if gap > sz * 0.22 and not is_combining:
+                    prev_text = "".join(out)
+                    if not prev_text.endswith(" ") and not t.startswith(" ") and not is_delim:
+                        out.append(" ")
+
+            formatted = t
+            if base_y1 is not None and base_sz is not None and not is_delim:
+                if sz < base_sz * 0.88 and bb[3] > base_y1 + 0.8:
+                    clean_sub = t.strip()
+                    if clean_sub:
+                        formatted = f"_{{{clean_sub}}}" if len(clean_sub) > 1 or not clean_sub.isalnum() else f"_{clean_sub}"
+                elif (fl & 1) or (sz < base_sz * 0.88 and bb[3] < base_y1 - 0.8):
+                    clean_sup = t.strip()
+                    if clean_sup:
+                        formatted = f"^{{{clean_sup}}}" if len(clean_sup) > 1 or not clean_sup.isalnum() else f"^{clean_sup}"
+
+            out.append(formatted)
+            if not is_delim and sz >= 6.0:
+                base_y1 = bb[3]
+                base_sz = sz
+            if bb:
+                prev_x1 = bb[2]
+
+        res = "".join(out)
+        res = re.sub(r'√\(([^\)]+)\)', r'\\sqrt{\1}', res)
+        res = re.sub(r'√([a-zA-Z0-9]+(?:_\{?[a-zA-Z0-9]+\}?)?)', r'\\sqrt{\1}', res)
+        res = res.replace("−", "-")
+        res = res.replace('\u2044', '/').replace('\u2215', '/')
+        return res
+
+    # ------------------------------------------------------------------
+    # Step 2: Match fraction division bars with numerator & denominator
+    # ------------------------------------------------------------------
+    used_span_ids = set()
+    fraction_items = []
+
+    for bar in candidate_bars:
+        y_bar = (bar.y0 + bar.y1) / 2
+        num_spans = []
+        den_spans = []
+
+        for s in all_spans:
+            if s["id"] in used_span_ids:
+                continue
+            sb = s["bbox"]
+            h_overlap = min(sb[2], bar.x1 + 2.0) - max(sb[0], bar.x0 - 2.0)
+            if h_overlap <= 0:
+                continue
+            span_w = sb[2] - sb[0]
+            if span_w > 0 and (h_overlap / span_w) < 0.30:
+                continue
+
+            if y_bar - 11.5 <= sb[3] <= y_bar + 0.8:
+                num_spans.append(s)
+            elif y_bar - 0.8 <= sb[1] <= y_bar + 11.5:
+                den_spans.append(s)
+
+        if not num_spans or not den_spans:
+            continue
+
+        num_spans.sort(key=lambda s: s["bbox"][0])
+        den_spans.sort(key=lambda s: s["bbox"][0])
+        num_str = format_span_tokens(num_spans).strip()
+        den_str = format_span_tokens(den_spans).strip()
+
+        if not num_str or not den_str:
+            continue
+        if "√" in den_str and bar.width < 10 and len(num_str) > 2:
+            continue
+
+        for s in num_spans + den_spans:
+            used_span_ids.add(s["id"])
+
+        all_bb = [s["bbox"] for s in num_spans + den_spans]
+        min_y = min(b[1] for b in all_bb)
+        max_y = max(b[3] for b in all_bb)
+
+        fraction_items.append({
+            "text": f"\\frac{{{num_str}}}{{{den_str}}}",
+            "bbox": [bar.x0, min_y, bar.x1, max_y],
+            "y_center": y_bar,
+            "x0": bar.x0,
+            "x1": bar.x1,
+            "y0": min_y,
+            "y1": max_y,
+            "is_block": False,
+            "is_fraction": True
+        })
+
+    # ------------------------------------------------------------------
+    # Step 3: Segment remaining text spans in each line around fractions
+    # ------------------------------------------------------------------
+    segmented_lines = []
+    for bi, b in enumerate(rawdict.get("blocks", [])):
+        if "lines" not in b:
+            continue
+        for li, l in enumerate(b["lines"]):
+            current_seg = []
+            for si, s in enumerate(l["spans"]):
+                sid = f"{bi}_{li}_{si}"
+                matching_all = [sp for sp in all_spans if sp["id"] == sid]
+                if not matching_all:
+                    continue
+                matched_span = matching_all[0]
+
+                if sid in used_span_ids:
+                    if current_seg:
+                        segmented_lines.append(current_seg)
+                        current_seg = []
+                else:
+                    current_seg.append(matched_span)
+            if current_seg:
+                segmented_lines.append(current_seg)
+
+    text_lines = []
+    for seg in segmented_lines:
+        seg_str = format_span_tokens(seg).strip()
+        if not seg_str:
+            continue
+        min_x = min(s["bbox"][0] for s in seg)
+        max_x = max(s["bbox"][2] for s in seg)
+        min_y = min(s["bbox"][1] for s in seg)
+        max_y = max(s["bbox"][3] for s in seg)
+        y_cent = (min_y + max_y) / 2
+        text_lines.append({
+            "text": seg_str,
+            "spans": seg,
+            "bbox": [min_x, min_y, max_x, max_y],
+            "y_center": y_cent,
+            "x0": min_x,
+            "x1": max_x,
+            "y0": min_y,
+            "y1": max_y,
+            "is_block": False
+        })
+
+    if not text_lines and not fraction_items and not eq_items:
+        return "", unmapped_codes
+
+    # ------------------------------------------------------------------
+    # Step 4: Top-to-bottom reading order reconstruction (with column awareness)
+    # ------------------------------------------------------------------
+    raw_elements = text_lines + fraction_items + eq_items
+    page_width = page.rect.width
+    mid_x = page_width / 2.0
+
+    def render_elements_top_to_bottom(elements: list[dict]) -> list[str]:
+        if not elements:
+            return []
+
+        # Sort elements primarily by vertical position, secondarily by x0
+        elements.sort(key=lambda item: (item["y_center"], item["x0"]))
+
+        # Group inline elements into vertical lines while keeping block diagrams standalone
+        bands = []
+        for elem in elements:
+            if elem.get("is_block"):
+                bands.append({
+                    "avg_y": elem["y_center"],
+                    "y0": elem["y0"],
+                    "y1": elem["y1"],
+                    "lines": [elem],
+                    "is_block": True
+                })
+                continue
+
+            placed = False
+            for band in bands:
+                if band.get("is_block"):
+                    continue
+                v_overlap = max(0, min(elem["y1"], band["y1"]) - max(elem["y0"], band["y0"]))
+                elem_h = max(1.0, elem["y1"] - elem["y0"])
+                band_h = max(1.0, band["y1"] - band["y0"])
+                if abs(elem["y_center"] - band["avg_y"]) <= 4.0 or v_overlap >= 0.45 * min(elem_h, band_h):
+                    band["lines"].append(elem)
+                    band["avg_y"] = sum(l["y_center"] for l in band["lines"]) / len(band["lines"])
+                    band["y0"] = min(band["y0"], elem["y0"])
+                    band["y1"] = max(band["y1"], elem["y1"])
+                    placed = True
+                    break
+
+            if not placed:
+                bands.append({
+                    "avg_y": elem["y_center"],
+                    "y0": elem["y0"],
+                    "y1": elem["y1"],
+                    "lines": [elem],
                     "is_block": False
                 })
 
-    if not text_lines and not eq_items:
-        return "", unmapped_codes
+        # Sort lines strictly top to bottom by y0
+        bands.sort(key=lambda b: b["y0"])
 
-    # Sort text lines vertically
-    text_lines.sort(key=lambda item: item["y_center"])
-
-    # Group lines that lie within the same visual horizontal band (threshold ~5.5pt)
-    bands = []
-    for line in text_lines:
-        placed = False
-        for band in bands:
-            if abs(line["y_center"] - band["avg_y"]) <= 5.5:
-                band["lines"].append(line)
-                band["avg_y"] = sum(l["y_center"] for l in band["lines"]) / len(band["lines"])
-                band["y0"] = min(band["y0"], line["y0"])
-                band["y1"] = max(band["y1"], line["y1"])
-                placed = True
-                break
-        if not placed:
-            bands.append({
-                "avg_y": line["y_center"],
-                "y0": line["y0"],
-                "y1": line["y1"],
-                "lines": [line],
-                "is_block": False
-            })
-
-    # Integrate equation and diagram items into visual bands
-    for item in eq_items:
-        if item.get("is_block"):
-            bands.append({
-                "avg_y": item["y_center"],
-                "y0": item["y0"],
-                "y1": item["y1"],
-                "lines": [item],
-                "is_block": True
-            })
-            continue
-
-        best_band = None
-        best_score = -1e9
+        rendered = []
         for band in bands:
             if band.get("is_block"):
+                rendered.append(band["lines"][0]["text"])
                 continue
-            overlap = max(0, min(item["y1"], band["y1"]) - max(item["y0"], band["y0"]))
-            bottom_dist = abs(item["y1"] - band["y1"])
-            center_dist = abs(item["y_center"] - band["avg_y"])
-            if overlap > 4 or bottom_dist <= 8 or center_dist <= 8:
-                score = overlap * 2.0 - bottom_dist - center_dist * 0.5
-                if score > best_score:
-                    best_score = score
-                    best_band = band
 
-        if best_band is not None and best_score > -15:
-            best_band["lines"].append(item)
-            best_band["y0"] = min(best_band["y0"], item["y0"])
-            best_band["y1"] = max(best_band["y1"], item["y1"])
-        else:
-            bands.append({
-                "avg_y": item["y_center"],
-                "y0": item["y0"],
-                "y1": item["y1"],
-                "lines": [item],
-                "is_block": False
-            })
+            # Check if non-fraction text lines in this band overlap horizontally
+            text_lines_in_band = [l for l in band["lines"] if not l.get("is_fraction") and "spans" in l]
+            has_overlap = False
+            if len(text_lines_in_band) > 1:
+                for i in range(len(text_lines_in_band)):
+                    for j in range(i + 1, len(text_lines_in_band)):
+                        if (text_lines_in_band[i]["x0"] < text_lines_in_band[j]["x1"] - 1.0 and
+                            text_lines_in_band[j]["x0"] < text_lines_in_band[i]["x1"] - 1.0):
+                            has_overlap = True
+                            break
+                    if has_overlap:
+                        break
 
-    # Sort bands top-to-bottom
-    bands.sort(key=lambda b: b["avg_y"])
+            if has_overlap and len(band["lines"]) == len(text_lines_in_band):
+                all_band_spans = []
+                for l in text_lines_in_band:
+                    all_band_spans.extend(l["spans"])
 
-    # Within each band, sort lines left-to-right (x0)
-    page_lines = []
-    for band in bands:
-        if band.get("is_block"):
-            page_lines.append(band["lines"][0]["text"])
-            continue
+                non_ws = [s for s in all_band_spans if s.get("text", "").strip()]
+                filtered_spans = []
+                for s in all_band_spans:
+                    st = s.get("text", "")
+                    if not st.strip():
+                        sb = s.get("bbox", [0, 0, 0, 0])
+                        if any(not (sb[2] <= nws["bbox"][0] or nws["bbox"][2] <= sb[0]) for nws in non_ws):
+                            continue
+                    filtered_spans.append(s)
 
-        band["lines"].sort(key=lambda l: l["x0"])
-        
-        band_str = ""
-        prev_x1 = None
-        
-        for l in band["lines"]:
-            text = l["text"]
-            if not text:
+                filtered_spans.sort(key=lambda s: s["bbox"][0])
+                merged_str = format_span_tokens(filtered_spans).strip()
+                merged_str = re.sub(r' +', ' ', merged_str).strip()
+                if merged_str:
+                    rendered.append(merged_str)
                 continue
-                
-            if prev_x1 is not None:
-                gap = l["x0"] - prev_x1
-                if gap > 30:  # Significant gap suggests columns or table cells
-                    band_str += " \t "
-                elif gap > 2:
-                    if not band_str.endswith(" ") and not text.startswith(" ") and not text.lstrip().startswith((",", ".", ";", ":", ")", "]", "}")):
-                        band_str += " "
-            
-            band_str += text
-            prev_x1 = max(prev_x1 if prev_x1 is not None else 0, l["x1"])
-            
-        if band_str.strip():
-            page_lines.append(band_str.strip())
+
+            band["lines"].sort(key=lambda l: l["x0"])
+            band_str = ""
+            prev_x1 = None
+
+            for l in band["lines"]:
+                text = l["text"]
+                if not text:
+                    continue
+
+                if prev_x1 is not None:
+                    gap = l["x0"] - prev_x1
+                    is_opt_start = bool(re.match(r'^\s*(?:\([A-Ha-h1-8]\)|\[[A-Ha-h1-8]\]|[A-Ha-h1-8][\.\)\:-])\s*', text))
+                    if is_opt_start:
+                        if not band_str.endswith("\t") and not band_str.endswith("   "):
+                            band_str += " \t "
+                    elif gap > 25:
+                        band_str += " \t "
+                    elif gap > 1.5:
+                        if not band_str.endswith(" ") and not text.startswith(" ") and not text.lstrip().startswith((",", ".", ";", ":", ")", "]", "}")):
+                            band_str += " "
+
+                band_str += text
+                prev_x1 = max(prev_x1 if prev_x1 is not None else 0, l["x1"])
+
+            band_str = re.sub(r' +', ' ', band_str).strip()
+            if band_str:
+                rendered.append(band_str)
+
+        return rendered
+
+    # Detect 2-column layout:
+    left_items = [e for e in raw_elements if e["x1"] <= mid_x + 10]
+    right_items = [e for e in raw_elements if e["x0"] >= mid_x - 10]
+    crossing_items = [e for e in raw_elements if e["x0"] < mid_x - 15 and e["x1"] > mid_x + 15]
+
+    is_two_column = (
+        len(left_items) >= 6 and
+        len(right_items) >= 6 and
+        len(crossing_items) <= 0.25 * len(raw_elements)
+    )
+
+    if is_two_column:
+        col_top = min(min(e["y0"] for e in left_items), min(e["y0"] for e in right_items))
+        col_bottom = max(max(e["y1"] for e in left_items), max(e["y1"] for e in right_items))
+
+        headers = [e for e in raw_elements if e["y1"] <= col_top + 5 or (e["x0"] < mid_x - 15 and e["x1"] > mid_x + 15 and e["y0"] < col_top + 40)]
+        footers = [e for e in raw_elements if e["y0"] >= col_bottom - 5 or (e["x0"] < mid_x - 15 and e["x1"] > mid_x + 15 and e["y1"] > col_bottom - 40)]
+        header_ids = {id(e) for e in headers}
+        footer_ids = {id(e) for e in footers}
+
+        col_left = [e for e in left_items if id(e) not in header_ids and id(e) not in footer_ids]
+        col_right = [e for e in right_items if id(e) not in header_ids and id(e) not in footer_ids]
+
+        page_lines = []
+        page_lines.extend(render_elements_top_to_bottom(headers))
+        page_lines.extend(render_elements_top_to_bottom(col_left))
+        page_lines.extend(render_elements_top_to_bottom(col_right))
+        page_lines.extend(render_elements_top_to_bottom(footers))
+    else:
+        page_lines = render_elements_top_to_bottom(raw_elements)
 
     return "\n".join(page_lines), unmapped_codes
-
 
 def extract_text_from_pdf(file_path: str) -> dict:
     """
@@ -1067,13 +1270,33 @@ def extract_text_from_pdf(file_path: str) -> dict:
     from .font_mapper import get_or_create_font_map, hash_font_data
 
     doc = pymupdf.open(file_path)
+    base_filename = os.path.splitext(os.path.basename(file_path))[0]
+    
     full_pages = []
     pages_metadata = []
+    all_span_blocks: list[dict] = []   # layout-aware span stream for layout_segmenter
     total_p_tokens = 0
     total_c_tokens = 0
 
     for page_idx, page in enumerate(doc):
         images = page.get_images()
+
+        # Give every diagram an immutable source owner before text is rebuilt.
+        # Text-order heuristics alone can otherwise assign a lower-page figure to
+        # the preceding question when columns, answers, or page breaks are present.
+        question_anchors = []
+        for text_block in page.get_text("blocks"):
+            if len(text_block) < 5:
+                continue
+            header = text_block[4].strip()
+            match = re.match(
+                r'^(?:Question\s*|Q\.?\s*)?(\d{1,3})\s*[\.\):\-]',
+                header,
+                re.IGNORECASE,
+            )
+            if match:
+                question_anchors.append((text_block[1], int(match.group(1))))
+        question_anchors.sort()
 
         # ---------------------------------------------------------------
         # Step 1: Pre-extract equation clips and diagrams on the page
@@ -1108,48 +1331,68 @@ def extract_text_from_pdf(file_path: str) -> dict:
                         print(f"Page {page_idx + 1}: Dropping invalid equation crop at ({r.x0:.0f},{r.y0:.0f})-({r.x1:.0f},{r.y1:.0f})", flush=True)
                         continue
 
-                    b64 = base64.b64encode(crop_bytes).decode("utf-8")
+                    # Try Tesseract OCR first for equations/math snippets
+                    math_text, p_tok, c_tok = ocr_equation_clip(crop_bytes, engine="tesseract")
+                    if math_text:
+                        total_p_tokens += p_tok
+                        total_c_tokens += c_tok
+                        # Emit as {{EQ:...}} anchor token — expand_anchor_tokens() resolves
+                        # it to inline LaTeX at the API serialisation layer.  This prevents
+                        # the raw LaTeX from being mistaken for prose by parse_questions_from_text.
+                        eq_token = f"{{{{EQ:{math_text}}}}}"
+                        equation_items.append({
+                            "text": f" {eq_token} ",
+                            "rect": r,
+                            "bbox": [r.x0, r.y0, r.x1, r.y1],
+                            "x0": r.x0,
+                            "x1": r.x1,
+                            "y0": r.y0,
+                            "y1": r.y1,
+                            "y_center": (r.y0 + r.y1) / 2,
+                            "is_block": False,
+                            # span_blocks metadata
+                            "type": "equation",
+                            "page": page_idx,
+                            "font_size": 0.0,
+                            "is_bold": False,
+                            "x_indent": r.x0 / max(page.rect.width, 1),
+                        })
+                        continue
+
+                    img_url = upload_image_to_cloudflare(crop_bytes, filename=base_filename)
                     h = r.height
                     w = r.width
 
                     # Distinguish block diagrams/figures from inline mathematical expressions
                     is_block = (h > 75 or (h > 55 and w > 280))
-                    if is_block:
-                        html = f'<div class="my-3 flex justify-center"><img src="data:image/png;base64,{b64}" alt="diagram" class="max-h-64 rounded shadow-sm border border-slate-200" /></div>'
-                        equation_items.append({
-                            "text": html,
-                            "rect": r,
-                            "bbox": [r.x0, r.y0, r.x1, r.y1],
-                            "x0": r.x0,
-                            "x1": r.x1,
-                            "y0": r.y0,
-                            "y1": r.y1,
-                            "y_center": (r.y0 + r.y1) / 2,
-                            "is_block": True
-                        })
-                    else:
-                        if h > 32:
-                            va = "-0.65em"
-                            mh = "3.6em"
-                        elif h > 18:
-                            va = "-0.38em"
-                            mh = "2.2em"
-                        else:
-                            va = "-0.2em"
-                            mh = "1.55em"
-                        html = f'<img src="data:image/png;base64,{b64}" alt="math" class="inline-math-img" style="vertical-align:{va};max-height:{mh};display:inline-block;margin:0 1px;" />'
+                    owner_number = next(
+                        (number for y_pos, number in reversed(question_anchors) if y_pos <= r.y0 + 2),
+                        None,
+                    )
 
-                        equation_items.append({
-                            "text": f" {html} ",
-                            "rect": r,
-                            "bbox": [r.x0, r.y0, r.x1, r.y1],
-                            "x0": r.x0,
-                            "x1": r.x1,
-                            "y0": r.y0,
-                            "y1": r.y1,
-                            "y_center": (r.y0 + r.y1) / 2,
-                            "is_block": False
-                        })
+                    # Emit as anchor token — expand_anchor_tokens() builds the final HTML.
+                    # This fixes the long-standing bug where an img tag's closing "/>" was
+                    # mistaken for trailing math punctuation by parse_questions_from_text,
+                    # causing the next question's boundary to be silently rejected.
+                    img_token = _make_img_anchor(img_url, h, w, is_block, page_idx, owner_number)
+
+                    equation_items.append({
+                        "text": f" {img_token} " if not is_block else img_token,
+                        "rect": r,
+                        "bbox": [r.x0, r.y0, r.x1, r.y1],
+                        "x0": r.x0,
+                        "x1": r.x1,
+                        "y0": r.y0,
+                        "y1": r.y1,
+                        "y_center": (r.y0 + r.y1) / 2,
+                        "is_block": is_block,
+                        # span_blocks metadata
+                        "type": "image",
+                        "page": page_idx,
+                        "font_size": 0.0,
+                        "is_bold": False,
+                        "x_indent": r.x0 / max(page.rect.width, 1),
+                    })
 
         # ---------------------------------------------------------------
         # Step 2: Universal font map detection and text rebuild
@@ -1194,8 +1437,12 @@ def extract_text_from_pdf(file_path: str) -> dict:
         # Step 4: FML/ML-TT legacy font heuristic
         # ---------------------------------------------------------------
         malayalam_chars_count = len(re.findall(r'[\u0D00-\u0D7F]', page_text))
-        if malayalam_chars_count < 20 and re.search(r'[ß∂Ø∏ƒ≥‰≠‡∑›™‚]', page_text):
-            print(f"Page {page_idx + 1}: FML/ML-TT legacy symbols detected. Transliterating...", flush=True)
+        has_fml_font = any(
+            any(legacy in (fi[3] or "") for legacy in ("ML-TT", "FML", "Karthika", "Revathi", "Ambili", "Panchari"))
+            for fi in page_fonts
+        )
+        if has_fml_font and malayalam_chars_count < 20 and re.search(r'[ß∂Ø∏ƒ≥‰≠‡∑›™‚]', page_text):
+            print(f"Page {page_idx + 1}: FML/ML-TT legacy symbols detected in font {page_fonts}. Transliterating...", flush=True)
             from .smc_fml_converter import convert_fml_to_unicode
             page_text = convert_fml_to_unicode(page_text)
             page_text, extra_flags = clean_indic_text(page_text)
@@ -1216,7 +1463,9 @@ def extract_text_from_pdf(file_path: str) -> dict:
             if fallback_text:
                 page_text = fallback_text
 
-        full_pages.append(page_text)
+        # Kept outside question text but lets the parser retain a physical page
+        # identity for reconciliation of diagram ownership.
+        full_pages.append(f"<!--QAI_PAGE:{page_idx}-->\n{page_text}")
 
         # Store per-page metadata for downstream quality scoring and repair
         pages_metadata.append({
@@ -1229,9 +1478,65 @@ def extract_text_from_pdf(file_path: str) -> dict:
             "has_text_layer": has_text_layer,
         })
 
+        # ---------------------------------------------------------------
+        # Step 6: Collect span_blocks for the layout-aware segmenter
+        # Each rendered line/element is emitted as a LayoutElement-compatible
+        # dict carrying bbox, font, bold, and x_indent metadata.  This lets
+        # the new layout_segmenter / block_classifier pipeline use structural
+        # signal (indentation, font size, bold) rather than flat-text pattern
+        # matching to find question boundaries and classify internal structure.
+        # ---------------------------------------------------------------
+        page_width = max(page.rect.width, 1)
+        for eq_item in equation_items:
+            # equation_items already carry the span_blocks metadata fields
+            # added above in Step 1 during this iteration; collect them.
+            if "type" in eq_item:
+                all_span_blocks.append({
+                    "type": eq_item["type"],
+                    "text": eq_item["text"].strip(),
+                    "bbox": eq_item["bbox"],
+                    "page": page_idx,
+                    "font_size": eq_item.get("font_size", 0.0),
+                    "is_bold": eq_item.get("is_bold", False),
+                    "x_indent": eq_item.get("x_indent", 0.0),
+                })
+
+        # Collect text spans: iterate all_spans (populated in _rebuild_text_from_font_map
+        # via the rawdict pass) and emit one span_block per span that was not consumed
+        # by the fraction-bar matcher.  We use the flags/size/bbox already on each span.
+        # all_spans is a local in _rebuild_text_from_font_map so we re-extract the
+        # page rawdict here at minimal cost (just the dict, no re-rendering).
+        try:
+            rawdict_spans = page.get_text("rawdict", flags=0)
+            for blk in rawdict_spans.get("blocks", []):
+                if "lines" not in blk:
+                    continue
+                for ln in blk["lines"]:
+                    for sp in ln["spans"]:
+                        sp_text = sp.get("text", "").strip()
+                        if not sp_text:
+                            continue
+                        sp_bbox = list(sp.get("bbox", [0, 0, 0, 0]))
+                        sp_size = sp.get("size", 0.0)
+                        sp_flags = sp.get("flags", 0)
+                        sp_x0 = sp_bbox[0] if sp_bbox else 0.0
+                        all_span_blocks.append({
+                            "type": "text",
+                            "text": sp_text,
+                            "bbox": sp_bbox,
+                            "page": page_idx,
+                            "font_size": sp_size,
+                            "is_bold": bool(sp_flags & 16),
+                            "flags": sp_flags,
+                            "x_indent": sp_x0 / page_width,
+                        })
+        except Exception as _span_err:
+            print(f"[span_blocks] Page {page_idx + 1}: could not extract span metadata: {_span_err}", flush=True)
+
     return {
         "full_text": "\n\n".join(full_pages),
         "pages": pages_metadata,
+        "span_blocks": all_span_blocks,
         "prompt_tokens": total_p_tokens,
         "completion_tokens": total_c_tokens,
     }

@@ -5,7 +5,7 @@ import {
   UploadCloud, FileText, CheckCircle2, AlertTriangle, Trash2, ExternalLink, 
   RefreshCw, Type, X, Sparkles, ArrowLeft, Eye, Check, Clock, Cpu, ShieldCheck, 
   ChevronRight, BarChart3, HelpCircle, Layers, Sliders, Settings, Save, CheckCircle,
-  ScanLine, Database, Bot, Zap
+  ScanLine, Database, Bot, Zap, Cloud, Copy
 } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
@@ -14,91 +14,56 @@ const API_BASE = 'http://localhost:8000';
 
 const KNOWN_KATEX_COMMANDS = new Set([
   'frac', 'dfrac', 'tfrac', 'sqrt', 'times', 'div', 'pm', 'mp', 'cdot', 'circ', 'degree',
-  'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa',
-  'lambda', 'mu', 'nu', 'xi', 'pi', 'rho', 'sigma', 'tau', 'upsilon', 'phi', 'chi', 'psi',
+  'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'varepsilon', 'zeta', 'eta', 'theta', 'vartheta', 'iota', 'kappa',
+  'lambda', 'mu', 'nu', 'xi', 'pi', 'varpi', 'rho', 'varrho', 'sigma', 'varsigma', 'tau', 'upsilon', 'phi', 'varphi', 'chi', 'psi',
   'omega', 'Gamma', 'Delta', 'Theta', 'Lambda', 'Xi', 'Pi', 'Sigma', 'Upsilon', 'Phi', 'Psi',
   'Omega', 'neq', 'ne', 'approx', 'leq', 'geq', 'le', 'ge', 'infty', 'sum', 'prod', 'int',
-  'log', 'ln', 'sin', 'cos', 'tan', 'in', 'partial', 'nabla', 'vec', 'hat',
+  'log', 'ln', 'sin', 'cos', 'tan', 'in', 'partial', 'nabla', 'vec', 'hat', 'dot', 'ddot', 'overline', 'underline',
   'begin', 'end', 'left', 'right', 'bmatrix', 'pmatrix', 'vmatrix', 'Vmatrix', 'Bmatrix', 'matrix', 'array',
   'sim', 'bar', 'tilde', 'hbar', 'rightarrow', 'to', 'leftrightharpoons', 'rightleftharpoons', 'leftrightarrow',
-  'text', 'mathrm', 'mathbf', 'quad', 'qquad', 'equiv', 'propto', 'perp', 'parallel', 'cup', 'cap', 'subset', 'subseteq'
+  'text', 'mathrm', 'mathbf', 'quad', 'qquad', 'equiv', 'propto', 'perp', 'parallel', 'cup', 'cap', 'subset', 'subseteq',
+  'therefore', 'because', 'Rightarrow', 'Leftarrow', 'Leftrightarrow', 'leftarrow', 'rightarrow',
+  'angle', 'triangle', 'bullet', 'dots', 'cdots', 'ldots', 'over', 'choose', 'cases', 'hline', 'rm', 'bf', 'it', 'cal', 'mathbb',
+  'oint', 'lim', 'det', 'sec', 'csc', 'cot', 'arcsin', 'arccos', 'arctan', 'forall', 'exists', 'implies', 'iff'
 ]);
 
 function sanitizeMathForKatex(math: string): string {
   if (!math) return '';
   let m = math.trim();
 
-  // Vector arrow in fraction numerator misrecognition
-  // e.g. \frac{=>}{F}, \frac{>}{F}, \frac{ - }{F}, \frac{=d}{F}, \frac{=}{F} -> \vec{F}
-  m = m.replace(/\\frac\{[=><\-—~^d2\s|!_]+\}\{([A-Za-z])(?:\s*[A-Za-z]*)\}/g, '\\vec{$1}');
+  // Replace intra-math newlines so equations never stack vertically across multiple lines
+  m = m.replace(/[\r\n]+/g, ' ');
 
-  // Radical misrecognitions: \X, \x, VX, Vx -> \sqrt{x}
-  m = m.replace(/\\X\b/g, '\\sqrt{x}');
-  m = m.replace(/\bVX\b/g, '\\sqrt{x}');
-  m = m.replace(/\bVx\b/g, '\\sqrt{x}');
-  m = m.replace(/\bV(\d+)\b/g, '\\sqrt{$1}');
-  m = m.replace(/\\x\b/g, 'x');
+  // Normalize Unicode math & Greek symbols
+  m = m.replace(/×/g, '\\times ').replace(/÷/g, '\\div ').replace(/±/g, '\\pm ');
+  m = m.replace(/≤/g, '\\le ').replace(/≥/g, '\\ge ').replace(/≠/g, '\\ne ');
+  m = m.replace(/°/g, '^\\circ ');
+  m = m.replace(/π/g, '\\pi ').replace(/σ/g, '\\sigma ').replace(/ε|ϵ/g, '\\epsilon ');
+  m = m.replace(/τ/g, '\\tau ').replace(/ϕ|φ/g, '\\phi ').replace(/θ/g, '\\theta ');
+  m = m.replace(/∆|Δ/g, '\\Delta ').replace(/∴/g, '\\therefore ');
+  m = m.replace(/μ|µ/g, '\\mu ');
+  // Arrow and logical symbols
+  m = m.replace(/⇒/g, '\\Rightarrow ').replace(/⇐/g, '\\Leftarrow ');
+  m = m.replace(/→/g, '\\rightarrow ').replace(/←/g, '\\leftarrow ');
+  m = m.replace(/≈/g, '\\approx ').replace(/∝/g, '\\propto ');
+  m = m.replace(/∞/g, '\\infty ').replace(/≡/g, '\\equiv ');
+  // Vector hat characters
+  m = m.replace(/î/g, '\\hat{i}').replace(/ĵ/g, '\\hat{j}');
+  m = m.replace(/k\u0302/g, '\\hat{k}').replace(/x\u0302/g, '\\hat{x}');
+  m = m.replace(/n\u0302/g, '\\hat{n}').replace(/r\u0302/g, '\\hat{r}');
+  // Unicode subscript digits inside math
+  m = m.replace(/₀/g, '_0').replace(/₁/g, '_1').replace(/₂/g, '_2').replace(/₃/g, '_3').replace(/₄/g, '_4');
+  m = m.replace(/₅/g, '_5').replace(/₆/g, '_6').replace(/₇/g, '_7').replace(/₈/g, '_8').replace(/₉/g, '_9');
 
-  // Normalize Unicode multiplication sign × to \times
-  m = m.replace(/×/g, '\\times ');
-  // Heal any corrupted x^3 after number/power to \times (e.g. 2^5 x^3 -> 2^5 \times 3)
-  m = m.replace(/(\d+(?:\^\d+)?)\s*[xX]\^([0-9])\b/g, '$1 \\times $2');
-  // Heal any number x number to \times (e.g. 2^2 x 101 -> 2^2 \times 101, 96 x 404 -> 96 \times 404)
-  m = m.replace(/(\d+(?:\.\d+)?|\^\{?\d+\}?)\s*[xX]\s*(\d+(?:\.\d+)?)/g, '$1 \\times $2');
-  // Separate adjacent equations that lost comma: "3 404 =" -> "3, 404 ="
-  m = m.replace(/(\d+)\s+(?=\d+\s*=)/g, '$1, ');
-  // Standalone \times at start of equation: \times = -> x =
-  m = m.replace(/^\\times\s*=/g, 'x =');
-
-  // Vector expressions: fix (= + y) -> (x + y) and (y = x) -> (y - x)
-  m = m.replace(/\(\s*=\s*\+\s*([a-zA-Z0-9])\s*\)/g, '(x + $1)');
-  m = m.replace(/\(\s*([a-zA-Z])\s*=\s*([a-zA-Z0-9])\s*\)/g, '($1 - $2)');
-
-  // Unit vectors: i, j, k (or J, ]) after parentheses or coefficients
-  m = m.replace(/\)\s*[iI]\b/g, ')\\hat{i}');
-  m = m.replace(/\)\s*[jJ\]]\b/g, ')\\hat{j}');
-  m = m.replace(/\b[zZ]\s*2\s*[kK]\b/g, 'z^{2}\\hat{k}');
-  m = m.replace(/\b[zZ]\^\{?2\}?\s*[kK]\b/g, 'z^{2}\\hat{k}');
-  m = m.replace(/(?<=\+)\s*[kK]\b/g, ' \\hat{k}');
-
-  // Angle/radian misrecognitions
-  m = m.replace(/\\frac\{(?:iy|n|tt|IT|5|p)\}\{([2346])\}/g, '\\frac{\\pi}{$1}');
-  m = m.replace(/\b0\s*=\s*\\frac\{\\pi\}/g, '\\theta = \\frac{\\pi}');
-
-  // Statistical distributions: X ~ N(theta, sigma^2)
-  m = m.replace(/([A-Za-z])\s*[=~—–-]{1,2}\s*[\(=]?\s*[0-9oOnN\(\)\s=]*[,\s=]+[0oO©\s=]*\b2\s*\)/g, '$1 \\sim N(\\theta, \\sigma^{2})');
-  m = m.replace(/([A-Za-z])\s*[~—–-]\s*([nN])\s*\(/g, '$1 \\sim N(');
-  m = m.replace(/\(\s*[90oOθ]\s*,/g, '(\\theta, ');
-  m = m.replace(/\(\s*μ\s*,/g, '(\\mu, ');
-  m = m.replace(/([,\(])\s*[0oO©]\s*[\^]?\s*2\s*([,\)])/g, '$1 \\sigma^{2}$2');
-
-  // Standalone sigma^2 and variance: ONLY copyright symbol © / \u00A9 or explicit caret 0^2 / O^2
-  m = m.replace(/[\u00A9©]\s*(?:\^\{?2\}?|2)/g, '\\sigma^{2}');
-  m = m.replace(/(?<![A-Za-z0-9])[0oO]\s*\^\s*\{?2\}?(?![0-9])/g, '\\sigma^{2}');
-
-  // Sum of squared deviations / estimators: sum (x_i - \bar{x})^2
-  m = m.replace(/(?:\\frac\{id\}\{1\}|\\frac\{a\}\{1\}|\bhn\b)?\s*\(\s*x\s*(?:\\hat\{i\}|[I\]i1])?\s*[-–—=]\s*(?:x[X\s]*|x)\s*\)\s*2\b/g, '\\sum (x_i - \\bar{x})^{2}');
-  m = m.replace(/\b\\frac\{1\}\{7\}\b/g, '\\frac{1}{n}');
-  m = m.replace(/\\begin\{bmatrix\}\s*1vV\s*\\\\\s*1-1\s*&\s*hn\s*\\end\{bmatrix\}/g, '\\frac{1}{n-1}');
-  m = m.replace(/\b1-1\b/g, 'n-1');
-  m = m.replace(/\bxX\b/g, '\\bar{x}');
-
-  // Chemistry subscripts & formulas
-  m = m.replace(/\bH\s*2\s*O\b/g, 'H_2O');
-  m = m.replace(/\bC\s*O\s*2\b/g, 'CO_2');
-  m = m.replace(/\bH\s*2\s*S\s*O\s*4\b/g, 'H_2SO_4');
-  m = m.replace(/\bK\s*Mn\s*O\s*4\b/g, 'KMnO_4');
-  m = m.replace(/\bCa\s*C\s*O\s*3\b/g, 'CaCO_3');
-
-  // Physics formulas
-  m = m.replace(/\b[eE]\s*=\s*m\s*c\s*[\^]?\s*2\b/g, 'E = mc^{2}');
-  m = m.replace(/\b[vV]\s*[\^]?\s*2\s*=\s*[uU]\s*[\^]?\s*2\s*\+\s*2\s*a\s*s\b/g, 'v^{2} = u^{2} + 2as');
-  m = m.replace(/\b[vV]\s*[\^]?\s*2\s*=\s*[uU]\s*[\^]?\s*2\b/g, 'v^{2} = u^{2}');
-  m = m.replace(/\b[hH]\s*\\?nu\b/g, 'h\\nu');
+  // Clean trailing backslashes
+  m = m.replace(/\\+$/, '');
 
   // Matrix healing: restore missing backslashes for begin/end/left/right
   m = m.replace(/(?<!\\)\b(begin|end|left|right)\b/g, '\\$1');
   m = m.replace(/\\left\[\s*\\begin\{array\}\{[a-z]+\}\s*([\s\S]+?)\s*\\end\{array\}\s*\\right\]/g, '\\begin{bmatrix} $1 \\end{bmatrix}');
+
+  // Comprehensive Precision Fraction Healing:
+  // (Removed regex-based fraction healing because it corrupts valid nested LaTeX like \frac{V_{rms}}{R})
 
   // Clean unknown single-letter backslash commands: e.g. \Y -> Y, \A -> A
   m = m.replace(/\\([a-zA-Z]+)/g, (full, cmd) => {
@@ -106,7 +71,29 @@ function sanitizeMathForKatex(math: string): string {
     return cmd;
   });
 
-  return m;
+  // Bidirectional auto-balance curly braces (drop stray unmatched '}' and close unclosed '{')
+  let depth = 0;
+  const chars: string[] = [];
+  for (let i = 0; i < m.length; i++) {
+    const ch = m[i];
+    if (ch === '{' && (i === 0 || m[i - 1] !== '\\')) {
+      depth++;
+      chars.push(ch);
+    } else if (ch === '}' && (i === 0 || m[i - 1] !== '\\')) {
+      if (depth > 0) {
+        depth--;
+        chars.push(ch);
+      }
+      // Else drop stray unmatched closing brace
+    } else {
+      chars.push(ch);
+    }
+  }
+  if (depth > 0) {
+    chars.push('}'.repeat(depth));
+  }
+
+  return chars.join('');
 }
 
 function formatTokenCost(usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; estimated_cost_usd?: number }): string {
@@ -144,107 +131,624 @@ function formatQuestionStem(text: string): string {
   return s.trim();
 }
 
-function renderLatex(text: string): string {
+/**
+ * Determines if a question is MCQ type.
+ * Prioritizes explicit backend classification and protects descriptive subquestions from false MCQ conversion.
+ */
+export function isMcq(q: any): boolean {
+  if (!q) return false;
+  
+  // 1. Strict priority to backend / LLM classification
+  if (q.question_type) {
+    const qt = String(q.question_type).toLowerCase().trim();
+    if (qt.startsWith('descriptive')) return false;
+    if (qt === 'mcq') return true;
+  }
+
+  // 2. If sub_parts exist and are populated, it is descriptive
+  if (q.sub_parts && isValidSubparts(q.sub_parts)) return false;
+  if (extractSubpartsFromText(q.stem)) return false;
+
+  const opts: Record<string, any> = q.options || {};
+  const entries = Object.entries(opts);
+  if (entries.length < 2) return false;
+
+  const keys = Object.keys(opts).map(k => k.toUpperCase()).sort();
+  const isStandardMcqKeys = (
+    (keys.length === 4 && keys.join(',') === 'A,B,C,D') ||
+    (keys.length === 3 && keys.join(',') === 'A,B,C') ||
+    (keys.length === 5 && keys.join(',') === 'A,B,C,D,E') ||
+    (keys.length === 4 && keys.join(',') === '1,2,3,4') ||
+    (keys.length === 3 && keys.join(',') === '1,2,3')
+  );
+
+  if (!isStandardMcqKeys) return false;
+
+  // 3. Inspect option content for sub-question signals (directive verbs, marks, question marks)
+  const subQStarters = [
+    'draw ', 'calculate ', 'find ', 'explain ', 'state ', 'prove ',
+    'derive ', 'show ', 'write ', 'determine ', 'define ', 'describe ',
+    'why ', 'what ', 'how ', 'when ', 'where ', 'which ',
+    'mention ', 'list ', 'compare ', 'differentiate ', 'distinguish ',
+    'obtain ', 'verify ', 'establish ', 'evaluate ', 'solve ', 'name ', 'give ',
+    // Malayalam directives & question starters
+    'എഴുതുക', 'വിശദീകരിക്കുക', 'കണക്കാക്കുക', 'വരയ്ക്കുക', 'നിർവചിക്കുക',
+    'കണ്ടെത്തുക', 'തെളിയിക്കുക', 'എന്താണ്', 'എന്ത്', 'എങ്ങനെ', 'എന്തുകൊണ്ട്',
+    'വ്യത്യാസ', 'രൂപീകരിക്കുക', 'പ്രസ്താവിക്കുക', 'താരതമ്യം', 'പട്ടികപ്പെടുത്തുക',
+    'സൂചിപ്പിക്കുക', 'പേരെഴുതുക'
+  ];
+
+  let subQCount = 0;
+  let hasQuestionMark = false;
+  let hasMarksIndicator = false;
+  let totalLength = 0;
+
+  for (const v of Object.values(opts)) {
+    const text = String(v ?? '').trim().toLowerCase();
+    totalLength += text.length;
+    if (text.includes('?')) hasQuestionMark = true;
+    if (/\[\s*\d+\s*marks?\s*\]|\(\s*\d+\s*marks?\s*\)|\b\d+\s*marks?\b/i.test(text)) hasMarksIndicator = true;
+    if (subQStarters.some(s => text.startsWith(s) || text.includes(s))) subQCount++;
+  }
+
+  // If options have question marks, marks brackets, or directive prompts, treat as descriptive subquestions
+  if (hasQuestionMark || hasMarksIndicator || subQCount >= 1) return false;
+
+  const avgLen = totalLength / Math.max(1, keys.length);
+  if (avgLen > 250) return false;
+
+  return true;
+}
+
+function healUnitsAndSlashes(text: string): string {
+  if (!text) return '';
+  let s = text;
+  // 1. Redundant slash directly before a negative exponent (e.g. N m^2⁄ C^{-1} -> N m^2 C^{-1})
+  s = s.replace(/\s*[\u2044\u2215\/]\s*(?=[A-Za-z]\^\{?-)/g, ' ');
+
+  // 2. Trailing unit slash: (Unit1)\s+(Unit2)[slash](following word)
+  // e.g. "N C⁄" -> "N/C", "C m^2⁄" -> "C/m^2", "V m⁄" -> "V/m", "km h⁄" -> "km/h"
+  const unitPrefix = '(?:[A-Z][a-zA-Z]*|km|cm|mm|kg|mg|m)';
+  s = s.replace(new RegExp(`\\b(${unitPrefix}(?:\\^[0-9\\-]+)?)\\s+([A-Za-z]+(?:\\^[0-9\\-]+|\\d+)?)\\s*[\\u2044\\u2215\\/]([a-zA-Z]*)`, 'g'), (_, u1, u2, post) => {
+    const u2Clean = u2.replace(/([a-zA-Z]+)(\d+)/g, '$1^$2');
+    const spaceAfter = (post && /^[a-zA-Z]/.test(post)) ? ' ' : '';
+    return `${u1}/${u2Clean}${spaceAfter}${post || ''}`;
+  });
+
+  // 3. Fraction slash U+2044 and division slash U+2215 conversion to standard '/'
+  s = s.replace(/[\u2044\u2215]/g, '/');
+
+  // 4. Collapse spaces around unit slashes (e.g. "N / C" -> "N/C", "km / h" -> "km/h")
+  s = s.replace(new RegExp(`\\b(${unitPrefix})\\s*\\/\\s*([A-Za-z]+(?:\\^[0-9\\-]+)?)\\b`, 'g'), '$1/$2');
+
+  return s;
+}
+
+/**
+ * Strictly verifies whether a dictionary of sub-parts contains genuine sub-questions.
+ * Rejects empty sub-questions, marks-only sub-questions, non-consecutive letters,
+ * or false splits from numbers/units (e.g. "0.2 A." or "points A and B.").
+ */
+function isValidSubparts(subparts: Record<string, any> | null | undefined): boolean {
+  if (!subparts || typeof subparts !== 'object') return false;
+  const entries = Object.entries(subparts);
+  if (entries.length < 2) return false;
+
+  const keys = Object.keys(subparts).map(k => k.toLowerCase().trim());
+  const firstK = keys[0];
+  const secondK = keys[1];
+
+  // Must start with valid sub-question marker ('a', '1', or 'i')
+  if (!['a', '1', 'i'].includes(firstK)) return false;
+
+  // Second key must be strictly consecutive
+  if (firstK === 'a' && secondK !== 'b') return false;
+  if (firstK === '1' && secondK !== '2') return false;
+  if (firstK === 'i' && secondK !== 'ii') return false;
+
+  const engDirectives = [
+    'define', 'explain', 'calculate', 'draw', 'state', 'derive', 'determine',
+    'find', 'show', 'prove', 'distinguish', 'differentiate', 'obtain',
+    'evaluate', 'name', 'give', 'write', 'what', 'why', 'how', 'which',
+    'where', 'when', 'who', 'compare', 'list', 'mention', 'describe',
+    'illustrate', 'sketch', 'identify', 'plot', 'compute', 'verify'
+  ];
+  const malDirectives = [
+    'എഴുതുക', 'വിശദീകരിക്കുക', 'കണക്കാക്കുക', 'വരയ്ക്കുക', 'നിർവചിക്കുക',
+    'കണ്ടെത്തുക', 'തെളിയിക്കുക', 'വ്യത്യാസ', 'രൂപീകരിക്കുക', 'പ്രസ്താവിക്കുക',
+    'താരതമ്യം', 'പട്ടികപ്പെടുത്തുക', 'സൂചിപ്പിക്കുക', 'എന്താണ്', 'എന്ത്',
+    'എങ്ങനെ', 'എവിടെ', 'എപ്പോൾ', 'ഏതാണ്', 'വിവരിക്കുക', 'തരംതിരിക്കുക'
+  ];
+  const answerKeywords = [
+    'higher', 'lower', 'increases', 'decreases', 'constant', 'remains same',
+    'zero', 'positive', 'negative', 'forward bias', 'reverse bias',
+    'answer:', 'ans:', 'solution:', 'sol:', 'hence', 'therefore'
+  ];
+
+  let hasQuestionFeature = false;
+
+  for (const [_, v] of entries) {
+    const val = String(v ?? '').trim();
+    // Any empty sub-part means it's NOT a valid set of sub-questions
+    if (!val) return false;
+
+    const valLower = val.toLowerCase();
+
+    // If an item contains explicit answer markers or comparative states without any directive, it is an answer step!
+    const isAnswerStep = answerKeywords.some(kw => valLower.includes(kw));
+
+    // Check for question features: question mark, marks allocation, or directive verbs
+    const hasQMark = val.includes('?');
+    const hasMarks = /\[\s*\d+\s*marks?\s*\]|\(\s*\d+\s*marks?\s*\)|\b\d+\s*marks?\b/i.test(val);
+    const hasDirective = engDirectives.some(d => valLower.includes(d)) || malDirectives.some(d => valLower.includes(d));
+
+    if (hasQMark || hasMarks || hasDirective) {
+      hasQuestionFeature = true;
+    } else if (isAnswerStep) {
+      // Answer steps are NEVER subquestions
+      return false;
+    }
+
+    // Strip marks indicators, images, and whitespace/punctuation to test for actual question text
+    let substantive = val
+      .replace(/\[\s*\d+\s*marks?\s*\]|\(\s*\d+\s*marks?\s*\)|\b\d+\s*marks?\b/gi, '')
+      .replace(/<img[^>]*>/gi, '')
+      .replace(/[\s\.\:\-\,\;]/g, '');
+
+    // Every subpart MUST have actual question text or formula (at least 2 letters/symbols)
+    if (substantive.length < 2) return false;
+  }
+  return hasQuestionFeature;
+}
+
+export function extractSubpartsFromText(text?: string): Record<string, string> | null {
+  if (!text || typeof text !== 'string') return null;
+
+  // Truncate at answer/solution boundary so answers are NEVER extracted as subquestions!
+  const ansIdx = text.search(/(?:\n|\s{2,}|\t)\*?\*?(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|Solution|Explanation|Description|Hint|Hints|ഉത്തരം|ശരിയായ\s*ഉത്തരം|വിശദീകരണം|പരിഹാരം)\s*(?:[\*\:\-]+|\s*$)/i);
+  const stemOnly = ansIdx !== -1 ? text.substring(0, ansIdx).trim() : text;
+
+  // Matches markers like (a), (b) or (1), (2) or (i), (ii), or bare letters a., b., a), b)
+  const subqPattern = /(?:(?:^|\n|\s{2,}|\.\s+)\(([a-hA-H1-8]|[ivxlcdmIVXLCDM]+)\)\s*)|(?:(?:^|\n|[ \t]{2,}|\.\s+)([a-hA-H]|[ivxlcdmIVXLCDM]+)[\.\)\:-]\s*)/g;
+  const matches = [...stemOnly.matchAll(subqPattern)];
+  if (matches.length < 2) return null;
+
+  // Filter candidate matches: reject if preceded by digits (e.g. scientific unit "0.2 A.") or point references
+  const validMatches = matches.filter(m => {
+    const idx = m.index ?? 0;
+    const prefix = stemOnly.substring(Math.max(0, idx - 35), idx).toLowerCase();
+    const hasParen = Boolean(m[1]);
+    if (/(?:assertion|reason|statement|പ്രസ്താവന|കാരണം)[\s\:\-\*\_\(]*$/i.test(prefix)) return false;
+    if (/(?:both|between|from|to|and|or|is|are|was|were|if|whether|that|when|where|of|in|for|with|junction|terminal|point|points|cell|cells|charge|charges|plate|plates)\s*(?:and\s*)?$/i.test(prefix)) return false;
+    if (!hasParen && /\d+(?:\.\d+)?\s*$/.test(prefix)) return false;
+    return true;
+  });
+  if (validMatches.length < 2) return null;
+
+  const keys = validMatches.map(m => (m[1] || m[2]).toLowerCase());
+  const firstK = keys[0];
+  if (!['a', '1', 'i'].includes(firstK)) return null;
+
+  const isSeq = (firstK === 'a' && keys[1] === 'b') || 
+                (firstK === 'i' && keys[1] === 'ii') || 
+                (firstK === '1' && keys[1] === '2');
+  if (!isSeq) return null;
+
+  const subparts: Record<string, string> = {};
+  for (let i = 0; i < validMatches.length; i++) {
+    const k = (validMatches[i][1] || validMatches[i][2]).toLowerCase();
+    const start = validMatches[i].index! + validMatches[i][0].length;
+    const end = i + 1 < validMatches.length ? validMatches[i + 1].index! : stemOnly.length;
+    let partText = stemOnly.substring(start, end).trim();
+    if (partText) {
+      subparts[k] = partText;
+    }
+  }
+  return isValidSubparts(subparts) ? subparts : null;
+}
+
+export function getIntroductoryStem(stem: string, hasSubparts: boolean, firstKey?: string): string {
+  if (!stem) return '';
+  const clean = formatQuestionStem(stem);
+  if (!hasSubparts) return clean;
+
+  let m: RegExpMatchArray | null = null;
+  if (firstKey) {
+    const k = firstKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pat = new RegExp(`(?:(?:^|\\n|\\s{2,}|\\.\\s+)\\([${k}${k.toUpperCase()}]\\)\\s*)|(?:(?:^|\\n|[ \\t]{2,}|\\.\\s+)[${k}${k.toUpperCase()}][\\.\\)\\:-]\\s*)`);
+    m = clean.match(pat);
+  } else {
+    m = clean.match(/(?:(?:^|\n|\s{2,}|\.\s+)\(([aA1iI])\)\s*)|(?:(?:^|\n|[ \t]{2,}|\.\s+)([aA1iI])[\.\)\:-]\s*)/);
+  }
+
+  if (!m) return clean;
+
+  const idx = m.index ?? 0;
+  const prefix = clean.substring(Math.max(0, idx - 35), idx).toLowerCase();
+  const hasParen = Boolean(m[1]);
+  if (!hasParen && (/\d+(?:\.\d+)?\s*$/.test(prefix) || /(?:points?|between|junction|terminal|from|cells?|charges?|plates?)\s*(?:and\s*)?$/i.test(prefix))) {
+    return clean;
+  }
+
+  const intro = clean.substring(0, m.index).trim();
+  // If the intro is empty or only question prefix like "Question 9:" or punctuation, return empty
+  if (!intro || /^(?:question\s*\d*|q\d*|ചോദ്യം\s*\d*|[\d\.\:\-\s])*$/i.test(intro)) {
+    return '';
+  }
+  return intro;
+}
+
+export function healAssertionReasonQuestion(q: any): { stem: string; options: Record<string, string> } {
+  const stem = q?.stem || '';
+  const options = q?.options ? { ...q.options } : {};
+  const optA = options.A || options.a || '';
+
+  if (!optA || typeof optA !== 'string') {
+    return { stem, options };
+  }
+
+  const hasReason = /\b(?:reason|കാരണം)\s*(?:\([rR]\)|[\:\.\-]+|\s*$)/i.test(optA);
+  const stemClean = stem.trim();
+  const stemIsShortAssertion = /\b(?:assertion|പ്രസ്താവന)\b/i.test(stemClean) && stemClean.replace(/<[^>]+>/g, '').trim().length < 120;
+
+  if (hasReason || stemIsShortAssertion) {
+    const splitMatch = optA.match(/(?:(?:^|\n|\s{2,}|\.\s+)\(?([aA1])\)?[\.\:\-]?\s+(?=(?:if\s+both|both|assertion|statement|[aA]\s+is\b)))|(?:(?:^|\n)\s*(?=(?:if\s+both|both\s+(?:assertion|a\b|r\b)|assertion\s+is\s+true|[aA]\s+is\s+true)))/i);
+    if (splitMatch && splitMatch.index !== undefined) {
+      const splitIdx = splitMatch.index;
+      let statementBlock = optA.substring(0, splitIdx).trim();
+      let choiceText = optA.substring(splitIdx).trim().replace(/^\s*\(?[aA1]\)?[\.\:\-]?\s*/, '').trim();
+
+      statementBlock = statementBlock.replace(/\s*\[\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\]/gi, '');
+      statementBlock = statementBlock.replace(/\s*\(\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\)/gi, '').trim();
+
+      if (statementBlock) {
+        let newStem = stemClean;
+        if (!stemClean || /^(?:assertion|പ്രസ്താവന)\s*[\:\.\-]?$/i.test(stemClean)) {
+          newStem = `Assertion (A): ${statementBlock}`;
+        } else if (!/\b(?:reason|കാരണം)\b/i.test(stemClean)) {
+          newStem = `${stemClean}\n${statementBlock}`;
+        }
+        const keyA = options.A !== undefined ? 'A' : 'a';
+        options[keyA] = choiceText;
+        return { stem: newStem, options };
+      }
+    }
+  }
+  return { stem, options };
+}
+
+function cleanOptionDisplay(text: string, optionKey?: string): string {
+  if (!text) return '';
+  let s = text.trim();
+  // Strip leading option prefix like (a), a., a:
+  // CRITICAL: Must be in parens/brackets or followed by delimiter/space.
+  // NEVER strip 'B' from 'Both' or 'A' from 'All'!
+  if (optionKey) {
+    const k = optionKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pat = new RegExp(`^\\s*(?:\\([\\s]*[${k}${k.toLowerCase()}][\\s]*\\)[\\.\\:\\-]?|\\[[\\s]*[${k}${k.toLowerCase()}][\\s]*\\][\\.\\:\\-]?|[${k}${k.toLowerCase()}][\\.\\)\\:\\-]\\s*|[${k}${k.toLowerCase()}](?=\\s+))\\s*`);
+    s = s.replace(pat, '').trim();
+  } else {
+    s = s.replace(/^\s*(?:\([\s]*[a-dA-D][\s]*\)[\.\:\-]?|\[[\s]*[a-dA-D][\s]*\][\.\:\-]?|[a-dA-D][\.\)\:\-]\s*|[a-dA-D](?=\s+))\s*/, '').trim();
+  }
+  // Auto-heal truncated words anywhere in options
+  s = s.replace(/\bOth\b/g, 'Both').replace(/\both\b/g, (match, offset) => {
+    return (offset === 0 || /(?:^|[.!?\n]\s*)$/.test(s.slice(0, offset))) ? 'Both' : 'both';
+  });
+  s = s.replace(/\bll\s+of\s+the\s+above\b/gi, 'All of the above');
+  // Strip trailing answer or solution markers if accidentally present (requires delimiter or end-of-string)
+  const ansIdx = s.search(/(?:\n|\s{2,}|\t)\*?\*?(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|Solution|Explanation|Description|Hint|Hints|ഉത്തരം|ശരിയായ\s*ഉത്തരം|വിശദീകരണം)\s*(?:[\*\:\-]+|\s*$)/i);
+  if (ansIdx !== -1) {
+    s = s.substring(0, ansIdx).trim();
+  }
+  // (Removed bare \text{} stripping)
+  // Heal scientific units and fraction slashes (e.g. "1.5 N C⁄" -> "1.5 N/C")
+  s = healUnitsAndSlashes(s);
+  return s;
+}
+
+function healSeveredAndSwallowedMath(text: string): string {
+  if (!text) return '';
+  let s = text;
+
+  // Heal word splits caused by older regex passes
+  s = s.replace(/\bgiven\s*(?:\$b\$|b)\s*y\b/gi, 'given by');
+  s = s.replace(/\bgiven\s*(?:\$t\$|t)\s*hat\b/gi, 'given that');
+  s = s.replace(/\bwhere\s*(?:\$t\$|t)\s*he\b/gi, 'where the');
+  s = s.replace(/\bwhere\s*(?:\$i\$|i)\s*s\b/gi, 'where is');
+
+  // Heal mangled subscript fractions like \frac{V_}{proton}{V_{alpha} = 1}
+  s = s.replace(/\\frac\{([a-zA-Z0-9]+)_\}\{([a-zA-Z0-9]+)\}\{([a-zA-Z0-9]+)_?\{?([a-zA-Z0-9]+)\}?\s*=\s*([0-9a-zA-Z\.\-]+)\}?/g, '\\frac{$1_{$2}}{$3_{$4}} = $5');
+
+  // Heal severed fractions: $\frac{A}$}{B} or $\frac{A}}${B}
+  s = s.replace(/\$\\frac\{([^{}]+(?:\{[^{}]+\}[^{}]*)*)\}\$\}\{([^{}]+(?:\{[^{}]+\}[^{}]*)*)\}/g, '$\\frac{$1}{$2}$');
+  s = s.replace(/\$\\frac\{([^{}]+(?:\{[^{}]+\}[^{}]*)*)\}\}\{([^{}]+(?:\{[^{}]+\}[^{}]*)*)\}/g, '$\\frac{$1}{$2}$');
+  s = s.replace(/\\frac\{([^{}]+(?:\{[^{}]+\}[^{}]*)*)\}\}\{([^{}]+(?:\{[^{}]+\}[^{}]*)*)\}/g, '\\frac{$1}{$2}');
+
+  // Heal specific physics malformed fractions:
+  s = s.replace(/\$\\frac\{V_\{?proton\}?\}\$\}\{V_\{?alpha\b.*?[=\s]+([0-9]+)/gi, '$\\frac{V_{proton}}{V_{alpha}} = $1$');
+  s = s.replace(/\\frac\{V_\{?proton\}?\}\}\{V_\{?alpha\b.*?[=\s]+([0-9]+)/gi, '\\frac{V_{proton}}{V_{alpha}} = $1');
+
+  // Heal swallowed = RHS inside denominator or radical:
+  // e.g. \frac{12.27}{\sqrt{V_{proton} = \frac{12.27}{\sqrt{V_{alpha}}}}} -> \frac{12.27}{\sqrt{V_{proton}}} = \frac{12.27}{\sqrt{V_{alpha}}}
+  s = s.replace(/\\frac\{([^{}]+(?:\{[^{}]+\}[^{}]*)*)\}\{\\sqrt\{\s*([^{}=\s]+(?:\s*\{[^{}]+\})*)\s*=\s*(\\frac\{[^{}]+(?:\{[^{}]+\}[^{}]*)*\}\{\\sqrt\{[^{}]+(?:\{[^{}]+\}[^{}]*)*\}\})\s*\}\}/g, '\\frac{$1}{\\sqrt{$2}} = $3');
+  s = s.replace(/\\frac\{([^{}]+(?:\{[^{}]+\}[^{}]*)*)\}\{\\sqrt\{\s*([^{}=\s]+(?:\s*\{[^{}]+\})*)\s*=\s*([^{}]+(?:\{[^{}]+\}[^{}]*)*)\s*\}\}/g, '\\frac{$1}{\\sqrt{$2}} = $3');
+  s = s.replace(/\\frac\{([^{}]+(?:\{[^{}]+\}[^{}]*)*)\}\{\s*([^{}=\s]+(?:\s*\{[^{}]+\})*)\s*=\s*(\\frac\{[^{}]+(?:\{[^{}]+\}[^{}]*)*\}\{[^{}]+(?:\{[^{}]+\}[^{}]*)*\})\s*\}/g, '\\frac{$1}{$2} = $3');
+  s = s.replace(/\\frac\{([^{}]+(?:\{[^{}]+\}[^{}]*)*)\}\{\s*([^{}=\s]+(?:\s*\{[^{}]+\})*)\s*=\s*([0-9a-zA-Z\.\-]+)\s*\}/g, '\\frac{$1}{$2} = $3');
+
+  return s;
+}
+
+function healStudentReadability(text: string): string {
+  if (!text) return '';
+  let s = text;
+  // 1. Un-mash prepositions and single-letter variables in running text
+  // e.g. whereh -> where $h$, letx -> let $x$, withv -> with $v$ (contiguous only)
+  s = s.replace(/\b(where|when|let|if|with|here)([a-zA-Z])\b/gi, '$1 $$$2$');
+  // e.g. ande -> and $e$, andh -> and $h$ (exclude 'and a' or 'and I')
+  s = s.replace(/\b(and)([b-hj-zB-HJ-Z])\b/gi, '$1 $$$2$');
+  // Isolated single-letter variable following where/let/if/when with space (e.g. "where V is", "let x be")
+  s = s.replace(/\b(where|when|let|if|with|here)\s+([b-hj-zB-HJ-Z])\b(?=\s+[a-zA-Z]{2,})/gi, '$1 $$$2$');
+
+  const knownMathCommands = new Set([
+    'frac', 'dfrac', 'tfrac', 'sqrt', 'times', 'div', 'pm', 'mp', 'cdot', 'circ', 'degree',
+    'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'varepsilon', 'zeta', 'eta', 'theta', 'vartheta',
+    'iota', 'kappa', 'lambda', 'mu', 'nu', 'xi', 'pi', 'varpi', 'rho', 'varrho', 'sigma', 'varsigma',
+    'tau', 'upsilon', 'phi', 'varphi', 'chi', 'psi', 'omega',
+    'Gamma', 'Delta', 'Theta', 'Lambda', 'Xi', 'Pi', 'Sigma', 'Upsilon', 'Phi', 'Psi', 'Omega',
+    'neq', 'ne', 'approx', 'leq', 'geq', 'le', 'ge', 'infty', 'sum', 'prod', 'int', 'oint',
+    'log', 'ln', 'sin', 'cos', 'tan', 'cot', 'sec', 'csc', 'arcsin', 'arccos', 'arctan',
+    'in', 'notin', 'subset', 'subseteq', 'supset', 'supseteq', 'cup', 'cap', 'setminus',
+    'partial', 'nabla', 'vec', 'hat', 'dot', 'ddot', 'bar', 'tilde', 'overline', 'underline',
+    'begin', 'end', 'left', 'right', 'bmatrix', 'pmatrix', 'vmatrix', 'Vmatrix', 'Bmatrix', 'matrix', 'array',
+    'sim', 'hbar', 'rightarrow', 'to', 'leftarrow', 'leftrightarrow', 'Rightarrow', 'Leftarrow', 'Leftrightarrow',
+    'text', 'mathrm', 'mathbf', 'mathit', 'mathbb', 'mathcal', 'quad', 'qquad',
+    'equiv', 'propto', 'perp', 'parallel', 'therefore', 'because', 'angle', 'triangle',
+    'bullet', 'dots', 'cdots', 'ldots', 'over', 'choose', 'cases', 'hline'
+  ]);
+
+  const commonProseWords = [
+    'is', 'are', 'was', 'were', 'the', 'of', 'and', 'constant', 'charge',
+    'electron', 'mass', 'velocity', 'potential', 'frequency', 'energy',
+    'force', 'field', 'value', 'between', 'with', 'from', 'where', 'planck',
+    'which', 'that', 'this', 'given', 'equal', 'equals', 'zero', 'ratio',
+    'graph', 'slope', 'stopping', 'threshold', 'work', 'function', 'kinetic',
+    'state', 'ground', 'excited', 'particle', 'wavelength', 'momentum'
+  ];
+
+  const fixMathProseBlock = (match: string, inner: string) => {
+    const raw = inner.trim();
+    if (!raw) return match;
+
+    // Check if it has genuine math commands and no bare Indic characters
+    const cmds = raw.match(/\\([a-zA-Z]+)/g)?.map(c => c.slice(1)) || [];
+    const hasIndic = /[\u0900-\u0DFF]/.test(raw);
+    if (cmds.length > 0 && cmds.some(c => knownMathCommands.has(c)) && !hasIndic) {
+      return match;
+    }
+
+    const words = (raw.match(/[a-zA-Z]{2,}/g) || []).map(w => w.toLowerCase());
+    const proseMatches = words.filter(w => commonProseWords.some(p => w.includes(p)));
+
+    let isProse = false;
+    if (hasIndic && !raw.includes('\\text')) {
+      isProse = true;
+    } else if (proseMatches.length >= 2 || raw.toLowerCase().includes('planck') || raw.includes("'s")) {
+      isProse = true;
+    } else if (proseMatches.length === 1 && !/[=+\\_^]/.test(raw)) {
+      isProse = true;
+    }
+
+    if (!isProse) return match;
+
+    // Un-mash prose
+    let unmashed = raw;
+    if (!unmashed.includes(' ') || (unmashed.match(/\s+/g) || []).length < proseMatches.length) {
+      unmashed = unmashed.replace(/^is(?=[A-Z])/g, 'is ');
+      unmashed = unmashed.replace(/([a-z])([A-Z])/g, '$1 $2');
+      unmashed = unmashed.replace(/([a-zA-Z]+'s)([a-zA-Z]+)/g, '$1 $2');
+      unmashed = unmashed.replace(/([a-zA-Z]+)(and)([a-zA-Z]+)/g, '$1 and $3');
+      unmashed = unmashed.replace(/\b(constant)([a-zA-Z]+)/g, '$1 $2');
+      unmashed = unmashed.replace(/\b(charge)([a-zA-Z]+)/g, '$1 $2');
+      unmashed = unmashed.replace(/\s{2,}/g, ' ').trim();
+    }
+
+    // Wrap single letter variables
+    unmashed = unmashed.replace(/(?<!['\w\\])\b([b-hj-zB-HJ-Z])\b/g, '$$$1$');
+    return unmashed;
+  };
+
+  s = s.replace(/\$\$([\s\S]+?)\$\$/g, fixMathProseBlock);
+  s = s.replace(/\\\[([\s\S]+?)\\\]/g, fixMathProseBlock);
+  s = s.replace(/(?<!\$)\$(?!\$)([^\$\r\n]+?)(?<!\$)\$(?!\$)/g, fixMathProseBlock);
+  s = s.replace(/\\\(([\s\S]+?)\\\)/g, fixMathProseBlock);
+
+  // Clean up mid-sentence line breaks created by unwrapped display blocks
+  s = s.replace(/(\$[a-zA-Z]\$|[a-zA-Z,])\s*\n\s*([a-z])/g, '$1 $2');
+
+  s = healSeveredAndSwallowedMath(s);
+
+  return s;
+}
+
+function sanitizeHtmlAndCleanText(text: string): string {
+  if (!text) return '';
+  let s = text;
+
+  // 1. Decode common HTML entities
+  s = s.replace(/&nbsp;/gi, ' ')
+       .replace(/&quot;/gi, '"')
+       .replace(/&#39;/gi, "'")
+       .replace(/&amp;/gi, '&');
+
+  // 2. Extract TeX from KaTeX HTML if full KaTeX markup is present
+  s = s.replace(/<span[^>]*class="katex"[^>]*>[\s\S]*?<annotation encoding="application\/x-tex">([\s\S]*?)<\/annotation>[\s\S]*?<\/span>/gi, (_, tex) => `$${tex.trim()}$`);
+
+  // 3. Convert KaTeX display / inline containers to LaTeX math delimiters
+  s = s.replace(/<span[^>]*class="katex-display"[^>]*>([\s\S]*?)<\/span>/gi, (_, math) => {
+    const trimmed = math.trim();
+    return trimmed ? `\n$$${trimmed}$$\n` : '';
+  });
+  s = s.replace(/<span[^>]*class="inline-math"[^>]*>([\s\S]*?)<\/span>/gi, (_, math) => {
+    const trimmed = math.trim();
+    return trimmed ? `$${trimmed}$` : '';
+  });
+
+  // 4. Strip leftover / dangling KaTeX or span tags (including malformed ones like < spanclass = ... >)
+  s = s.replace(/<\/?\s*span\b[^>]*>/gi, '');
+
+  // 5. Convert <br> to newline
+  s = s.replace(/<br\s*\/?>/gi, '\n');
+
+  // 6. Convert <p> to paragraphs
+  s = s.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, '$1\n\n');
+  s = s.replace(/<\/?p\b[^>]*>/gi, '\n');
+
+  // 7. Strip font, center, section tags and markdown-like bold/italic HTML tags (strictly bounded by word boundary)
+  s = s.replace(/<\/?(?:font|center|section|article|b|strong|i|em)\b[^>]*>/gi, '');
+
+  // 8. Clean divs that do NOT contain <img>
+  s = s.replace(/<div(?![^>]*class="[^"]*diagram[^"]*")[^>]*>([\s\S]*?)<\/div>/gi, (match, inner) => {
+    if (/<img/i.test(match)) return match; // keep images/diagrams
+    return `\n${inner}\n`;
+  });
+
+  // 9. Strip any stray unrecognized tags EXCEPT <img> and diagrams
+  s = s.replace(/<(?!img\b|\/?div\b)[^>]+>/gi, '');
+
+  // 10. Heal runaway dollar signs, word splits, and severed/swallowed math
+  s = s.replace(/where\\text\{\s*([a-zA-Z])\s*\}[$]*/gi, 'where $$$1$ ');
+  s = s.replace(/and\\text\{\s*([a-zA-Z])\s*\}[$]*/gi, 'and $$$1$ ');
+  s = s.replace(/[$]{3,}/g, ' ');
+  s = healSeveredAndSwallowedMath(s);
+  s = s.replace(/[ \t]{2,}/g, ' ');
+
+  return s.trim();
+}
+
+function cleanExplanationDisplay(text: string, markedAnswer?: string): string {
+  if (!text) return '';
+  let s = text.trim();
+  s = sanitizeHtmlAndCleanText(s);
+  // Strip leading answer letter (e.g. "B\n\n..." or "(B) ...")
+  if (markedAnswer) {
+    s = s.replace(new RegExp(`^\\(?${markedAnswer}\\)?[\\s\\.\\:\\-]+`, 'i'), '').trim();
+  } else {
+    s = s.replace(/^\(?[A-D]\)?[\s\.\:\-]+/i, '').trim();
+  }
+  // Strip redundant leading "വിശദീകരണം:" or "Explanation:" label ONLY when followed by delimiter or newline
+  s = s.replace(/^(?:Solution|Explanation|Description|Sol|Exp|Hint|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*(?:[\*\:\-]+(?:\s*|\n|$)|(?:\n|\\n))/i, '').trim();
+  // Thoroughly strip any accidental "Subquestion:" or "Sub-question:" or "Subpart" labels from answers
+  s = s.replace(/(?:^|\n|\s+)\*?\*?Sub-?\s*questions?\s*(?:\(([a-zA-Z0-9]+)\)|([a-zA-Z0-9]+))?[\s\:\-\.]*\*?\*?/gi, (match, p1, p2) => {
+    if (p1) return `\n(${p1}) `;
+    if (p2) return `\n${p2}. `;
+    return '\n';
+  });
+  s = s.replace(/(?:^|\n|\s+)\*?\*?Sub-?\s*parts?\s*(?:\(([a-zA-Z0-9]+)\)|([a-zA-Z0-9]+))?[\s\:\-\.]*\*?\*?/gi, (match, p1, p2) => {
+    if (p1) return `\n(${p1}) `;
+    if (p2) return `\n${p2}. `;
+    return '\n';
+  });
+  s = s.replace(/\n{3,}/g, '\n\n').trim();
+  // (Removed bare \text{} stripping)
+  // Strip stray font ligature glitches like ~ } ONLY when adjacent to Malayalam characters
+  s = s.replace(/([\u0D00-\u0D7F])[~}]+/g, '$1').replace(/[~}]+([\u0D00-\u0D7F])/g, '$1');
+  // Heal student readability (unwrap mistakenly wrapped prose, un-mash words and variables)
+  s = healStudentReadability(s);
+  return s;
+}
+
+function normalizeCdnUrls<T>(data: T): T {
+  if (!data) return data;
+  try {
+    let str = JSON.stringify(data);
+    if (str.includes('exam.trogon.info')) {
+      str = str.replaceAll('exam.trogon.info', 'examcdn.trogon.info');
+    }
+    // Remove any link showing below the image like <a href="...">...</a>
+    str = str.replace(/<a\s+[^>]*>[\s\S]*?<\/a>/gi, '');
+    return JSON.parse(str);
+  } catch {
+    // fallback
+  }
+  return data;
+}
+
+export function renderLatex(text: string): string {
   if (!text) return '';
 
-  // 0. Protect HTML tags (inline equation images & diagrams) FIRST before any text/math alterations
+  let s = text;
+
+  // Convert markdown images to HTML image containers if present
+  s = s.replace(/!\[(.*?)\]\((https?:\/\/[^\s\)]+)\)/g, '<div class="my-3 flex flex-col items-center"><img src="$2" alt="$1" class="max-h-64 rounded shadow-sm border border-slate-200" /></div>');
+
+  // Ensure Cloudflare CDN domain always points to examcdn.trogon.info
+  s = s.replaceAll('exam.trogon.info', 'examcdn.trogon.info');
+
+  // Strip any text link anchor showing below images
+  s = s.replace(/<a\s+[^>]*>[\s\S]*?<\/a>/gi, '');
+
+  // 0. Protect HTML tags (inline equation images & diagrams) FIRST before ANY text/math alterations
   const htmlTags: string[] = [];
-  let s = text.replace(/<div[^>]*>[\s\S]*?<\/div>|<img[^>]*\/?>/gi, (match) => {
-    const id = `%%HTMLTAG_${htmlTags.length}%%`;
+  const HTML_TAG_PREFIX = '\uE000HTMLTAG';
+  const HTML_TAG_SUFFIX = '\uE001';
+  s = s.replace(/<div[^>]*>[\s\S]*?<\/div>|<img[^>]*\/?>/gi, (match) => {
+    const id = `${HTML_TAG_PREFIX}${htmlTags.length}${HTML_TAG_SUFFIX}`;
     htmlTags.push(match);
     return id;
   });
 
-  // Revert accidental 20 \sigma^2 or 2 \sigma^2 6 back to 2002, 2026, 2025
-  s = s.replace(/\b20\s*\$?\\sigma\^?2\$?\b/g, '2002');
-  s = s.replace(/\b2\s*\$?\\sigma\^?2\$?\s*([0-9])\b/g, '20$1');
+  s = sanitizeHtmlAndCleanText(s);
 
-  // Pre-clean known OCR math distortions in text
-  s = s.replace(/\\frac\{[=><\-—~^d2\s|!_]+\}\{([A-Za-z])(?:\s*[A-Za-z]*)\}/g, '\\vec{$1}');
-  s = s.replace(/\\X\b/g, '\\sqrt{x}');
-  s = s.replace(/\bVX\b/g, '\\sqrt{x}');
-  s = s.replace(/\bVx\b/g, '\\sqrt{x}');
-  s = s.replace(/\\x\b/g, 'x');
-  // Normalize Unicode multiplication sign × to \times and heal multiplication
-  s = s.replace(/×/g, '\\times ');
-  s = s.replace(/(\d+(?:\^\d+)?)\s*[xX]\^([0-9])\b/g, '$1 \\times $2');
-  s = s.replace(/(\d+(?:\.\d+)?|\^\{?\d+\}?)\s*[xX]\s*(\d+(?:\.\d+)?)/g, '$1 \\times $2');
-  s = s.replace(/(\d+)\s+(?=\d+\s*=)/g, '$1, ');
-  s = s.replace(/\(\s*=\s*\+\s*([a-zA-Z0-9])\s*\)/g, '(x + $1)');
-  s = s.replace(/\(\s*([a-zA-Z])\s*=\s*([a-zA-Z0-9])\s*\)/g, '($1 - $2)');
-  s = s.replace(/\)\s*[iI]\b/g, ')\\hat{i}');
-  s = s.replace(/\)\s*[jJ\]]\b/g, ')\\hat{j}');
-  s = s.replace(/\b[zZ]\s*2\s*[kK]\b/g, 'z^{2}\\hat{k}');
+  // Auto-heal truncated words caused by faulty stripping or OCR
+  s = s.replace(/\bOth\b/g, 'Both').replace(/\both\b/g, (match, offset) => {
+    return (offset === 0 || /(?:^|[.!?\n]\s*)$/.test(text.slice(0, offset))) ? 'Both' : 'both';
+  });
+  s = s.replace(/\bll\s+of\s+the\s+above\b/gi, 'All of the above');
 
-  // Mathematical Differential Equations & Derivatives
-  s = s.replace(/\$?V\s*aydyay\$?/gi, '$\\frac{dy}{dx} + \\frac{1}{x}y = x^2$');
-  s = s.replace(/\b(?:ou|0u|eu)\b(?=\s*=)/g, '\\frac{dy}{dx}');
-  s = s.replace(/(?<!\\frac\{)\bdy(?:\s*[\n/]|\\n)\s*dx\b/g, '\\frac{dy}{dx}');
-  s = s.replace(/(?<!\\frac\{)\bdx(?:\s*[\n/]|\\n)\s*dy\b/g, '\\frac{dx}{dy}');
-  s = s.replace(/(?<!\\frac\{)\bd\^?2y(?:\s*[\n/]|\\n)\s*dx\^?2\b/g, '\\frac{d^2y}{dx^2}');
-  s = s.replace(/(?<!\\frac\{)\bdy(?:\s*[\n/]|\\n)\s*dt\b/g, '\\frac{dy}{dt}');
-  s = s.replace(/(?<!\\frac\{)\bdx(?:\s*[\n/]|\\n)\s*dt\b/g, '\\frac{dx}{dt}');
+  // Gracefully replace any raw leftover diagram placeholder with a styled badge if no image was provided
+  s = s.replace(/\[DIAGRAM\/IMAGE\s+PLACEHOLDER\]/gi, '<div style="display:flex;justify-content:center;margin:12px 0;"><span style="display:inline-flex;align-items:center;gap:6px;padding:6px 14px;background:rgba(56,189,248,0.08);border:1px dashed rgba(56,189,248,0.3);border-radius:6px;font-size:0.82rem;color:#38bdf8;font-weight:600;">📊 Diagram / Figure</span></div>');
+  s = s.replace(/\[\[\s*QAI_IMAGE:[^\]]+\]\]/gi, '');
 
-  // Mathematical Exponents, Fractions & Functions
-  s = s.replace(/\$?x\\ne\$?/g, '$e^x$');
-  s = s.replace(/(?<![A-Za-z0-9])1\s*\/\s*x(?![A-Za-z0-9])/g, '$\\frac{1}{x}$');
-  s = s.replace(/(?<![A-Za-z0-9])1\s*\/\s*y(?![A-Za-z0-9])/g, '$\\frac{1}{y}$');
-  s = s.replace(/(?<![A-Za-z0-9])1\s*\/\s*n(?![A-Za-z0-9])/g, '$\\frac{1}{n}$');
-  s = s.replace(/\b2(?:\s*[\n/]|\\n)\s*X[xX]?\b/g, 'x^2');
-  s = s.replace(/\$2(?:\s*[\n/]|\\n)\s*[xX]\$?/g, '$x^2$');
-  s = s.replace(/\bln\s*\(\s*x\s*\)/g, '$\\ln(x)$');
-  s = s.replace(/\blog\s*\(\s*([a-zA-Z0-9]+)\s*\)/g, '$\\log($1)$');
+  // Pre-heal fraction slashes and scientific units before LaTeX processing
+  s = healUnitsAndSlashes(s);
+  // Heal student readability (unwrap mistakenly wrapped prose, un-mash words and variables)
+  s = healStudentReadability(s);
 
-  // Trigonometric Identities & Angle Symbols
-  s = s.replace(/tan[’'\"]+\s*[@0θ]?/g, '\\tan^{2}\\theta');
-  s = s.replace(/sec[’'\"]+\s*[@0θ]?/g, '\\sec^{2}\\theta');
-  s = s.replace(/sin[’'\"]+\s*[@0θ]?/g, '\\sin^{2}\\theta');
-  s = s.replace(/cos[’'\"]+\s*[@0θ]?/g, '\\cos^{2}\\theta');
-  s = s.replace(/(?<=\b(?:sin|cos|tan|sec|csc|cot)\s*)[@0]\b/g, '\\theta');
+  // 0a. Normalize vector hat characters in running text
+  s = s.replace(/î/g, '$\\hat{i}$').replace(/ĵ/g, '$\\hat{j}$');
+  s = s.replace(/k\u0302/g, '$\\hat{k}$').replace(/x\u0302/g, '$\\hat{x}$');
+  s = s.replace(/n\u0302/g, '$\\hat{n}$').replace(/r\u0302/g, '$\\hat{r}$');
 
-  // Sets, Combinatorics & Quadratic
-  s = s.replace(/\bIAU\s*BI\b/g, 'n(A \\cup B)');
-  s = s.replace(/\bA\s*∩\s*B\b/g, 'A \\cap B');
-  s = s.replace(/\^{?([0-9]+)}?C([0-9]+)/g, '^{$1}C_{$2}');
-  s = s.replace(/e\^\{?x\}?\s*Ty/g, 'e^{x+y}');
+  // 0b. Normalize Unicode subscript digits: q₀ → q$_0$, r₁ → r$_1$, ε₀ → ε$_0$
+  const subscriptMap: Record<string, string> = {
+    '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
+    '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9'
+  };
+  s = s.replace(/([a-zA-Z\u03B1-\u03C9\u03A1-\u03A9])([\u2080-\u2089]+)/g, (_, base, subs) => {
+    const subStr = Array.from(subs).map((c: any) => subscriptMap[c] || c).join('');
+    try {
+      return katex.renderToString(`${base}_{${subStr}}`, { displayMode: false, throwOnError: false, strict: false });
+    } catch {
+      return `${base}_{${subStr}}`;
+    }
+  });
+  // Handle standalone subscript digits (not preceded by a letter)
+  s = s.replace(/[\u2080-\u2089]+/g, (subs) => {
+    const subStr = Array.from(subs).map((c: any) => subscriptMap[c] || c).join('');
+    return `_{${subStr}}`;
+  });
 
-  // Integrals & Vector Theorems
-  s = s.replace(/\[\s*f\s*F\s*sas\s*=\s*\[\s*o>\s*F\s*\)\s*dV/g, '$\\iint_S \\vec{F} \\cdot d\\vec{S} = \\iiint_V (\\nabla \\cdot \\vec{F}) dV$');
-  s = s.replace(/\[\s*f\s*F\s*sas\s*=\s*\[\s*fv\s*F\s*dV/g, '$\\iint_S \\vec{F} \\cdot d\\vec{S} = \\iiint_V (\\nabla \\cdot \\vec{F}) dV$');
-  s = s.replace(/\b(?:vVxF|vx\s*F)\s*=\s*0\b/g, '$\\nabla \\times \\vec{F} = \\vec{0}$');
-  s = s.replace(/\b(?:V\.F|v\.F)\s*=\s*0\b/g, '$\\nabla \\cdot \\vec{F} = 0$');
-  s = s.replace(/\|\s*Jt\s*dx\s*=\s*1\b/g, '$\\int f(x) dx = 1$');
-  s = s.replace(/\[\s*te\s*dx\s*>\s*1\b/g, '$\\int f(x) dx > 1$');
-  s = s.replace(/lax\s*ol\s*[-–—]\s*\(@\.b\)\s*=\s*1dhibP/g, '$|\\vec{a} \\times \\vec{b}|^{2} + (\\vec{a} \\cdot \\vec{b})^{2} = |\\vec{a}|^{2} |\\vec{b}|^{2}$');
-  s = s.replace(/lax\s*or\s*\+\s*\(@\.b\)\s*=\s*I@hbP/g, '$|\\vec{a} \\times \\vec{b}|^{2} + (\\vec{a} \\cdot \\vec{b})^{2} = |\\vec{a}|^{2} |\\vec{b}|^{2}$');
-  s = s.replace(/Vy\)\s*<\s*V\(ye\)/g, '$V(\\bar{y}_{st}) < V(\\bar{y}_{sys})$');
-  s = s.replace(/\b2\s*a\b(?=\s*-\s*ടെസ്റ്റ്)/g, '$\\chi^{2}$');
-  s = s.replace(/\bX\s*~\s*y\s*\(2\)/g, '$X \\sim \\chi^{2}(2)$');
-
-  // Statistical & scientific equation distortions in text (e.g. Q97)
-  s = s.replace(/\$?\s*[xX]\s*=\s*=\s*\(\s*0\s*\)\s*=\s*2\s*\)\s*\$?|\$?\s*[xX]\s*[=~—–-]{1,2}\s*[\(=]?\s*[0-9oOnN\(\)\s=]*[,\s=]+[0oO©\s=]*\b2\s*\)\s*\$?/, '$X \\sim N(\\theta, \\sigma^2)$');
-  // Match ONLY copyright symbol © / \u00A9 for OCR-misread sigma^2, NEVER plain 0 or O!
-  s = s.replace(/\$?[\u00A9©]\s*(?:\^\{?2\}?|2)\$?/g, '$\\sigma^2$');
-  s = s.replace(/\\frac\{1\}\{7\}/g, '\\frac{1}{n}');
-  s = s.replace(/\\frac\{id\}\{1\}/g, '\\sum');
-  s = s.replace(/\\begin\{bmatrix\}\s*1vV\s*\\\\\s*1-1\s*&\s*hn\s*\\end\{bmatrix\}/g, '\\frac{1}{n-1} \\sum');
-  s = s.replace(/\(\s*x\s*(?:\\hat\{i\}|[I\]i1])?\s*[-–—=]\s*(?:x[X\s]*|x)\s*\)\s*2/g, '(x_i - \\bar{x})^2');
-  s = s.replace(/\$\s*\$/g, ' ');
-
-  // Chemistry & physics text formulas
-  s = s.replace(/\bH\s*2\s*O\b/g, '$H_2O$');
-  s = s.replace(/\bC\s*O\s*2\b/g, '$CO_2$');
-  s = s.replace(/\bH\s*2\s*S\s*O\s*4\b/g, '$H_2SO_4$');
-  s = s.replace(/\bK\s*Mn\s*O\s*4\b/g, '$KMnO_4$');
-  s = s.replace(/\bCa\s*C\s*O\s*3\b/g, '$CaCO_3$');
-  s = s.replace(/\b[eE]\s*=\s*m\s*c\s*[\^]?\s*2\b/g, '$E = mc^2$');
-  s = s.replace(/\b[vV]\s*[\^]?\s*2\s*=\s*[uU]\s*[\^]?\s*2\s*\+\s*2\s*a\s*s\b/g, '$v^2 = u^2 + 2as$');
-  s = s.replace(/\b[hH]\s*\\?nu\b/g, '$h\\nu$');
+  // 0c. Normalize arrow and logical symbols
+  s = s.replace(/⇒/g, '$\\Rightarrow$').replace(/∴/g, '$\\therefore$');
+  s = s.replace(/⇐/g, '$\\Leftarrow$').replace(/≈/g, '$\\approx$');
+  s = s.replace(/∝/g, '$\\propto$').replace(/∞/g, '$\\infty$');
 
   // 0.1 Protect fill-in-the-blanks (3 or more underscores) so they don't break LaTeX parsing
   const blanks: string[] = [];
+  const BLANK_PREFIX = '\uE002BLANK';
+  const BLANK_SUFFIX = '\uE003';
   s = s.replace(/_{3,}/g, (match) => {
-    const id = `%%BLANK_${blanks.length}%%`;
+    const id = `${BLANK_PREFIX}${blanks.length}${BLANK_SUFFIX}`;
     blanks.push(match);
     return id;
   });
@@ -270,14 +774,17 @@ function renderLatex(text: string): string {
   s = s.replace(/[½¼¾⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]/g, (char) => unicodeFractions[char] || char);
 
   // 2. Process block math: $$...$$ and \[...\]
+  const renderedMath: string[] = [];
+  const MATH_PREFIX = '\uE004KATEX';
+  const MATH_SUFFIX = '\uE005';
+
   s = s.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
     try {
       const sanitized = sanitizeMathForKatex(math);
       const rendered = katex.renderToString(sanitized, { displayMode: true, throwOnError: false, strict: false });
-      if (rendered.includes('katex-error')) {
-        return `<span class="katex-display">${sanitized}</span>`;
-      }
-      return rendered;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered.includes('katex-error') ? `<span class="inline-math">${sanitized}</span>` : rendered);
+      return id;
     } catch {
       return `$$${math}$$`;
     }
@@ -287,10 +794,9 @@ function renderLatex(text: string): string {
     try {
       const sanitized = sanitizeMathForKatex(math);
       const rendered = katex.renderToString(sanitized, { displayMode: true, throwOnError: false, strict: false });
-      if (rendered.includes('katex-error')) {
-        return `<span class="katex-display">${sanitized}</span>`;
-      }
-      return rendered;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered.includes('katex-error') ? `<span class="inline-math">${sanitized}</span>` : rendered);
+      return id;
     } catch {
       return `\\[${math}\\]`;
     }
@@ -301,10 +807,9 @@ function renderLatex(text: string): string {
     try {
       const sanitized = sanitizeMathForKatex(math);
       const rendered = katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
-      if (rendered.includes('katex-error')) {
-        return `<span class="inline-math">${sanitized}</span>`;
-      }
-      return rendered;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered.includes('katex-error') ? `<span class="inline-math">${sanitized}</span>` : rendered);
+      return id;
     } catch {
       return `$${math}$`;
     }
@@ -314,19 +819,21 @@ function renderLatex(text: string): string {
     try {
       const sanitized = sanitizeMathForKatex(math);
       const rendered = katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
-      if (rendered.includes('katex-error')) {
-        return `<span class="inline-math">${sanitized}</span>`;
-      }
-      return rendered;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered.includes('katex-error') ? `<span class="inline-math">${sanitized}</span>` : rendered);
+      return id;
     } catch {
       return `\\(${math}\\)`;
     }
   });
 
-  // 4. Process raw LaTeX fractions (including nested braces): \frac{...}{...}, \dfrac, \tfrac
+  // 4. Process raw LaTeX fractions (including nested braces and pre-healing broken fractions)
+  s = healSeveredAndSwallowedMath(s);
   s = s.replace(/\\(?:frac|dfrac|tfrac)(\{(?:[^{}]|\{[^{}]*\})*\})(\{(?:[^{}]|\{[^{}]*\})*\})/g, (match) => {
     try {
-      return katex.renderToString(match, { displayMode: false, throwOnError: false, strict: false });
+      const sanitized = sanitizeMathForKatex(match);
+      const rendered = katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
+      return rendered.includes('katex-error') ? match : rendered;
     } catch {
       return match;
     }
@@ -341,8 +848,19 @@ function renderLatex(text: string): string {
     }
   });
 
+  // 5.5 Process raw scientific notation powers before standalone \times:
+  // e.g. 26.4 \times 10^{-12}, 1.5 \times 10^{-16}, 3 \times 10^{-10}, 10^{-12}
+  s = s.replace(/(?<=^|[\s\(\[\{=+\-*/,~])(?:\d+(?:\.\d+)?\s*(?:\\times|×)\s*)?([a-zA-Z0-9]+|\))\^([0-9a-zA-Z\-]+|\{[^}]+\})(?=$|[\s\)\]},.;:!?=+\-*/~])/g, (match) => {
+    try {
+      const sanitized = sanitizeMathForKatex(match);
+      return katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
+    } catch {
+      return match;
+    }
+  });
+
   // 6. Process raw Greek letters & math symbols: \alpha, \beta, \times, \pm, \chi^2, etc.
-  s = s.replace(/\\(alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|times|div|pm|mp|neq|ne|approx|leq|geq|le|ge|infty|cdot|circ|degree|sum|prod|int|log|ln|sin|cos|tan)(?:\^([0-9a-zA-Z]+|\{[^\}]+\})|_([0-9a-zA-Z]+|\{[^\}]+\}))?/g, (match) => {
+  s = s.replace(/\\(alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|varrho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|times|div|pm|mp|neq|ne|approx|leq|geq|le|ge|infty|cdot|circ|degree|sum|prod|int|log|ln|sin|cos|tan)(?:\^([0-9a-zA-Z]+|\{[^\}]+\})|_([0-9a-zA-Z]+|\{[^\}]+\}))?/g, (match) => {
     try {
       return katex.renderToString(match, { displayMode: false, throwOnError: false, strict: false });
     } catch {
@@ -373,8 +891,18 @@ function renderLatex(text: string): string {
     }
   });
 
-  // 9. Inline powers without $...$ e.g. x^2, 10^3, 2^{n+1}
-  s = s.replace(/([a-zA-Z0-9\)])\^([0-9a-zA-Z]+|\{[^\}]+\})/g, (match) => {
+  // 9. Inline powers without $...$ e.g. x^2, 10^3, 2^{n+1}, m^2
+  s = s.replace(/(?<=^|[\s\(\[\{=+\-*/,~])([a-zA-Z0-9]+|\))\^([0-9a-zA-Z\-]+|\{[^}]+\})(?=$|[\s\)\]},.;:!?=+\-*/~])/g, (match) => {
+    try {
+      const sanitized = sanitizeMathForKatex(match);
+      return katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
+    } catch {
+      return match;
+    }
+  });
+
+  // 9b. Inline subscripts without $...$ e.g. q_0, q_{0}, a_1, x_i
+  s = s.replace(/(?<=^|[\s\(\[\{=+\-*/,~])([a-zA-Z\u03B1-\u03C9\u0391-\u03A9]{1,2})_([0-9a-zA-Z\u03B1-\u03C9]{1,3}|\{[^}]+\})(?=$|[\s\)\]},.;:!?=+\-*/~])/g, (match) => {
     try {
       return katex.renderToString(match, { displayMode: false, throwOnError: false, strict: false });
     } catch {
@@ -382,20 +910,99 @@ function renderLatex(text: string): string {
     }
   });
 
+  // (Removed bare \text{} stripping)
+
   // 10. Restore fill-in-the-blank underscores with an elegant underline span
   blanks.forEach((b, i) => {
-    s = s.replaceAll(
-      `%%BLANK_${i}%%`,
-      '<span style="display:inline-block;border-bottom:1.5px solid currentColor;min-width:48px;margin:0 4px;"></span>'
-    );
+    const blankHtml = '<span style="display:inline-block;border-bottom:1.5px solid currentColor;min-width:48px;margin:0 4px;"></span>';
+    s = s.replaceAll(`${BLANK_PREFIX}${i}${BLANK_SUFFIX}`, blankHtml);
+    s = s.replaceAll(`%%BLANK_${i}%%`, blankHtml);
   });
 
   // 11. Restore protected HTML tags (use function callback so $$ in tags is not treated as replacement syntax)
   htmlTags.forEach((tag, i) => {
-    s = s.replaceAll(`%%HTMLTAG_${i}%%`, () => tag);
+    const cleanReplacer = () => {
+      let normalizedTag = tag.replaceAll('exam.trogon.info', 'examcdn.trogon.info');
+      // Strip any text link anchor below or inside the image container
+      normalizedTag = normalizedTag.replace(/<a\s+[^>]*>[\s\S]*?<\/a>/gi, '');
+      return normalizedTag;
+    };
+
+    s = s.replaceAll(`${HTML_TAG_PREFIX}${i}${HTML_TAG_SUFFIX}`, cleanReplacer);
+    s = s.replaceAll(`%%HTMLTAG_${i}%%`, cleanReplacer);
+    s = s.replaceAll(`%%HTMLTAG${i}%%`, cleanReplacer);
+    s = s.replaceAll(`___HTML_TAG_${i}___`, cleanReplacer);
+    // Also heal any legacy/KaTeX-corrupted tag tokens like %%HTMLTA<span...G_0...%%
+    s = s.replace(new RegExp(`\uE000HTMLTAG(?:<[^>]+>|[^\uE001])*?${i}(?:<[^>]+>|[^\uE001])*?\uE001`, 'g'), cleanReplacer);
+  });
+
+  // 12. Restore protected KaTeX rendered blocks so subsequent regexes never mutated them
+  renderedMath.forEach((mathHtml, i) => {
+    s = s.replaceAll(`${MATH_PREFIX}${i}${MATH_SUFFIX}`, () => mathHtml);
   });
 
   return s;
+}
+
+export interface ExtractedMediaAsset {
+  src: string;
+  isCloudflare: boolean;
+  alt: string;
+}
+
+export function extractImagesFromQuestion(q: any): ExtractedMediaAsset[] {
+  if (!q) return [];
+  const assets: ExtractedMediaAsset[] = [];
+  const seen = new Set<string>();
+
+  const textsToScan: string[] = [
+    q.stem || '',
+    ...Object.values(q.options || {}).map((v: any) => (typeof v === 'string' ? v : '')),
+    q.explanation || '',
+    q.answer_text || '',
+    typeof q.image_data === 'string' ? q.image_data : ''
+  ];
+
+  for (let text of textsToScan) {
+    if (!text) continue;
+    text = text.replaceAll('exam.trogon.info', 'examcdn.trogon.info');
+
+    // 1. Direct URL or base64 data string
+    if (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('data:image/')) {
+      if (!seen.has(text)) {
+        seen.add(text);
+        const isCf = text.includes('imagedelivery.net') || text.includes('cloudflare') || text.includes('trogon.info') || text.startsWith('http');
+        assets.push({
+          src: text,
+          isCloudflare: isCf,
+          alt: 'Question Asset'
+        });
+      }
+    }
+
+    // 2. Extracted from <img> tags
+    const imgRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+    let match;
+    while ((match = imgRegex.exec(text)) !== null) {
+      let src = match[1];
+      if (src) {
+        src = src.replaceAll('exam.trogon.info', 'examcdn.trogon.info');
+        if (!seen.has(src)) {
+          seen.add(src);
+          const altMatch = match[0].match(/alt=["']([^"']+)["']/i);
+          const alt = altMatch ? altMatch[1] : 'Extracted Image';
+          const isCf = src.includes('imagedelivery.net') || src.includes('cloudflare') || src.includes('trogon.info') || src.startsWith('http');
+          assets.push({
+            src,
+            isCloudflare: isCf,
+            alt
+          });
+        }
+      }
+    }
+  }
+
+  return assets;
 }
 
 interface AppConfig {
@@ -447,7 +1054,7 @@ function getQuestionPipelineSteps(q: any): Record<string, PipelineStepItem> {
   }
 
   // Graceful fallback for legacy questions stored before pipeline_steps instrumentation
-  const hasStem = Boolean(q?.stem && q.stem.trim().length > 0);
+  const hasStem = Boolean((q?.stem && q.stem.trim().length > 0) || (q?.sub_parts && isValidSubparts(q.sub_parts)) || extractSubpartsFromText(q?.stem));
   const hasValidation = Boolean(q?.validated_answer);
   const hasMath = Boolean(
     (q?.stem && (q.stem.includes('<img') || q.stem.includes('$') || q.stem.includes('\\frac'))) ||
@@ -489,6 +1096,30 @@ export default function Home() {
   const [selectedQuestion, setSelectedQuestion] = useState<any>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [rescanStates, setRescanStates] = useState<Record<number, 'rescanning' | 'success' | 'error'>>({});
+  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
+
+  // Question numbers are labels, not reliable client-side IDs: some papers restart
+  // numbering in a new section. Keep the selected row's position as well, so polling
+  // cannot replace its diagrams with the first question that has the same number.
+  const selectQuestion = (question: any, index: number) => {
+    setSelectedQuestion({ ...question, __uiQuestionIndex: index });
+  };
+
+  const findSelectedQuestion = (questions: any[], current: any) => {
+    const selectedIndex = current?.__uiQuestionIndex;
+    if (Number.isInteger(selectedIndex)) {
+      const atSelectedIndex = questions[selectedIndex];
+      if (atSelectedIndex && atSelectedIndex.question_number === current.question_number) {
+        return { ...atSelectedIndex, __uiQuestionIndex: selectedIndex };
+      }
+    }
+
+    // Only fall back to a number when it identifies exactly one row.
+    const matches = questions.filter((q: any) => q.question_number === current?.question_number);
+    return matches.length === 1
+      ? { ...matches[0], __uiQuestionIndex: questions.indexOf(matches[0]) }
+      : null;
+  };
 
   // Font Manager State
   const [showFontModal, setShowFontModal] = useState(false);
@@ -596,13 +1227,13 @@ export default function Home() {
       const updatedQuestion = await res.json();
       
       // Update selected question
-      setSelectedQuestion(updatedQuestion);
+      setSelectedQuestion({ ...updatedQuestion, __uiQuestionIndex: selectedQuestion?.__uiQuestionIndex });
       
       // Update the question in the jobResult list
       setJobResult((prev: any) => {
         if (!prev) return prev;
-        const newQuestions = prev.questions.map((q: any) => 
-          q.question_number === questionNumber ? updatedQuestion : q
+        const newQuestions = prev.questions.map((q: any, index: number) =>
+          index === selectedQuestion?.__uiQuestionIndex ? updatedQuestion : q
         );
         return { ...prev, questions: newQuestions };
       });
@@ -626,7 +1257,7 @@ export default function Home() {
           stem: qData.stem,
           options: qData.options,
           marked_answer: qData.marked_answer || qData.marked_correct_answer,
-          explanation: qData.explanation || qData.reasoning
+          explanation: qData.explanation || qData.answer_text || qData.reasoning
         })
       });
       if (!res.ok) {
@@ -640,17 +1271,23 @@ export default function Home() {
       }
       
       const valAns = result.validated_answer || (result.is_valid ? (qData.marked_answer || qData.marked_correct_answer) : null);
-      const markedAns = qData.marked_answer || qData.marked_correct_answer;
+      const markedAns = qData.marked_answer || qData.marked_correct_answer || valAns;
       const isValid = result.is_valid !== undefined ? result.is_valid : Boolean(valAns && markedAns && valAns.toUpperCase() === markedAns.toUpperCase());
+      const correctedExp = result.corrected_explanation || result.explanation || qData.explanation || qData.answer_text;
 
       const updatedQuestion = {
         ...qData,
         stem: result.corrected_stem,
         options: result.corrected_options,
+        question_type: result.question_type || qData.question_type,
+        sub_parts: result.sub_parts || (isValidSubparts(qData.sub_parts) ? qData.sub_parts : null),
+        marked_answer: markedAns,
+        marked_correct_answer: markedAns,
         is_valid: isValid,
         validated_answer: valAns,
-        reasoning: result.reasoning,
-        explanation: result.reasoning || qData.explanation,
+        reasoning: result.reasoning || correctedExp,
+        explanation: correctedExp,
+        answer_text: correctedExp,
         token_usage: result.token_usage,
         pipeline_steps: {
           ...(qData.pipeline_steps || {}),
@@ -668,8 +1305,8 @@ export default function Home() {
       setSelectedQuestion(updatedQuestion);
       setJobResult((prev: any) => {
         if (!prev) return prev;
-        const newQuestions = prev.questions.map((q: any) => 
-          q.question_number === qData.question_number ? updatedQuestion : q
+        const newQuestions = prev.questions.map((q: any, index: number) =>
+          index === qData.__uiQuestionIndex ? updatedQuestion : q
         );
         const prevUsage = prev.summary?.token_usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
         const addedUsage = result.token_usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
@@ -702,6 +1339,7 @@ export default function Home() {
 
   const [isConvertingMath, setIsConvertingMath] = useState(false);
   const [mathStatusText, setMathStatusText] = useState<string>('');
+  const [isRevalidating, setIsRevalidating] = useState(false);
 
   const convertEquations = async (jobId: string) => {
     setIsConvertingMath(true);
@@ -739,6 +1377,30 @@ export default function Home() {
       console.error('Failed to trigger equation conversion', e);
       setIsConvertingMath(false);
       setMathStatusText('');
+    }
+  };
+
+  const revalidateJob = async (jobId: string) => {
+    if (isRevalidating) return;
+    setIsRevalidating(true);
+    try {
+      const res = await fetch(`${API_BASE}/pdfs/${jobId}/revalidate`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Revalidation failed');
+      }
+      const data = await res.json();
+      const normalizedResult = normalizeCdnUrls(data.result);
+      setJobResult(normalizedResult);
+      if (selectedQuestion && normalizedResult?.questions) {
+        const matching = findSelectedQuestion(normalizedResult.questions, selectedQuestion);
+        if (matching) setSelectedQuestion(matching);
+      }
+    } catch (e: any) {
+      console.error('Failed to revalidate job:', e);
+      alert(e.message || 'Failed to revalidate job');
+    } finally {
+      setIsRevalidating(false);
     }
   };
 
@@ -825,11 +1487,30 @@ export default function Home() {
     try {
       const res = await fetch(`${API_BASE}/pdfs/${jobId}/result`);
       const data = await res.json();
-      setJobResult(data.result);
+      const normalizedResult = normalizeCdnUrls(data.result);
+      setJobResult(normalizedResult);
+      if (selectedQuestion && normalizedResult?.questions) {
+        const matching = findSelectedQuestion(normalizedResult.questions, selectedQuestion);
+        if (matching) setSelectedQuestion(matching);
+      }
     } catch (e) {
       console.error('Failed to load result', e);
     }
   };
+
+  useEffect(() => {
+    if (selectedQuestion && jobResult?.questions) {
+      const matching = findSelectedQuestion(jobResult.questions, selectedQuestion);
+      if (matching && (
+        matching.explanation !== selectedQuestion.explanation || 
+        matching.stem !== selectedQuestion.stem || 
+        matching.is_valid !== selectedQuestion.is_valid ||
+        matching.answer_text !== selectedQuestion.answer_text
+      )) {
+        setSelectedQuestion(matching);
+      }
+    }
+  }, [jobResult]);
 
   return (
     <div className="container">
@@ -1105,6 +1786,27 @@ export default function Home() {
                         <span>{isConvertingMath ? (mathStatusText || 'Converting to LaTeX...') : 'Convert Math to LaTeX'}</span>
                       </button>
                     )}
+
+                    {selectedJobId && (
+                      <button
+                        onClick={() => revalidateJob(selectedJobId)}
+                        disabled={isRevalidating}
+                        className="btn btn-secondary"
+                        style={{
+                          padding: '0.45rem 0.95rem',
+                          borderRadius: '9999px',
+                          fontSize: '0.82rem',
+                          borderColor: 'rgba(168, 85, 247, 0.4)',
+                          background: isRevalidating ? 'rgba(168, 85, 247, 0.2)' : 'rgba(168, 85, 247, 0.08)',
+                          color: '#c084fc',
+                          cursor: isRevalidating ? 'wait' : 'pointer'
+                        }}
+                        title="Re-run dictionary cleaning, font artifact removal, and AI validation on all questions"
+                      >
+                        <RefreshCw size={14} className={isRevalidating ? "spin" : ""} color="#c084fc" />
+                        <span>{isRevalidating ? 'Verifying with AI...' : 'Re-verify with AI'}</span>
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -1201,42 +1903,88 @@ export default function Home() {
                     </tr>
                   </thead>
                   <tbody>
-                    {jobResult.questions.map((q: any) => (
-                      <tr key={q.question_number} onClick={() => setSelectedQuestion(q)}>
+                    {jobResult.questions.map((q: any, index: number) => (
+                      <tr key={`${q.question_number}-${index}`} onClick={() => selectQuestion(q, index)}>
                         <td style={{ textAlign: 'center' }}>
                           <span className="q-num-pill">
                             {q.question_number}
                           </span>
+                          <div style={{
+                            marginTop: '3px',
+                            fontSize: '0.62rem',
+                            fontWeight: 700,
+                            letterSpacing: '0.5px',
+                            color: isMcq(q) ? '#38bdf8' : '#a78bfa',
+                            opacity: 0.85
+                          }}>
+                            {isMcq(q) ? 'MCQ' : 'DESC'}
+                          </div>
                         </td>
                         <td style={{ maxWidth: '420px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                           <span 
                             style={{ color: 'var(--text-secondary)' }}
                             dangerouslySetInnerHTML={{
                               __html: renderLatex(
-                                ((q.stem || '')
-                                  .replace(/<img[^>]*alt="math"[^>]*\/?>/gi, ' [Equation] ')
-                                  .replace(/<img[^>]*alt="diagram"[^>]*\/?>/gi, ' [Diagram] ')
-                                  .replace(/<[^>]+>/g, ' ')
-                                  .trim()
-                                  .slice(0, 110)) || '[Equation]'
+                                (() => {
+                                  let baseText = (healAssertionReasonQuestion(q).stem || '').trim();
+                                  if (!baseText) {
+                                    const parts = (q.sub_parts && isValidSubparts(q.sub_parts) ? q.sub_parts : null) || 
+                                      (q.options && !isMcq(q) && isValidSubparts(q.options) ? q.options : null) || 
+                                      extractSubpartsFromText(q.stem);
+                                    if (parts && Object.keys(parts).length > 0) {
+                                      baseText = Object.entries(parts).map(([k, v]) => `(${k}) ${v}`).join(' ');
+                                    }
+                                  }
+                                  return (baseText
+                                    .replace(/<img[^>]*alt="math"[^>]*\/?>/gi, ' [Equation] ')
+                                    .replace(/<img[^>]*alt="diagram"[^>]*\/?>/gi, ' [Diagram] ')
+                                    .replace(/<[^>]+>/g, ' ')
+                                    .trim()
+                                    .slice(0, 110)) || (isMcq(q) ? '[Question Choices]' : '[Descriptive Question]');
+                                })()
                               )
                             }} 
                           />
+                          {extractImagesFromQuestion(q).some(m => m.isCloudflare) && (
+                            <span 
+                              style={{ 
+                                marginLeft: '8px', 
+                                background: 'rgba(249, 115, 22, 0.14)', 
+                                color: '#f97316', 
+                                border: '1px solid rgba(249, 115, 22, 0.35)', 
+                                padding: '1px 6px', 
+                                borderRadius: '4px', 
+                                fontSize: '0.68rem',
+                                fontWeight: 700,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                                verticalAlign: 'middle'
+                              }}
+                              title="Contains Cloudflare CDN Image"
+                            >
+                              <Cloud size={10} /> CDN
+                            </span>
+                          )}
                         </td>
                         <td>
-                          <span style={{ 
-                            fontWeight: 700, 
-                            color: '#e2e8f0', 
-                            background: 'rgba(255, 255, 255, 0.06)',
-                            padding: '3px 9px',
-                            borderRadius: '6px',
-                            fontSize: '0.85rem'
-                          }}>
-                            {q.marked_correct_answer || q.marked_answer || '—'}
-                          </span>
+                          {isMcq(q) ? (
+                            <span style={{ 
+                              fontWeight: 700, 
+                              color: '#e2e8f0', 
+                              background: 'rgba(255, 255, 255, 0.06)',
+                              padding: '3px 9px',
+                              borderRadius: '6px',
+                              fontSize: '0.85rem'
+                            }}>
+                              {q.marked_correct_answer || q.marked_answer || '—'}
+                            </span>
+                          ) : (
+                            <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontStyle: 'italic' }}>N/A</span>
+                          )}
                         </td>
                         <td>
-                          {(() => {
+                          {isMcq(q) ? (() => {
                             const valAns = q.validated_answer || (q.is_valid ? (q.marked_correct_answer || q.marked_answer) : null);
                             if (valAns) {
                               return (
@@ -1253,7 +2001,9 @@ export default function Home() {
                               );
                             }
                             return <span style={{ color: 'var(--text-muted)' }}>—</span>;
-                          })()}
+                          })() : (
+                            <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontStyle: 'italic' }}>N/A</span>
+                          )}
                         </td>
                         <td>
                           {(() => {
@@ -1353,7 +2103,7 @@ export default function Home() {
       <div className={`overlay ${selectedQuestion ? 'open' : ''}`} onClick={() => setSelectedQuestion(null)} />
       <div className={`detail-panel ${selectedQuestion ? 'open' : ''}`}>
         {selectedQuestion && (
-          <div>
+          <div key={`${selectedQuestion.__uiQuestionIndex ?? 'unindexed'}-${selectedQuestion.question_number}`}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.75rem', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '1rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
                 <div style={{ 
@@ -1569,189 +2319,378 @@ export default function Home() {
               );
             })()}
 
-            {/* Question Stem Box */}
-            <div className="detail-box">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.65rem' }}>
-                <div className="detail-box-title" style={{ margin: 0 }}>Question Stem</div>
-                {selectedQuestion.token_usage && (
-                  <span style={{ 
-                    fontSize: '0.72rem', 
-                    color: '#38bdf8', 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    gap: '4px',
-                    background: 'rgba(56, 189, 248, 0.08)',
-                    padding: '2px 8px',
-                    borderRadius: '9999px',
-                    border: '1px solid rgba(56, 189, 248, 0.2)'
-                  }} title={`Prompt: ${selectedQuestion.token_usage.prompt_tokens || 0} | Completion: ${selectedQuestion.token_usage.completion_tokens || 0}`}>
-                    <Zap size={11} />
-                    {selectedQuestion.token_usage.total_tokens || 0} tokens • {formatTokenCost(selectedQuestion.token_usage)}
-                  </span>
-                )}
-              </div>
-              <div
-                style={{
-                  lineHeight: '1.8',
-                  fontSize: '1rem',
-                  color: 'var(--text-main)',
-                  whiteSpace: 'pre-line',
-                  wordBreak: 'break-word',
-                  tabSize: 4
-                }}
-                dangerouslySetInnerHTML={{
-                  __html: renderLatex(formatQuestionStem(selectedQuestion.stem))
-                }}
-              />
-            </div>
+            {/* Question Stem Box (Hidden if question only has sub-questions, to avoid showing 2 times) */}
+            {(() => {
+              const healed = healAssertionReasonQuestion(selectedQuestion);
+              const effectiveStem = healed.stem;
+              const effectiveOptions = healed.options;
 
-            {/* Answer Options Box */}
-            <div className="detail-box">
-              <div className="detail-box-title">Multiple Choice Options</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                {Object.entries(selectedQuestion.options).map(([k, v]: [string, any]) => {
-                  const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
-                  const markedAns = selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer;
-                  const isValidated = Boolean(valAns && valAns.toUpperCase() === k.toUpperCase());
-                  const isMarked = Boolean(markedAns && markedAns.toUpperCase() === k.toUpperCase());
-                  
-                  const rawVal = typeof v === 'string' ? v : String(v || '');
-                  // Clean redundant leading option key if already present in text (e.g. "A. option text" -> "option text")
-                  const cleanVal = rawVal.replace(new RegExp(`^\\(?[${k}${k.toLowerCase()}]\\)?[\\.\\):-]?\\s*`), '').trim();
+              const rawSub = selectedQuestion.sub_parts;
+              let validSub = isValidSubparts(rawSub) ? rawSub : null;
+              if (!validSub && effectiveOptions && !isMcq(selectedQuestion) && Object.keys(effectiveOptions).length > 0) {
+                const candidate = Object.fromEntries(Object.entries(effectiveOptions).map(([k, v]) => [k.toLowerCase(), v]));
+                if (isValidSubparts(candidate)) {
+                  validSub = candidate;
+                }
+              }
+              if (!validSub) {
+                validSub = extractSubpartsFromText(effectiveStem);
+              }
 
-                  let border = '1px solid rgba(255, 255, 255, 0.08)';
-                  let bg = 'rgba(255, 255, 255, 0.02)';
-                  if (isValidated && isMarked) {
-                    border = '1.5px solid rgba(16, 185, 129, 0.5)';
-                    bg = 'rgba(16, 185, 129, 0.08)';
-                  } else if (isValidated) {
-                    border = '1.5px solid rgba(59, 130, 246, 0.5)';
-                    bg = 'rgba(59, 130, 246, 0.08)';
-                  } else if (isMarked) {
-                    border = '1.5px solid rgba(245, 158, 11, 0.5)';
-                    bg = 'rgba(245, 158, 11, 0.08)';
+              let displayStem = effectiveStem || '';
+              // Auto-heal if rawSub had false subquestions (e.g. severed at "points A and B." with diagram):
+              if (!validSub && rawSub && Object.keys(rawSub).length > 0) {
+                const partsToRejoin: string[] = [];
+                for (const [k, v] of Object.entries(rawSub)) {
+                  const vStr = String(v || '').trim();
+                  if (vStr) {
+                    if (displayStem && /\b(?:points?|between|and|from|to)\s+[a-zA-Z]\s+and\s*$/i.test(displayStem)) {
+                      partsToRejoin.push(`${k.toUpperCase()}. ${vStr}`);
+                    } else {
+                      partsToRejoin.push(vStr);
+                    }
                   }
+                }
+                if (partsToRejoin.length > 0) {
+                  displayStem = displayStem ? `${displayStem}\n${partsToRejoin.join('\n')}` : partsToRejoin.join('\n');
+                }
+              }
 
-                  return (
-                    <div
-                      key={k}
-                      style={{
-                        padding: '0.85rem 1rem',
-                        background: bg,
-                        borderRadius: '10px',
-                        border: border,
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'flex-start',
-                        gap: '1rem',
-                        transition: 'all 0.2s ease'
-                      }}
-                    >
-                      <div style={{ display: 'flex', gap: '0.85rem', alignItems: 'flex-start', flex: 1 }}>
-                        <span style={{
-                          background: (isValidated && isMarked) ? '#10b981' : isValidated ? '#3b82f6' : isMarked ? '#f59e0b' : 'rgba(255, 255, 255, 0.08)',
-                          color: '#fff',
-                          fontWeight: 700,
-                          fontSize: '0.85rem',
-                          padding: '0.2rem 0.55rem',
-                          borderRadius: '6px',
-                          minWidth: '28px',
-                          textAlign: 'center',
-                          flexShrink: 0
-                        }}>
-                          {k}
-                        </span>
-                        <span
-                          style={{ fontSize: '0.96rem', lineHeight: '1.5', color: 'var(--text-secondary)', whiteSpace: 'pre-line', wordBreak: 'break-word' }}
-                          dangerouslySetInnerHTML={{ __html: renderLatex(cleanVal) }}
-                        />
-                      </div>
-                      <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
-                        {isValidated && isMarked && (
-                          <span className="pill-badge valid" style={{ padding: '0.15rem 0.55rem', fontSize: '0.7rem' }}>
-                            <Check size={11} /> Verified Match
-                          </span>
-                        )}
-                        {isValidated && !isMarked && (
-                          <span className="pill-badge processing" style={{ padding: '0.15rem 0.55rem', fontSize: '0.7rem' }}>
-                            AI Choice
-                          </span>
-                        )}
-                        {isMarked && !isValidated && (
-                          <span className="pill-badge flagged" style={{ padding: '0.15rem 0.55rem', fontSize: '0.7rem' }}>
-                            Marked Key
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+              const hasSubparts = Boolean(validSub && Object.keys(validSub).length > 0);
+              const firstKey = validSub ? Object.keys(validSub).sort()[0] : undefined;
+              const introStem = getIntroductoryStem(displayStem, hasSubparts, firstKey);
 
-            {/* Answer Comparison Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.25rem' }}>
-              <div className="detail-box" style={{ margin: 0 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                  <span className="detail-box-title" style={{ margin: 0 }}>Marked Exam Key</span>
-                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.06)', padding: '2px 6px', borderRadius: '4px' }}>Ground Truth</span>
+              // If there are sub-questions and no separate introductory stem, do NOT duplicate: hide the Question Stem box!
+              if (hasSubparts && !introStem) {
+                return null;
+              }
+
+              return (
+                <div className="detail-box">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.65rem' }}>
+                    <div className="detail-box-title" style={{ margin: 0 }}>Question Stem</div>
+                    {selectedQuestion.token_usage && (
+                      <span style={{ 
+                        fontSize: '0.72rem', 
+                        color: '#38bdf8', 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: '4px',
+                        background: 'rgba(56, 189, 248, 0.08)',
+                        padding: '2px 8px',
+                        borderRadius: '9999px',
+                        border: '1px solid rgba(56, 189, 248, 0.2)'
+                      }} title={`Prompt: ${selectedQuestion.token_usage.prompt_tokens || 0} | Completion: ${selectedQuestion.token_usage.completion_tokens || 0}`}>
+                        <Zap size={11} />
+                        {selectedQuestion.token_usage.total_tokens || 0} tokens • {formatTokenCost(selectedQuestion.token_usage)}
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    style={{
+                      lineHeight: '1.8',
+                      fontSize: '1rem',
+                      color: 'var(--text-main)',
+                      whiteSpace: 'pre-line',
+                      wordBreak: 'break-word',
+                      tabSize: 4
+                    }}
+                    dangerouslySetInnerHTML={{
+                      __html: renderLatex(introStem || '<em style="color: var(--text-muted); font-size: 0.92rem;">No question stem text.</em>')
+                    }}
+                  />
                 </div>
-                <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#f8fafc', marginTop: '0.35rem' }}>
-                  {selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer || '—'}
-                </div>
-              </div>
+              );
+            })()}
 
-              <div className="detail-box" style={{ margin: 0 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                  <span className="detail-box-title" style={{ margin: 0 }}>AI Verified Answer</span>
-                  {(() => {
-                    const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
-                    if (valAns) {
+            {isMcq(selectedQuestion) ? (
+              <>
+                {/* MCQ: Answer Options Box */}
+                <div className="detail-box">
+                  <div className="detail-box-title">Multiple Choice Options</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+                    {Object.entries(healAssertionReasonQuestion(selectedQuestion).options).map(([k, v]: [string, any]) => {
+                      const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
+                      const markedAns = selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer;
+                      const isValidated = Boolean(valAns && valAns.toUpperCase() === k.toUpperCase());
+                      const isMarked = Boolean(markedAns && markedAns.toUpperCase() === k.toUpperCase());
+                      
+                      const rawVal = typeof v === 'string' ? v : String(v || '');
+                      const cleanVal = cleanOptionDisplay(rawVal, k);
+
+                      let border = '1px solid rgba(255, 255, 255, 0.08)';
+                      let bg = 'rgba(255, 255, 255, 0.02)';
+                      if (isValidated && isMarked) {
+                        border = '1.5px solid rgba(16, 185, 129, 0.5)';
+                        bg = 'rgba(16, 185, 129, 0.08)';
+                      } else if (isValidated) {
+                        border = '1.5px solid rgba(59, 130, 246, 0.5)';
+                        bg = 'rgba(59, 130, 246, 0.08)';
+                      } else if (isMarked) {
+                        border = '1.5px solid rgba(245, 158, 11, 0.5)';
+                        bg = 'rgba(245, 158, 11, 0.08)';
+                      }
+
                       return (
-                        <span style={{ fontSize: '0.7rem', color: selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)', fontWeight: 600 }}>
-                          {selectedQuestion.is_valid ? 'Match' : 'Mismatch'}
-                        </span>
+                        <div
+                          key={k}
+                          style={{
+                            padding: '0.85rem 1rem',
+                            background: bg,
+                            borderRadius: '10px',
+                            border: border,
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'flex-start',
+                            gap: '1rem',
+                            transition: 'all 0.2s ease'
+                          }}
+                        >
+                          <div style={{ display: 'flex', gap: '0.85rem', alignItems: 'flex-start', flex: 1 }}>
+                            <span style={{
+                              background: (isValidated && isMarked) ? '#10b981' : isValidated ? '#3b82f6' : isMarked ? '#f59e0b' : 'rgba(255, 255, 255, 0.08)',
+                              color: '#fff',
+                              fontWeight: 700,
+                              fontSize: '0.85rem',
+                              padding: '0.2rem 0.55rem',
+                              borderRadius: '6px',
+                              minWidth: '28px',
+                              textAlign: 'center',
+                              flexShrink: 0
+                            }}>
+                              {k}
+                            </span>
+                            <span
+                              style={{ fontSize: '0.96rem', lineHeight: '1.5', color: 'var(--text-secondary)', whiteSpace: 'pre-line', wordBreak: 'break-word' }}
+                              dangerouslySetInnerHTML={{ __html: renderLatex(cleanVal) }}
+                            />
+                          </div>
+                          <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
+                            {isValidated && isMarked && (
+                              <span className="pill-badge valid" style={{ padding: '0.15rem 0.55rem', fontSize: '0.7rem' }}>
+                                <Check size={11} /> Verified Match
+                              </span>
+                            )}
+                            {isValidated && !isMarked && (
+                              <span className="pill-badge processing" style={{ padding: '0.15rem 0.55rem', fontSize: '0.7rem' }}>
+                                AI Choice
+                              </span>
+                            )}
+                            {isMarked && !isValidated && (
+                              <span className="pill-badge flagged" style={{ padding: '0.15rem 0.55rem', fontSize: '0.7rem' }}>
+                                Marked Key
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* MCQ: Answer Comparison Grid */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.25rem' }}>
+                  <div className="detail-box" style={{ margin: 0 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                      <span className="detail-box-title" style={{ margin: 0 }}>Marked Exam Key</span>
+                      <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.06)', padding: '2px 6px', borderRadius: '4px' }}>Ground Truth</span>
+                    </div>
+                    <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#f8fafc', marginTop: '0.35rem' }}>
+                      {selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer || '—'}
+                    </div>
+                  </div>
+
+                  <div className="detail-box" style={{ margin: 0 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                      <span className="detail-box-title" style={{ margin: 0 }}>AI Verified Answer</span>
+                      {(() => {
+                        const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
+                        if (valAns) {
+                          return (
+                            <span style={{ fontSize: '0.7rem', color: selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)', fontWeight: 600 }}>
+                              {selectedQuestion.is_valid ? 'Match' : 'Mismatch'}
+                            </span>
+                          );
+                        }
+                        return (
+                          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.04)', padding: '2px 6px', borderRadius: '4px' }}>Offline / None</span>
+                        );
+                      })()}
+                    </div>
+                    <div style={{ 
+                      fontSize: '1.75rem', 
+                      fontWeight: 800, 
+                      color: (() => {
+                        const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
+                        if (!valAns) return 'var(--text-muted)';
+                        return selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)';
+                      })(),
+                      marginTop: '0.35rem'
+                    }}>
+                      {selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null) || '—'}
+                    </div>
+                  </div>
+                </div>
+
+                {/* MCQ: Solution / Explanation Box */}
+                <div className="detail-box">
+                  <div className="detail-box-title">Solution &amp; Explanation</div>
+                  {(selectedQuestion.explanation || selectedQuestion.answer_text) ? (
+                    <div
+                      style={{
+                        fontSize: '0.94rem',
+                        lineHeight: '1.75',
+                        color: 'var(--text-secondary)',
+                        whiteSpace: 'pre-wrap'
+                      }}
+                      dangerouslySetInnerHTML={{ __html: renderLatex(cleanExplanationDisplay(selectedQuestion.explanation || selectedQuestion.answer_text, selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer)) }}
+                    />
+                  ) : (
+                    <div style={{ fontSize: '0.88rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                      No automated explanation available for this offline question.
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Descriptive: Question Parts Box */}
+                {(() => {
+                  let rawSub = selectedQuestion.sub_parts;
+                  
+                  let parts = isValidSubparts(rawSub) ? rawSub : null;
+                  if (!parts && selectedQuestion.stem) {
+                    parts = extractSubpartsFromText(selectedQuestion.stem);
+                  }
+                  
+                  if (parts && isValidSubparts(parts)) {
+                    return (
+                      <div className="detail-box">
+                        <div className="detail-box-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            Question Parts
+                            <span style={{
+                              fontSize: '0.7rem',
+                              color: '#a78bfa',
+                              background: 'rgba(167, 139, 250, 0.1)',
+                              border: '1px solid rgba(167, 139, 250, 0.25)',
+                              padding: '2px 8px',
+                              borderRadius: '9999px',
+                              fontWeight: 600
+                            }}>Descriptive</span>
+                          </div>
+                          {(!getIntroductoryStem(selectedQuestion.stem || '', true, Object.keys(parts).sort()[0]) && selectedQuestion.token_usage) && (
+                            <span style={{ 
+                              fontSize: '0.72rem', 
+                              color: '#38bdf8', 
+                              display: 'flex', 
+                              alignItems: 'center', 
+                              gap: '4px',
+                              background: 'rgba(56, 189, 248, 0.08)',
+                              padding: '2px 8px',
+                              borderRadius: '9999px',
+                              border: '1px solid rgba(56, 189, 248, 0.2)'
+                            }} title={`Prompt: ${selectedQuestion.token_usage.prompt_tokens || 0} | Completion: ${selectedQuestion.token_usage.completion_tokens || 0}`}>
+                              <Zap size={11} />
+                              {selectedQuestion.token_usage.total_tokens || 0} tokens • {formatTokenCost(selectedQuestion.token_usage)}
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                          {Object.entries(parts).map(([k, v]: [string, any]) => {
+                            // Clean answer content from sub-part text (stop at "Answer:" marker)
+                            const rawText = typeof v === 'string' ? v : String(v || '');
+                            const answerMarkerIdx = rawText.search(/\*?\*?Answer:?\*?\*?/i);
+                            const cleanText = answerMarkerIdx > 0 ? rawText.slice(0, answerMarkerIdx).trim() : rawText.trim();
+
+                            return (
+                              <div
+                                key={k}
+                                style={{
+                                  padding: '0.85rem 1rem',
+                                  background: 'rgba(167, 139, 250, 0.04)',
+                                  borderRadius: '10px',
+                                  border: '1px solid rgba(167, 139, 250, 0.15)',
+                                  display: 'flex',
+                                  gap: '0.85rem',
+                                  alignItems: 'flex-start'
+                                }}
+                              >
+                                <span style={{
+                                  background: 'rgba(167, 139, 250, 0.15)',
+                                  color: '#c4b5fd',
+                                  fontWeight: 700,
+                                  fontSize: '0.85rem',
+                                  padding: '0.2rem 0.55rem',
+                                  borderRadius: '6px',
+                                  minWidth: '28px',
+                                  textAlign: 'center',
+                                  flexShrink: 0
+                                }}>
+                                  ({k})
+                                </span>
+                                <span
+                                  style={{ fontSize: '0.96rem', lineHeight: '1.6', color: 'var(--text-secondary)', whiteSpace: 'pre-line', wordBreak: 'break-word' }}
+                                  dangerouslySetInnerHTML={{ __html: renderLatex(cleanText) }}
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* Descriptive: Answer & Solution Box */}
+                <div className="detail-box">
+                  <div className="detail-box-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    Answer &amp; Solution
+                  </div>
+                  {(() => {
+                    // Build answer text from multiple sources
+                    let answerContent = selectedQuestion.explanation || selectedQuestion.answer_text || '';
+                    
+                    // If answer_text is empty, try to extract from sub_parts or options
+                    if (!answerContent) {
+                      const rawParts: Record<string, any> = selectedQuestion.sub_parts || selectedQuestion.options || {};
+                      const parts: Record<string, any> = isValidSubparts(rawParts) 
+                        ? rawParts 
+                        : (extractSubpartsFromText(selectedQuestion.stem) || {});
+                      for (const v of Object.values(parts)) {
+                        const text = typeof v === 'string' ? v : String(v || '');
+                        const answerIdx = text.search(/\*?\*?Answer:?\*?\*?/i);
+                        if (answerIdx >= 0) {
+                          answerContent = text.slice(answerIdx).trim();
+                          break;
+                        }
+                      }
+                    }
+                    
+                    if (answerContent) {
+                      return (
+                        <div
+                          style={{
+                            fontSize: '0.94rem',
+                            lineHeight: '1.8',
+                            color: 'var(--text-secondary)',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word'
+                          }}
+                          dangerouslySetInnerHTML={{ __html: renderLatex(cleanExplanationDisplay(answerContent, selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer)) }}
+                        />
                       );
                     }
                     return (
-                      <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.04)', padding: '2px 6px', borderRadius: '4px' }}>Offline / None</span>
+                      <div style={{ fontSize: '0.88rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                        No answer/solution available for this descriptive question.
+                      </div>
                     );
                   })()}
                 </div>
-                <div style={{ 
-                  fontSize: '1.75rem', 
-                  fontWeight: 800, 
-                  color: (() => {
-                    const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
-                    if (!valAns) return 'var(--text-muted)';
-                    return selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)';
-                  })(),
-                  marginTop: '0.35rem'
-                }}>
-                  {selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null) || '—'}
-                </div>
-              </div>
-            </div>
-
-            {/* Solution / Explanation Box */}
-            <div className="detail-box">
-              <div className="detail-box-title">Solution &amp; Explanation</div>
-              {selectedQuestion.explanation ? (
-                <div
-                  style={{
-                    fontSize: '0.94rem',
-                    lineHeight: '1.75',
-                    color: 'var(--text-secondary)',
-                    whiteSpace: 'pre-wrap'
-                  }}
-                  dangerouslySetInnerHTML={{ __html: renderLatex(selectedQuestion.explanation) }}
-                />
-              ) : (
-                <div style={{ fontSize: '0.88rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                  No automated explanation available for this offline question.
-                </div>
-              )}
-            </div>
+              </>
+            )}
           </div>
         )}
       </div>

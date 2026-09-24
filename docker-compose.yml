@@ -33,6 +33,11 @@ services:
       - MATH_OCR_ENGINE=${MATH_OCR_ENGINE:-auto}
       - ENABLE_QUESTION_OCR=${ENABLE_QUESTION_OCR:-false}
       - QUESTION_OCR_ENGINE=${QUESTION_OCR_ENGINE:-groq}
+      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID:-}
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID:-}
+      - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY:-}
+      - R2_BUCKET_NAME=${R2_BUCKET_NAME:-examportal}
+      - R2_CUSTOM_DOMAIN=${R2_CUSTOM_DOMAIN:-https://examcdn.trogon.info}
 
   frontend:
     build:

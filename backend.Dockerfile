@@ -6,6 +6,12 @@ RUN apt-get update && apt-get install -y \
     poppler-utils \
     tesseract-ocr \
     tesseract-ocr-mal \
+    fonts-lmodern \
+    fonts-texgyre \
+    fonts-stix \
+    fonts-freefont-ttf \
+    fonts-dejavu-core \
+    fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

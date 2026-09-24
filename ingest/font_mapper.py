@@ -310,6 +310,8 @@ def build_font_map_from_buffer(buffer: bytes, basefont: str) -> tuple[dict, dict
         resolution_counts = {"exact_hash": 0, "topo_sig": 0, "legacy_shree": 0}
 
         def _assign_mapping(gid, gname, text, source="exact_hash"):
+            if text in ('\u2044', '\u2215'):
+                text = '/'
             cid_to_unicode[gid] = text
             cid_to_unicode[str(gid)] = text
             cid_to_confidence[gid] = source

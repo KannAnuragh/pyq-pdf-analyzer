@@ -77,6 +77,9 @@ def _replace_math_images_in_text(text: str, engine: Optional[str] = None) -> tup
             latex, _, _ = ocr_equation_clip(img_bytes, engine=engine)
             clean_math = clean_latex_equation(latex)
             if clean_math and clean_math != "$$":
+                # If Gemini returned a Diagram/Image fallback description, REJECT it and keep the image!
+                if re.match(r'^\[\s*(?:Diagram|Image|Chart|Graph|Figure)\b', clean_math, re.IGNORECASE):
+                    continue
                 new_text = new_text[:m.start()] + f" {clean_math} " + new_text[m.end():]
                 modified = True
         except Exception as e:
@@ -222,6 +225,7 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
         ingest_result = route_and_extract(file_path)
         raw_text = ingest_result["full_text"]
         pages_metadata = ingest_result["pages"]
+        span_blocks = ingest_result.get("span_blocks", [])
         ingest_p_tokens = ingest_result["prompt_tokens"]
         ingest_c_tokens = ingest_result["completion_tokens"]
         
@@ -230,6 +234,9 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
             file_path=file_path,
             raw_text=raw_text,
             pages=pages_metadata,
+            # Layout-aware span stream: drives layout_segmenter + block_classifier
+            # when the PDF has a live text layer.  Falls back to regex when empty.
+            span_blocks=span_blocks,
             extracted_blocks=[],
             quality_scores={},
             repair_log=[],
@@ -249,8 +256,8 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
             node_name = list(event.keys())[0]
             current_full_state.update(event[node_name])
             
-            # 3. Intermediate DB Update (when extraction is done, but before slow validation)
-            if node_name == "rule_check":
+            # 3. Intermediate DB Update (when extraction and repair are done, but before validation)
+            if node_name == "repair":
                 job = db.query(models.Job).filter(models.Job.id == job_id).first()
                 if job:
                     questions = []
@@ -259,10 +266,15 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
                         marked = b.get("marked_correct_answer") or b.get("marked_answer")
                         questions.append(schemas.QuestionResult(
                             question_number=b.get("question_number", 0),
+                            question_type=b.get("question_type", "mcq"),
                             stem=b.get("stem", ""),
                             options=b.get("options", {}),
+                            sub_parts=b.get("sub_parts"),
+                            explanation=b.get("explanation"),
+                            answer_text=b.get("answer_text"),
                             marked_answer=marked,
-                            marked_correct_answer=marked
+                            marked_correct_answer=marked,
+                            page_number=b.get("page_number")
                         ))
                         
                     summary_data = current_full_state.get("summary", {"total": len(questions), "validated": 0, "flagged": 0})
@@ -288,12 +300,17 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
         # 4. Final DB Update
         job = db.query(models.Job).filter(models.Job.id == job_id).first()
         if job:
+            processed = current_full_state.get("processed_questions", [])
+            if not processed:
+                processed = current_full_state.get("extracted_blocks", [])
+
             questions = []
-            for pq in current_full_state.get("processed_questions", []):
+            for pq in processed:
                 marked = pq.get("marked_correct_answer") or pq.get("marked_answer")
-                pq["marked_correct_answer"] = marked
-                pq["marked_answer"] = marked
-                questions.append(schemas.QuestionResult(**pq))
+                pq_copy = dict(pq)
+                pq_copy["marked_correct_answer"] = marked
+                pq_copy["marked_answer"] = marked
+                questions.append(schemas.QuestionResult(**pq_copy))
                 
             summary_data = current_full_state.get("summary", {"total": 0, "validated": 0, "flagged": 0})
             token_usage_data = current_full_state.get("token_usage", {})
@@ -419,12 +436,13 @@ def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
         # Self-healing: if any question has empty options or trapped answer/explanation
         changed = False
         for q in result_obj.questions:
-            # 1. Trapped in stem when options empty or incomplete (< 4 options while trapped markers exist)
             re_separate_needed = False
-            if not q.options or len(q.options) < 4:
-                # Check if options or stem contain unseparated option markers like B), C), D)
+            is_desc = bool(q.question_type and str(q.question_type).lower().startswith("descriptive"))
+            has_sub = bool(getattr(q, "sub_parts", None))
+            # Re-separate options if options are missing or contain unseparated option markers like (c), (d)
+            if not is_desc and not has_sub and (not q.options or len(q.options) < 4):
                 combined_probe = (q.stem or "") + " " + " ".join(q.options.values() if q.options else [])
-                if any(m in combined_probe for m in ["B)", "C)", "D)", "B:-", "C:-", "D:-", "B.", "C.", "D."]):
+                if any(m in combined_probe for m in ["B)", "C)", "D)", "(b)", "(c)", "(d)", "B:-", "C:-", "D:-", "B.", "C.", "D."]):
                     re_separate_needed = True
 
             if re_separate_needed:
@@ -449,21 +467,24 @@ def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
                         q.explanation = healed_exp
                     changed = True
 
-            # 2. Trapped answer or explanation in the last option (e.g. Option D has Answer / Solution / ഉത്തരം / വിശദീകരണം)
-            if q.options:
-                last_key = sorted(q.options.keys())[-1]
-                last_val = q.options[last_key]
-                clean_opt, ans, exp = parse_trailing_meta(last_val)
-                if clean_opt != last_val:
-                    q.options[last_key] = clean_opt
-                    changed = True
-                if ans and not q.marked_answer:
-                    q.marked_answer = ans
-                    q.marked_correct_answer = ans
-                    changed = True
-                if exp and not q.explanation:
-                    q.explanation = exp
-                    changed = True
+            # 2. Separate options & answers and auto-classify question type
+            from ..ingest.option_answer_separator import clean_question_options_and_answer
+            old_opts = dict(q.options) if q.options else {}
+            old_stem = q.stem
+            old_sub = dict(q.sub_parts) if getattr(q, "sub_parts", None) else None
+            old_marked = q.marked_answer
+            old_exp = q.explanation
+            old_type = q.question_type
+
+            clean_question_options_and_answer(q)
+
+            if (q.options != old_opts or 
+                q.stem != old_stem or
+                (dict(q.sub_parts) if getattr(q, "sub_parts", None) else None) != old_sub or
+                q.marked_answer != old_marked or 
+                q.explanation != old_exp or 
+                q.question_type != old_type):
+                changed = True
 
         if changed:
             try:
@@ -472,6 +493,31 @@ def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
             except Exception as e:
                 db.rollback()
                 print(f"Warning: Failed to persist self-healed options/explanation for job {job_id}: {e}")
+
+    if result_obj:
+        # Expand anchor tokens to HTML for frontend consumption.
+        # {{IMG:url}} -> <img src="url" ...>, {{EQ:$latex$}} -> $latex$
+        # The DB stores canonical tokens; expansion happens here at the
+        # read layer so rescan/revalidate are always idempotent.
+        try:
+            from ..ingest.router import expand_anchor_tokens
+
+            def _expand_question(q):
+                if hasattr(q, "stem") and q.stem:
+                    q.stem = expand_anchor_tokens(q.stem)
+                if hasattr(q, "explanation") and q.explanation:
+                    q.explanation = expand_anchor_tokens(q.explanation)
+                if hasattr(q, "answer_text") and q.answer_text:
+                    q.answer_text = expand_anchor_tokens(q.answer_text)
+                if hasattr(q, "options") and q.options:
+                    q.options = {k: expand_anchor_tokens(v) for k, v in q.options.items()}
+                if hasattr(q, "sub_parts") and q.sub_parts:
+                    q.sub_parts = {k: expand_anchor_tokens(v) for k, v in q.sub_parts.items()}
+
+            for q in result_obj.questions:
+                _expand_question(q)
+        except Exception as _exp_err:
+            print(f"Warning: anchor token expansion failed: {_exp_err}")
 
     return schemas.JobResultResponse(
         job_id=job.id,
@@ -811,12 +857,46 @@ async def fix_question_with_ai_endpoint(
                         if q.get("question_number") == qn:
                             q["stem"] = result.get("corrected_stem", q.get("stem"))
                             q["options"] = result.get("corrected_options", q.get("options"))
+                            if "question_type" in result:
+                                q["question_type"] = result["question_type"]
+                            if "sub_parts" in result:
+                                q["sub_parts"] = result["sub_parts"]
                             q["is_valid"] = result.get("is_valid", q.get("is_valid"))
+                            if result.get("validated_answer"):
+                                q["validated_answer"] = result.get("validated_answer")
+                            elif q.get("question_type", "").startswith("descriptive"):
+                                q["validated_answer"] = None
+                                q["is_valid"] = True
+                            if not q.get("marked_correct_answer") and not q.get("marked_answer"):
+                                if result.get("validated_answer"):
+                                    q["marked_correct_answer"] = result.get("validated_answer")
+                                    q["marked_answer"] = result.get("validated_answer")
                             q["reasoning"] = result.get("reasoning", q.get("reasoning"))
-                            q["explanation"] = result.get("reasoning", q.get("explanation"))
+                            corrected_explanation = (
+                                result.get("corrected_explanation")
+                                or result.get("explanation")
+                                or q.get("explanation")
+                                or q.get("answer_text")
+                            )
+                            q["explanation"] = corrected_explanation or None
+                            q["answer_text"] = corrected_explanation or None
                             q["token_usage"] = tu
+                            q["pipeline_steps"] = {
+                                **(q.get("pipeline_steps") or {}),
+                                "send_errors_to_llms": {
+                                    "name": "send_errors_to_llms",
+                                    "label": "Send Errors to LLMs",
+                                    "status": "completed",
+                                    "details": f"AI verified answer (Agreed: Option {result.get('validated_answer')})" if result.get("is_valid") else "AI verified question."
+                                }
+                            }
                             break
                     
+                    if "summary" in result_data and isinstance(result_data["summary"], dict):
+                        result_data["summary"]["validated"] = sum(1 for qx in result_data.get("questions", []) if qx.get("is_valid"))
+                        result_data["summary"]["flagged"] = sum(1 for qx in result_data.get("questions", []) if (qx.get("validated_answer") and not qx.get("is_valid")))
+                        result_data["summary"]["unvalidated"] = sum(1 for qx in result_data.get("questions", []) if not qx.get("validated_answer"))
+
                     job.result_json = json.dumps(result_data)
                     db.commit()
             except Exception as db_err:
@@ -855,6 +935,90 @@ def convert_equations_endpoint(
         "engine": engine or "auto",
         "message": f"Progressively converting equation images to LaTeX in background using {engine or 'configured'} engine"
     }
+
+
+@router.post("/pdfs/{job_id}/revalidate")
+def revalidate_job_endpoint(job_id: str, db: Session = Depends(database.get_db)):
+    """
+    Re-runs word cleaning, font artifact removal, and AI validation on all questions of an existing job.
+    Updates Job.result_json in SQLite and returns the updated job result.
+    """
+    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.result_json:
+        raise HTTPException(status_code=400, detail="Job has no results yet")
+
+    try:
+        from ..graph.correction_node import correction_and_validation_node
+        from ..ingest.text_cleaner import clean_indic_text
+        from ..ingest.math_normalizer import is_indic_text, normalize_math_in_text
+
+        data = json.loads(job.result_json)
+        questions = data.get("questions", [])
+        if not questions:
+            return {"job_id": job_id, "result": data}
+
+        from ..ingest.option_answer_separator import clean_question_options_and_answer
+
+        # Step 1: Pre-clean all fields with deterministic text cleaner
+        for q in questions:
+            clean_question_options_and_answer(q)
+            for field in ["stem", "explanation", "answer_text", "reasoning"]:
+                val = q.get(field)
+                if val and isinstance(val, str):
+                    if is_indic_text(val):
+                        cleaned, _ = clean_indic_text(val)
+                    else:
+                        cleaned = normalize_math_in_text(val)
+                    if field in ["explanation", "answer_text"]:
+                        marked = q.get("marked_correct_answer") or q.get("marked_answer")
+                        if marked:
+                            cleaned = re.sub(rf'^\(?{marked}\)?[\s\.\:\-]+', '', cleaned).strip()
+                        cleaned = re.sub(r'^(?:Solution|Explanation|Description|Sol|Exp|Hint|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*(?:[\*\:\-]+(?:\s*|\n|$)|(?:\n|\\n))', '', cleaned, flags=re.IGNORECASE).strip()
+                    q[field] = cleaned
+            opts = q.get("options", {})
+            for k, opt_val in opts.items():
+                if isinstance(opt_val, str):
+                    if is_indic_text(opt_val):
+                        cleaned_opt, _ = clean_indic_text(opt_val)
+                    else:
+                        cleaned_opt = normalize_math_in_text(opt_val)
+                    opts[k] = cleaned_opt
+            clean_question_options_and_answer(q)
+
+        # Step 2: Run correction and validation node
+        state = {
+            "extracted_blocks": questions,
+            "job_id": job_id,
+            "pdf_path": job_id,
+            "pages": [],
+        }
+        res_state = correction_and_validation_node(state)
+        processed = res_state.get("processed_questions") or questions
+
+        for pq in processed:
+            for field in ["stem", "explanation", "answer_text", "reasoning"]:
+                pval = pq.get(field)
+                if pval and isinstance(pval, str):
+                    pq[field] = normalize_math_in_text(pval)
+            popts = pq.get("options", {})
+            if isinstance(popts, dict):
+                for pk, pv in popts.items():
+                    if isinstance(pv, str):
+                        popts[pk] = normalize_math_in_text(pv)
+            clean_question_options_and_answer(pq)
+
+        data["questions"] = processed
+        if "summary" in res_state and res_state["summary"]:
+            data["summary"] = res_state["summary"]
+        job.result_json = json.dumps(data)
+        db.commit()
+
+        return {"job_id": job_id, "result": data}
+    except Exception as e:
+        logger.error("[Routes] Failed to revalidate job %s: %s", job_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/pdfs/{job_id}/math-status")

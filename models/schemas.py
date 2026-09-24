@@ -8,6 +8,9 @@ class QuestionResult(BaseModel):
     question_number: int
     stem: str
     options: Dict[str, str]
+    question_type: Optional[str] = None  # "mcq" or "descriptive"
+    sub_parts: Optional[Dict[str, str]] = None  # For descriptive: {"a": "Draw...", "b": "Why..."}
+    answer_text: Optional[str] = None  # Full answer/solution text (for both types)
     marked_correct_answer: Optional[str] = None
     marked_answer: Optional[str] = None
     validated_answer: Optional[str] = None

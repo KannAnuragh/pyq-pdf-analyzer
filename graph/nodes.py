@@ -173,31 +173,91 @@ def _clean_json_output(content) -> str:
 
 
 MULTIMODAL_EXTRACT_PROMPT = """
-Extract all questions from this uploaded PDF document into a structured JSON array.
+Extract all questions from this uploaded PDF document into a structured JSON array for STUDENTS studying for their exams.
+The extracted questions, options, and explanations MUST make complete, clear pedagogical and grammatical sense to a student.
+
+CRITICAL STUDENT-CENTRIC READABILITY & MATH FORMATTING RULES:
+- THE USERS ARE STUDENTS: All text must read smoothly, clearly, and naturally.
+- DO NOT PUT REGULAR TEXT OR SENTENCES INSIDE LATEX MATH DELIMITERS ($...$ or $$...$$):
+  * LaTeX math mode strips all spaces and renders words in unreadable slanted italics.
+  * Explanatory prose and connecting words MUST remain normal text OUTSIDE math delimiters: write "where $h$ is Planck's constant and $e$ is the charge of an electron", NEVER "whereh $$isPlanck'sconstantande$$".
+  * EXCEPTION for Equations: If an equation inherently contains words or subscripts as words (e.g. "Power = ", "Work", or $i_{\mathrm{rms}}$), you MUST use `\text{...}` or `\mathrm{...}` inside the math block exactly as they appear in the PDF so they render in the correct font (e.g., $i_{\mathrm{rms}} = \frac{V_{\mathrm{rms}}}{R}$ or $\text{Power} = 400\text{ W}$). Do not break the equation just to keep the word out.
+- DO NOT LABEL ANYTHING IN ANSWERS AS SUBQUESTION: Numbered steps or items in answers/solutions are ANSWER/SOLUTION STEPS, NOT sub-questions! Keep all solution steps in 'explanation' / 'answer_text'. NEVER put answer steps into 'sub_parts'.
 
 CRITICAL INSTRUCTIONS:
 1. Preserve all mathematical symbols, formulas, and Greek letters as standard inline LaTeX ($...$).
-   - For example: chi-squared must be written as $\\chi^2$, t-test as 't' test or $t$-test, z-test as $z$-test, alpha as $\\alpha$, beta as $\\beta$, sigma as $\\sigma$, etc.
-   - Any inline symbols, equations, superscripts, and subscripts must be output as valid LaTeX math ($...$).
-2. Extract all options cleanly into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}.
-   - NEVER leave options (A:-, B:-, C:-, D:-) inside the question 'stem'.
-3. Extract the given 'Correct Answer' into 'marked_answer' (e.g. "A", "B", "C", "D") if present in the document.
-4. If a question contains sub-items or statements, format each on its own line in 'stem'.
-   - For matching questions (List I / List II), keep each paired row on the same line separated by a tab (\t).
-   - Within options, keep code sequences like '(a) (b) (c) (d) (e)' together on a single line; never split them into single-letter lines.
+   - For example: chi-squared must be written as $\\chi^2$, t-test as 't' test or $t$-test.
+2. DIAGRAM & IMAGE POSITIONING:
+   - Diagrams may appear before any sub-question starts (introductory question stem), inside a specific sub-question, as an option choice in an MCQ, or in the explanation/solution.
+   - Preserve all HTML image tags (e.g., <img src="..." /> or <div class="..."><img .../></div>) EXACTLY at their original position. NEVER move or delete them.
+3. Determine the structure of the question:
+   - "mcq": Has explicit multiple-choice options (e.g., A/B/C/D or 1/2/3/4). If options/choices are listed, it MUST be "mcq".
+   - "descriptive_single": A standard descriptive question with no sub-parts.
+   - "descriptive_subquestions": A descriptive question containing multiple sub-parts (e.g., (a), (b), (c) or (i), (ii)).
+4. For "mcq" questions:
+   - Extract options into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}. If an option is an image, keep the <img> tag inside that option.
+   - CRITICAL (DIFFERENTIATING OPTION LABELS FROM WORDS): When an option starts with a word that begins with the same letter as the option (e.g. Option B is "(b) Both A and B", Option A is "(a) All of the above"): NEVER strip the initial letter from the word! Option B's text MUST be "Both A and B" (NEVER "oth A and B"). Option A's text MUST be "All of the above" (NEVER "ll of the above"). Differentiate clearly between the option label (B) and the text (Both).
+   - Extract the correct answer into 'marked_answer' (e.g., "A", "B"). DO NOT solve the question yourself to guess the answer. ONLY extract it if it is explicitly provided (e.g., in an Answer Key or if the explanation starts with "(C)"). Set to null if not explicitly marked.
+   - 'sub_parts': null
+5. For "descriptive_subquestions":
+   - Extract subparts into 'sub_parts': {"a": "...", "b": "..."}.
+   - If there is introductory text/diagram before (a), keep it in 'stem'. If the question starts directly with (a), set 'stem' to "".
+   - Leave 'options': {}. Set 'marked_answer': null.
+   - Extract solution into 'answer_text' / 'explanation'.
+6. For "descriptive_single":
+   - Leave 'options': {}. Set 'sub_parts': null, 'marked_answer': null.
+7. STRICT NEGATIVE CONSTRAINTS:
+   - ONLY extract actual examination questions. Question numbers must be positive integers.
+   - NEVER extract document titles, exam headers, or syllabus outlines as questions!
+   - NEVER extract or include marks indicators like "[1 mark]" or "(2 marks)" in the extracted output.
+8. PHYSICS / SCIENCE EQUATION RULES:
+   - Vector notation: Use $\\hat{i}$, $\\hat{j}$, $\\hat{k}$ for unit vectors (î, ĵ, k̂).
+   - Greek letters MUST be in LaTeX: ε₀ → $\\epsilon_0$, σ → $\\sigma$, τ → $\\tau$, φ → $\\phi$, θ → $\\theta$, μ → $\\mu$.
+   - Scientific notation: 10⁻⁷ → $10^{-7}$, 26.4 × 10⁻¹² → $26.4 \\times 10^{-12}$.
+   - Fractions in options: a/b → $\\frac{a}{b}$, √2kqq₀/a² → $\\frac{\\sqrt{2}kqq_0}{a^2}$.
+   - Units with negative exponents: NC⁻¹ → $NC^{-1}$, Nm²C⁻¹ → $Nm^2C^{-1}$.
+   - Subscripts: q₀, r₁, r₂, ε₀ → $q_0$, $r_1$, $r_2$, $\\epsilon_0$.
+   - Superscripts: m², cm², C/m² → $m^2$, $cm^2$, $C/m^2$.
+9. ASSERTION-REASON QUESTION RULES:
+   - If a question has "Assertion (A):" and "Reason (R):" followed by (a)-(d) options about whether Assertion/Reason are true, it is ALWAYS "mcq".
+   - Put the full Assertion and Reason statements in "stem".
+   - Options (a)-(d) contain the truth-value evaluation choices (e.g. "If both Assertion and Reason are true...").
+   - NEVER classify Assertion-Reason questions as "descriptive_subquestions".
 
 Output ONLY a valid JSON array matching this schema:
 [
   {
     "question_number": 1,
+    "question_type": "mcq",
     "stem": "Question stem text here\\na. $\\\\chi^2$ test\\nb. 't' test",
     "options": {
       "A": "Option A text",
-      "B": "Option B text",
-      "C": "Option C text",
-      "D": "Option D text"
+      "B": "Option B text"
     },
-    "marked_answer": "B"
+    "sub_parts": null,
+    "marked_answer": "B",
+    "answer_text": null
+  },
+  {
+    "question_number": 2,
+    "question_type": "descriptive_subquestions",
+    "stem": "Two point charges are placed...\\n<div class=\"my-3 flex flex-col items-center\"><img src=\"...\" alt=\"diagram\" /></div>",
+    "options": {},
+    "sub_parts": {
+      "a": "Draw the surfaces.",
+      "b": "Why do they get close?"
+    },
+    "marked_answer": null,
+    "answer_text": "(a) Equipotential surfaces:\\n<img src='...' alt='diagram' />\\n(b) Because the field is stronger."
+  },
+  {
+    "question_number": 3,
+    "question_type": "descriptive_single",
+    "stem": "Calculate the length of each of the side.",
+    "options": {},
+    "sub_parts": null,
+    "marked_answer": null,
+    "answer_text": "Let l = length of each side..."
   }
 ]
 """
@@ -209,51 +269,8 @@ def parse_trailing_meta(text: str) -> tuple[str, Optional[str], Optional[str]]:
     and solution/explanation ('Solution:', 'Explanation:', 'Description:', 'വിശദീകരണം:', 'പരിഹാരം:', etc.).
     Returns (clean_text, marked_answer, explanation).
     """
-    if not text:
-        return "", None, None
-
-    clean_text = text.strip()
-    marked_answer = None
-    explanation = None
-
-    ans_pat = re.compile(
-        r"(?:^|\n|\s+)(?:Answer|Ans(?:wer)?|Correct(?:\s*Answer)?|ഉത്തരം)\s*[:\-]*\s*(?:is\s*)?(?:Option\s*[:\-]*\s*)?(?:\()?([A-D])(?:\))?\b",
-        re.IGNORECASE
-    )
-    sol_pat = re.compile(
-        r"(?:^|\n|\s+)(?:Solution|Explanation|Description|Sol|Exp|Hint|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*[:\.\-]+\s*",
-        re.IGNORECASE
-    )
-
-    ans_m = ans_pat.search(clean_text)
-    sol_m = sol_pat.search(clean_text)
-
-    if ans_m and sol_m:
-        if ans_m.start() < sol_m.start():
-            marked_answer = ans_m.group(1).upper()
-            explanation = clean_text[sol_m.end():].strip()
-            clean_text = clean_text[:ans_m.start()].strip()
-        else:
-            marked_answer = ans_m.group(1).upper()
-            explanation = (clean_text[sol_m.end():ans_m.start()] + "\n" + clean_text[ans_m.end():]).strip()
-            clean_text = clean_text[:sol_m.start()].strip()
-    elif ans_m:
-        marked_answer = ans_m.group(1).upper()
-        trailing = clean_text[ans_m.end():].strip()
-        trailing_sol_m = sol_pat.search(trailing)
-        if trailing_sol_m:
-            explanation = trailing[trailing_sol_m.end():].strip()
-        elif trailing and (trailing.lower().startswith("because") or trailing.lower().startswith("since")):
-            explanation = trailing
-        clean_text = clean_text[:ans_m.start()].strip()
-    elif sol_m:
-        explanation = clean_text[sol_m.end():].strip()
-        clean_text = clean_text[:sol_m.start()].strip()
-        ans_in_sol = re.search(r"(?:Option\s*[:\-]*\s*\(?([A-D])\)?\s*is\s*correct|\(?([A-D])\)?\s*is\s*(?:the\s*)?correct\s*(?:option|answer))", explanation, re.IGNORECASE)
-        if ans_in_sol:
-            marked_answer = (ans_in_sol.group(1) or ans_in_sol.group(2)).upper()
-
-    return clean_text, marked_answer, explanation
+    from ..ingest.option_answer_separator import parse_trailing_meta as _parse_trailing_meta
+    return _parse_trailing_meta(text)
 
 
 def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Optional[str], Optional[str]]:
@@ -272,23 +289,89 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
 
     # Heal any accidental math conversions of option markers (e.g. 1\nB:- turned into \frac{1}{B}:-)
     content = re.sub(
-        r'(?:\$?\{\\frac\{1\}\{([A-D])\}\}?|\$?\\\s*frac\s*\{\s*1\s*\}\s*\{\s*([A-D])\s*\}\$?|1\s*/\s*([A-D]))(\s*[:-]+|\s*\.|\s*\))',
-        lambda m: f"1\n{m.group(1) or m.group(2) or m.group(3)}{m.group(4)}",
+        r'(?:\$?\{\\frac\{1\}\{([A-Ha-h])\}\}?|\$?\\\s*frac\s*\{\s*1\s*\}\s*\{\s*([A-Ha-h])\s*\}\$?|1\s*/\s*([A-Ha-h]))(\s*[:-]+|\s*\.|\s*\))',
+        lambda m: f"1\n{(m.group(1) or m.group(2) or m.group(3)).upper()}{m.group(4)}",
         content
     )
 
-    opt_pattern = re.compile(r'(?:^|\n|\s+)(?:\()?([A-D])(?:\)|\.|:-)\s*')
-    matches = list(opt_pattern.finditer(content))
+    # Option detection pattern:
+    # 1. Parenthesized markers: (A), (a), (1) - can be preceded by start of line, newline, or whitespace
+    # 2. Bare letter markers: A., B., A:- - must be at line start, newline, or after 2+ spaces / sentence punctuation
+    opt_pattern = re.compile(
+        r'(?:(?:^|\n|\s+)\(([A-Ha-h1-8])\)[\.\:\-]?\s*)|'
+        r'(?:(?:^|\n|[ \t]+|\.\s+)([A-Ha-h1-8])[\.\)\:-]\s*)'
+    )
+    matches = []
+    for m in opt_pattern.finditer(content):
+        letter = m.group(1) or m.group(2)
+        start_idx = m.start(1) if m.group(1) else m.start(2)
+        prefix = content[max(0, start_idx - 35):start_idx].lower()
+        full_match = m.group(0).strip()
+        has_paren = full_match.startswith("(")
+
+        # 1. Reject candidate matches preceded by Assertion/Reason/Statement labels:
+        if re.search(r'(?:assertion|reason|statement|പ്രസ്താവന|കാരണം)[\s\:\-\*\_\(]*$', prefix, re.IGNORECASE):
+            continue
+        # 2. Reject candidate matches preceded by prepositions / linkers / points:
+        #    ONLY reject bare letters (e.g. 'between points A and B', '0.2 A.').
+        #    Parenthesized markers like '(B)' should NEVER be rejected by words like 'to', 'of', 'or'.
+        prev_word_match = re.search(r'([a-zA-Z]+)\s*(?:and\s*)?$', prefix)
+        if prev_word_match:
+            prev_word = prev_word_match.group(1).lower()
+            if not has_paren:
+                reject_words = {'both', 'between', 'from', 'and', 'or', 'is', 'are', 'was', 'were',
+                               'if', 'whether', 'that', 'when', 'where', 'of', 'in', 'for', 'with',
+                               'junction', 'terminal', 'point', 'points', 'cell', 'cells',
+                               'charge', 'charges', 'plate', 'plates', 'to'}
+                if len(prev_word) >= 2 and prev_word in reject_words:
+                    continue
+            else:
+                structural_reject = {'point', 'points', 'junction', 'terminal', 'cell', 'cells'}
+                if prev_word in structural_reject:
+                    continue
+        # 3. If bare letter (no parens), ensure it is not preceded by a number (scientific unit like '0.2 A.' or '5 V.')
+        if not has_paren and re.search(r'\d+(?:\.\d+)?\s*$', prefix):
+            continue
+        # 3.5. Reject acronyms like A.C., D.C., A.M., P.M.
+        if not has_paren:
+            match_str_no_space = m.group(0).rstrip()
+            post_str = content[m.end():m.end() + 10]
+            if match_str_no_space.endswith('.') and re.match(r'^[a-zA-Z]', content[m.end():m.end()+1]):
+                continue
+            if match_str_no_space.endswith('.') and letter.upper() in ('A', 'D', 'P', 'B', 'N'):
+                if re.match(r'^\s*[CcMmDd]\.', post_str, re.IGNORECASE):
+                    continue
+                if re.match(r'^\s*[Cc]\s', post_str, re.IGNORECASE) and letter.upper() in ('A', 'D'):
+                    continue
+        # 4. If match is immediately followed by Assertion / Reason label (e.g. "(A) Assertion:" or "(A): Assertion"):
+        post_snippet = content[m.end():m.end() + 25].strip().lower()
+        if re.match(r'^(?:[\:\.\-]+\s*)?(?:assertion|reason|statement|പ്രസ്താവന|കാരണം)\b', post_snippet, re.IGNORECASE):
+            continue
+        matches.append((letter, m))
     
     best_sequence = []
-    for i, m in enumerate(matches):
-        curr_seq = [m]
-        curr_letter = m.group(1)
+    for i, m_info in enumerate(matches):
+        letter = m_info[0].upper()
+        if letter != 'A' and letter != '1':
+            continue
+        curr_seq = [m_info]
+        curr_letter = letter
         for next_m in matches[i+1:]:
-            next_letter = next_m.group(1)
+            next_letter = next_m[0].upper()
+            
             if next_letter > curr_letter:
-                curr_seq.append(next_m)
-                curr_letter = next_letter
+                distance = next_m[1].start() - curr_seq[-1][1].end()
+                
+                # If they are absurdly far apart (e.g. > 1500 chars), it's probably a false positive list
+                if distance > 1500:
+                    continue
+                    
+                # To prevent matching random A and then a random D later, ensure gap is small
+                letter_gap = ord(next_letter) - ord(curr_letter)
+                if letter_gap <= 2: # Allow skipping at most 1 letter (e.g. A -> C if B is mangled)
+                    curr_seq.append(next_m)
+                    curr_letter = next_letter
+        
         if len(curr_seq) > len(best_sequence):
             best_sequence = curr_seq
 
@@ -298,11 +381,13 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
     explanation = None
 
     if len(best_sequence) >= 2:
-        stem = content[:best_sequence[0].start()].strip()
-        for idx, m in enumerate(best_sequence):
-            letter = m.group(1)
+        stem = content[:best_sequence[0][1].start()].strip()
+        for idx, m_info in enumerate(best_sequence):
+            # Retain original case of the match for better downstream classification
+            letter = m_info[0]
+            m = m_info[1]
             start_pos = m.end()
-            end_pos = best_sequence[idx+1].start() if idx < len(best_sequence) - 1 else len(content)
+            end_pos = best_sequence[idx+1][1].start() if idx < len(best_sequence) - 1 else len(content)
             opt_text = content[start_pos:end_pos].strip()
             
             clean_opt, ans, exp = parse_trailing_meta(opt_text)
@@ -312,21 +397,76 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
                 explanation = exp
             options[letter] = clean_opt
 
-    # Fallback 1: Flexible separator matching
+    # Fallback 1: Flexible separator matching (must also start with A and follow ascending sequence)
     if len(options) < 2:
-        fallback_pattern = re.compile(r'(?:^|\s)(?:\()?([A-D])(?:\)|\.|:-)\s*')
-        fb_matches = list(fallback_pattern.finditer(content))
+        fb_matches = []
+        for m in opt_pattern.finditer(content):
+            letter = m.group(1) or m.group(2)
+            start_idx = m.start(1) if m.group(1) else m.start(2)
+            prefix = content[max(0, start_idx - 35):start_idx].lower()
+            full_match = m.group(0).strip()
+            has_paren = full_match.startswith("(")
+            # 1. Reject candidate matches preceded by Assertion/Reason/Statement labels:
+            if re.search(r'(?:assertion|reason|statement|പ്രസ്താവന|കാരണം)[\s\:\-\*\_\(]*$', prefix, re.IGNORECASE):
+                continue
+            # 2. Reject candidate matches preceded by prepositions / linkers / points:
+            fb_prev_match = re.search(r'([a-zA-Z]+)\s*(?:and\s*)?$', prefix)
+            if fb_prev_match:
+                fb_prev_word = fb_prev_match.group(1).lower()
+                if not has_paren:
+                    fb_reject_words = {'both', 'between', 'from', 'and', 'or', 'is', 'are', 'was', 'were',
+                                       'if', 'whether', 'that', 'when', 'where', 'of', 'in', 'for', 'with',
+                                       'junction', 'terminal', 'point', 'points', 'cell', 'cells',
+                                       'charge', 'charges', 'plate', 'plates', 'to'}
+                    if len(fb_prev_word) >= 2 and fb_prev_word in fb_reject_words:
+                        continue
+                else:
+                    structural_reject = {'point', 'points', 'junction', 'terminal', 'cell', 'cells'}
+                    if fb_prev_word in structural_reject:
+                        continue
+            # 3. If bare letter (no parens), ensure it is not preceded by a number (scientific unit like '0.2 A.' or '5 V.')
+            if not has_paren and re.search(r'\d+(?:\.\d+)?\s*$', prefix):
+                continue
+            # 3.5. Reject acronyms like A.C., D.C., A.M., P.M.
+            if not has_paren:
+                match_str_no_space = m.group(0).rstrip()
+                post_str = content[m.end():m.end() + 10]
+                if match_str_no_space.endswith('.') and re.match(r'^[a-zA-Z]', content[m.end():m.end()+1]):
+                    continue
+                if match_str_no_space.endswith('.') and letter.upper() in ('A', 'D', 'P', 'B', 'N'):
+                    if re.match(r'^\s*[CcMmDd]\.', post_str, re.IGNORECASE):
+                        continue
+                    if re.match(r'^\s*[Cc]\s', post_str, re.IGNORECASE) and letter.upper() in ('A', 'D'):
+                        continue
+            # 4. If match is immediately followed by Assertion / Reason label (e.g. "(A) Assertion:" or "(A): Assertion"):
+            post_snippet = content[m.end():m.end() + 25].strip().lower()
+            if re.match(r'^(?:[\:\.\-]+\s*)?(?:assertion|reason|statement|പ്രസ്താവന|കാരണം)\b', post_snippet, re.IGNORECASE):
+                continue
+            fb_matches.append((letter, m))
         if fb_matches:
-            last_positions = {}
-            for m in fb_matches:
-                last_positions[m.group(1)] = m
-            if len(last_positions) >= 2:
-                true_option_matches = sorted(last_positions.values(), key=lambda m: m.start())
-                stem = content[:true_option_matches[0].start()].strip()
-                for i, match in enumerate(true_option_matches):
-                    opt_letter = match.group(1)
-                    start_idx = match.end()
-                    end_idx = true_option_matches[i+1].start() if i + 1 < len(true_option_matches) else len(content)
+            fb_best = []
+            for i, m_info in enumerate(fb_matches):
+                letter = m_info[0].upper()
+                if letter != 'A' and letter != '1':
+                    continue
+                curr_seq = [m_info]
+                curr_letter = letter
+                for next_m in fb_matches[i+1:]:
+                    next_letter = next_m[0].upper()
+                    if next_letter > curr_letter:
+                        letter_gap = ord(next_letter) - ord(curr_letter)
+                        if letter_gap <= 2:
+                            curr_seq.append(next_m)
+                            curr_letter = next_letter
+                if len(curr_seq) > len(fb_best):
+                    fb_best = curr_seq
+            if len(fb_best) >= 2:
+                stem = content[:fb_best[0][1].start()].strip()
+                for i, m_info in enumerate(fb_best):
+                    opt_letter = m_info[0]
+                    m = m_info[1]
+                    start_idx = m.end()
+                    end_idx = fb_best[i+1][1].start() if i + 1 < len(fb_best) else len(content)
                     opt_text = content[start_idx:end_idx].strip()
                     clean_opt, ans, exp = parse_trailing_meta(opt_text)
                     if ans and not marked_answer:
@@ -338,10 +478,19 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
     # Fallback 2: Line-based emergency extraction if options are still trapped in stem
     if len(options) < 2:
         lines = stem.split('\n')
-        opt_line_pattern = re.compile(r'^\s*(?:\()?([A-D])(?:\)|\.|:-)\s*(.*)', re.IGNORECASE)
+        opt_line_pattern = re.compile(r'^\s*(?:\()?([A-Ha-h])(?:\)|\.|:-)\s*(.*)', re.IGNORECASE)
         first_opt_idx = -1
         found_opts = {}
         for idx, line in enumerate(lines):
+            # If an explicit Answer / Solution marker is encountered, stop collecting options
+            if re.match(r'^\s*(?:\*\*\s*(?:Answer|Ans(?:wer)?|Correct(?:\s*Answer)?|Solution|Explanation|ഉത്തരം|വിശദീകരണം)\s*\*\*|\*?\*?(?:Answer|Ans(?:wer)?|Correct(?:\s*Answer)?|Solution|Explanation|ഉത്തരം|വിശദീകരണം)\*?\*?\s*(?:[\:\.\-]+|\s*$))', line, re.IGNORECASE):
+                trailing_block = '\n'.join(lines[idx:])
+                _, ans, exp = parse_trailing_meta(trailing_block)
+                if ans and not marked_answer:
+                    marked_answer = ans
+                if exp and not explanation:
+                    explanation = exp
+                break
             m_line = opt_line_pattern.match(line)
             if m_line:
                 if first_opt_idx == -1:
@@ -352,12 +501,21 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
                     marked_answer = ans
                 if exp and not explanation:
                     explanation = exp
-                found_opts[m_line.group(1).upper()] = clean_opt
+                found_opts[m_line.group(1)] = clean_opt
         if len(found_opts) >= 2:
-            options = found_opts
-            stem = '\n'.join(lines[:first_opt_idx]).strip()
+            opt_keys = [k.upper() for k in found_opts.keys()]
+            if opt_keys[0] in ('A', '1') and (len(opt_keys) == 1 or ord(opt_keys[1]) - ord(opt_keys[0]) <= 2):
+                options = found_opts
+                stem = '\n'.join(lines[:first_opt_idx]).strip()
     
-    # Check if marked answer or explanation was in the stem
+    # Check if marked answer or explanation was in full content or stem
+    if not marked_answer or not explanation:
+        _, c_ans, c_exp = parse_trailing_meta(content)
+        if c_ans and not marked_answer:
+            marked_answer = c_ans
+        if c_exp and not explanation:
+            explanation = c_exp
+
     if not marked_answer or not explanation:
         clean_stem, s_ans, s_exp = parse_trailing_meta(stem)
         if s_ans and not marked_answer:
@@ -367,54 +525,394 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
             explanation = s_exp
             stem = clean_stem
 
+    # Strip marks indicators (e.g. '[1 mark]', '[2 marks]', '(1 mark)') from stem
+    stem = re.sub(r'(?i)\s*\[\s*\d+(?:\.\d+)?(?:\s*/\s*\d+)?\s*(?:marks?|mark|m)\s*\]', '', stem)
+    stem = re.sub(r'(?i)\s*\(\s*\d+(?:\.\d+)?(?:\s*/\s*\d+)?\s*(?:marks?|mark|m)\s*\)', '', stem)
+    stem = re.sub(r'\n{3,}', '\n\n', stem).strip()
+
+    from ..ingest.option_answer_separator import separate_options_dict, heal_assertion_reason_question
+    options, marked_answer, explanation = separate_options_dict(options, marked_answer, explanation)
+    stem, options = heal_assertion_reason_question(stem, options)
+
     return stem, options, marked_answer, explanation
+
+
+def classify_question_type(options: dict, answer_text: str = None, marked_answer: str = None) -> tuple[str, Optional[dict]]:
+    """
+    Determines if a question is MCQ or descriptive.
+    """
+    from ..ingest.option_answer_separator import classify_question_type as _classify_question_type
+    return _classify_question_type(options, answer_text, marked_answer=marked_answer)
+
+
+def is_instruction_or_header(text: str) -> bool:
+    """Detects if a text snippet is exam instructions or document header rather than a question."""
+    if not text:
+        return False
+    t = text.strip()[:250].lower()
+    instruction_starters = (
+        'all questions are',
+        'each question carries',
+        'the question paper contains',
+        'the question paper consists',
+        'general instructions',
+        'instructions for candidate',
+        'instructions to candidate',
+        'candidates are required',
+        'candidate should',
+        'time allowed',
+        'maximum marks',
+        'total marks',
+        'marks are indicated',
+        'marks for each',
+        'read the following instructions',
+        'do not use calculator',
+        'use of calculator',
+        'sections in the question paper',
+        'there are 3 sections',
+        'there are 4 sections',
+        'provisional answer key',
+        'question paper code',
+        'category code',
+    )
+    return any(t.startswith(s) or f" {s}" in t or f"\n{s}" in t for s in instruction_starters)
+
+
+def is_equation_or_calculation(text: str) -> bool:
+    """Detects if text is purely an equation or calculation remnant (no natural language question)."""
+    if not text:
+        return True
+    clean = text.strip()
+    # Remove math tags / LaTeX / markdown / numbers / symbols
+    stripped = re.sub(r'\$[^$]*\$', '', clean)
+    stripped = re.sub(r'<[^>]+>', '', stripped)
+    stripped = re.sub(r'[\d\s\=\+\-\*\/\^\_\(\)\[\]\{\}\\\.\,\:\;\%\>\<\~\|\#\±\×\÷\√\∮\∴\⇒\σ\ε\ϕ\π\μ\τ]', '', stripped)
+    # If fewer than 4 alphabetic / Indic characters remain, it's not a real question
+    return len(stripped) < 4
+
+
+def looks_like_question(stem: str, options: dict = None, marked_answer: str = None, sub_parts: dict = None) -> bool:
+    """Verifies that a block possesses genuine question characteristics."""
+    check_text = (stem or "").strip()
+    if not check_text and sub_parts and isinstance(sub_parts, dict):
+        check_text = "\n".join(str(v) for v in sub_parts.values()).strip()
+    if not check_text and options and isinstance(options, dict):
+        check_text = "\n".join(str(v) for v in options.values()).strip()
+
+    if not check_text:
+        return False
+    s = check_text.lower()
+    if is_instruction_or_header(s):
+        return False
+
+    # Positive confirmations: these unconditionally qualify a question block
+    if options and len(options) >= 2:
+        return True
+    if sub_parts and len(sub_parts) >= 1:
+        return True
+    if marked_answer:
+        return True
+    if '<img' in check_text or '<svg' in check_text or 'diagram' in s:
+        return True
+    if '?' in check_text or '؟' in check_text:
+        return True
+
+    q_words = (
+        'what', 'which', 'why', 'how', 'when', 'where', 'who', 'whom',
+        'calculate', 'find', 'determine', 'explain', 'describe', 'state',
+        'prove', 'show', 'derive', 'write', 'define', 'evaluate', 'solve',
+        'assertion', 'reason', 'consider', 'choose', 'match', 'list', 'differentiate',
+        'distinguish', 'obtain', 'verify', 'establish', 'mention', 'name', 'identify',
+        'give', 'express', 'compute', 'draw', 'illustrate',
+        # Physics / Science keywords that confirm a question context
+        'torque', 'flux', 'charge', 'field', 'dipole', 'shell', 'radius', 'surface',
+        'magnitude', 'intensity', 'density', 'electric', 'magnetic', 'force', 'potential',
+        'placed', 'parallel', 'spherical', 'cylindrical', 'hollow', 'conducting',
+        'inclined', 'uniform', 'infinite', 'metallic', 'linked', 'enclosed',
+        'എത്ര', 'ഏത്', 'ഏവ', 'എങ്ങനെ', 'എന്ത്', 'ആര്', 'എവിടെ',
+        'കണ്ടെത്തുക', 'വിശദീകരിക്കുക', 'പ്രസ്താവന', 'ശരിയായത്', 'തെറ്റായത്',
+        'എഴുതുക', 'നിർവചിക്കുക', 'തെളിയിക്കുക', 'കണക്കാക്കുക', 'ചേരുംപടി'
+    )
+    if any(re.search(rf'\b{re.escape(w)}', s, re.IGNORECASE) for w in q_words):
+        return True
+    if re.search(r'\[\s*\d+\s*(?:marks?|mark|m)\s*\]|\(\s*\d+\s*(?:marks?|mark|m)\s*\)', s):
+        return True
+
+    # For text-only blocks without options, subparts, or question words, verify not just an equation artifact
+    if is_equation_or_calculation(check_text):
+        return False
+
+    clean_end = s.rstrip()
+    if not re.search(r'(?::|,|;|and|or|of|to|in|at|from|ratio|between|with|is|are)\s*$', clean_end):
+        return len(s) >= 3
+    return len(s) > 10
+
+
+def find_sequential_question_boundaries(candidates: list[dict], gap_tolerance: int = 25) -> list[dict]:
+    """
+    Scans candidates in document order and keeps only a strictly forward-moving
+    sequence of question boundaries.
+
+    Guarantees:
+    - Never reconstructs after the fact with speculative heuristic chains.
+    - Selects the true starting question (Q1) if preceded by table/code numbers.
+    - Follows an expected counter: accepting q == expected, and forward jumps up to +gap_tolerance.
+    - Protects against numbered sub-lists inside explanations/stems from triggering false question splits.
+    - Handles deliberate section restarts (e.g. 'Section B \n 1.') seamlessly.
+    """
+    if not candidates:
+        return []
+
+    # Choose optimal starting candidate: prefer candidate with q_num == 1 near document start
+    start_idx = 0
+    if candidates[0]['q_num'] != 1:
+        for idx, c in enumerate(candidates[:6]):
+            if c['q_num'] == 1 and (c.get('is_explicit') or (idx + 1 < len(candidates) and candidates[idx+1]['q_num'] in (2, 3))):
+                start_idx = idx
+                break
+
+    accepted = [candidates[start_idx]]
+    expected = candidates[start_idx]['q_num'] + 1
+
+    for c in candidates[start_idx + 1:]:
+        q = c['q_num']
+        is_explicit = c.get('is_explicit', False)
+        is_sec_restart = c.get('is_section_restart', False)
+
+        if q == expected:
+            accepted.append(c)
+            expected = q + 1
+        elif q > expected and q <= expected + gap_tolerance:
+            accepted.append(c)
+            expected = q + 1
+        elif (is_explicit or is_sec_restart) and q <= expected - 1:
+            # Deliberate section restart (e.g. Part B restarting at 1, or explicit 'Question 1:')
+            accepted.append(c)
+            expected = q + 1
+
+    return accepted
 
 
 def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list[dict]:
     """Extracts question blocks from raw text using regex with LLM fallback."""
-    extracted = []
-    
-    # 1. Determine if the document explicitly uses 'Question' or 'Q' markers
-    explicit_matches = list(re.finditer(r'(?i)(?:^|\n|\s+)\s*(?:Question\s*|Q\.?\s*)(\d+)\s*(?::\-?|[\.\):-])\s*', raw_text))
-    if len(explicit_matches) >= 3:
-        # Document uses explicit Question/Q markers (e.g. 'Question 1:-', 'Question20:-', 'Q.1:')
-        q_prefix_pattern = r'(?:Question\s*|Q\.?\s*)\d+\s*(?::\-?|[\.\):-])\s*'
-        q_extract_pattern = r'^(?:Question\s*|Q\.?\s*)(\d+)\s*(?::\-?|[\.\):-])\s*(.*)'
-        blocks = re.split(fr'(?:\n|\s+|^)(?={q_prefix_pattern})', raw_text, flags=re.MULTILINE | re.IGNORECASE)
-    else:
-        # Fallback for documents with simple numeric numbering (e.g. '1. ', '2. ', '1) ')
-        q_prefix_pattern = r'\d+\s*(?:[\.\)]|:-)\s+'
-        q_extract_pattern = r'^(\d+)\s*(?:[\.\)]|:-)\s+(.*)'
-        blocks = re.split(fr'\n(?={q_prefix_pattern})|^(?={q_prefix_pattern})', raw_text, flags=re.MULTILINE | re.IGNORECASE)
-    
-    for block in blocks:
-        block = block.strip()
-        if not block:
+    if not raw_text or not raw_text.strip():
+        return []
+
+    bad_prev_words = {
+        'section', 'part', 'class', 'unit', 'chapter', 'table', 'figure', 'fig',
+        'date', 'time', 'marks', 'mark', 'page', 'code', 'no', 'sl', 'step', 'case',
+        'ratio', 'between', 'and', 'or', 'of', 'to', 'in', 'at', 'from', 'with', 'is', 'are', 'was', 'were', 'by'
+    }
+
+    # Unified question matching:
+    # 1. Explicit markers: Question, Q, Q.No., Sl.No., Problem, Prob., ചോദ്യം, പ്രശ്നം
+    explicit_pat = re.compile(
+        r'(?:^|\n)\s*[\*\_]*(?:Question\s*(?:No\.?)?|Q\.?\s*(?:No\.?)?|Sl\.?\s*No\.?|Problem\s*|Prob\.?\s*|ചോദ്യം\s*|പ്രശ്നം\s*)[\*\_]*(\d{1,3})\s*[\*\_]*(?::\-?|[\.\):-])\s*[\*\_]*(?=\s+[^\=\+\-\*\/]|\s*$)',
+        re.IGNORECASE
+    )
+    # 2. Parenthesized or bracketed numbers at line start: (1) ... or [1] ...
+    paren_pat = re.compile(
+        r'(?:^|\n)\s*[\*\_]*[\(\[]\s*(\d{1,3})\s*[\)\]]\s*[\.\:\-]?\s*[\*\_]*(?=[^\d\s\=\+\-\*\/]|\s+[^\=\+\-\*\/])',
+        re.IGNORECASE
+    )
+    # 3. Bare numbers at line start: 1. or 1) or 1:-
+    num_pat = re.compile(
+        r'(?:^|\n)([ \t]*)[\*\_]*(\d{1,3})[\*\_]*\s*(?:[\.\)]|:-)\s*[\*\_]*(?=[^\d\s\=\+\-\*\/]|\s+[^\=\+\-\*\/])',
+        re.IGNORECASE
+    )
+
+    all_raw_matches = []
+    # Collect explicit matches
+    for m in explicit_pat.finditer(raw_text):
+        all_raw_matches.append((m.start(), m.end(), int(m.group(1)), m, True))
+
+    # Collect parenthesized matches
+    for m in paren_pat.finditer(raw_text):
+        all_raw_matches.append((m.start(), m.end(), int(m.group(1)), m, False))
+
+    # Collect bare number matches
+    for m in num_pat.finditer(raw_text):
+        all_raw_matches.append((m.start(), m.end(), int(m.group(2)), m, False))
+
+    # Deduplicate overlapping matches by start position, prioritizing explicit matches
+    all_raw_matches.sort(key=lambda x: (x[0], -1 if x[4] else 0))
+    deduped_matches = []
+    occupied_spans = []
+    for start, end, q_num, m, is_exp in all_raw_matches:
+        overlap = any(not (end <= s or start >= e) for s, e in occupied_spans)
+        if not overlap:
+            occupied_spans.append((start, end))
+            deduped_matches.append((start, end, q_num, m, is_exp))
+
+    # Filter candidate matches against invalid preceding words / punctuation
+    #
+    # NOTE: the "does the preceding text end with trailing-off punctuation"
+    # checks below (':', '-', '/', '>', etc.) were written to catch a number
+    # that's really part of an equation or a hyphenated fragment (e.g.
+    # "...ratio 4-" should not become "Question 4"). But the inline equation
+    # /diagram images this pipeline generates for numeric answers are HTML
+    # tags like <img ... class="inline-math-img" style="..." />, and that
+    # markup's own closing "/>" is made of exactly the same characters
+    # ('/' and '>') the filter is watching for. A REAL question marker that
+    # happens to follow an equation image in the raw text — e.g. Q3's answer
+    # "5 x 10^5 V/m" rendered as an inline image, immediately followed by
+    # "4. In the given figure..." — gets its trailing "/>" mistaken for
+    # trailing-off prose and the genuine Q4 marker is silently rejected as a
+    # candidate. Its entire content then gets absorbed into the PRECEDING
+    # question's block instead of becoming its own question. Strip a
+    # trailing HTML tag remnant before applying the punctuation check so the
+    # markup's own syntax can't be confused with real prose punctuation.
+    candidates = []
+    prev_end = 0
+    for start, end, q_num, m, is_exp in deduped_matches:
+        if q_num < 1 or q_num > 300:
             continue
-            
-        # Match question number
-        q_match = re.match(q_extract_pattern, block, flags=re.DOTALL | re.IGNORECASE)
-        if not q_match:
+
+        # Check intervening text between previous candidate's end and this one for section headers
+        intervening = raw_text[prev_end:start]
+        sec_match = re.search(r'(?i)\b(?:section|part|group|വിഭാഗം|ഖണ്ഡിക)\s*[-:]?\s*([A-Za-z0-9]+)', intervening)
+        is_sec_restart = bool(sec_match)
+        sec_name = sec_match.group(0).strip() if sec_match else None
+
+        if not is_exp:
+            # Clean preceding text of all HTML comments (<!--...-->) and tags (<...>)
+            preceding_raw = raw_text[max(0, start - 150):start]
+            preceding_clean = re.sub(r'<!--.*?-->', '', preceding_raw, flags=re.DOTALL)
+            preceding_clean = re.sub(r'<[^>]+>', '', preceding_clean)
+
+            # Check if match begins on a new line (starts with \n, or start is at 0, or preceding char was \n)
+            matched_str = m.group(0)
+            is_new_line = matched_str.startswith('\n') or start == 0 or (start > 0 and raw_text[start - 1] == '\n')
+
+            if is_new_line:
+                # Candidate starts on a new line!
+                # Examine the preceding non-empty line
+                lines = [l.strip() for l in preceding_clean.split('\n') if l.strip()]
+                if lines:
+                    prev_line = lines[-1]
+                    # Check 1: Incomplete math operators or word hyphenation at end of previous line
+                    if prev_line.endswith(('=', '+', '*', '/', '^')) or re.search(r'[a-zA-Z]-$', prev_line):
+                        continue
+                    # Check 2: Trailing ratio / math continuation (e.g. "...in the ratio 2 : \n 3.")
+                    if re.search(r'\b(?:ratio|between|equals?|equal\s+to)\s*(?:of\s*)?(?:\d+\s*)?[:=]?\s*$', prev_line, re.IGNORECASE):
+                        continue
+            else:
+                # Candidate has text on the SAME line preceding it (e.g. "Figure 1", "Table 2", "ratio 2 : 3")
+                same_line_prefix = preceding_clean.split('\n')[-1].strip()
+                if same_line_prefix:
+                    same_line_words = same_line_prefix.split()
+                    last_word = same_line_words[-1].rstrip('.:-').lower() if same_line_words else ''
+                    if last_word in bad_prev_words:
+                        continue
+                    if same_line_prefix.endswith((':', ',', ';', '-', '–', '—', '=', '+', '*', '/', '^', '>', '<')):
+                        continue
+
+        snippet = raw_text[end:end + 200].strip()
+        if is_instruction_or_header(snippet):
             continue
-            
-        q_num = int(q_match.group(1))
-        content = q_match.group(2)
-        
-        stem, options, marked_answer, explanation = separate_stem_and_options(content)
-        
-        extracted.append({
-            "question_number": q_num,
-            "stem": stem,
-            "options": options,
-            "marked_answer": marked_answer,
-            "explanation": explanation
+
+        candidates.append({
+            'match': m,
+            'q_num': q_num,
+            'start': start,
+            'end': end,
+            'is_explicit': is_exp,
+            'is_section_restart': is_sec_restart,
+            'section_name': sec_name,
         })
-        
-    extracted.sort(key=lambda x: x["question_number"])
+        prev_end = end
+
+    candidates.sort(key=lambda x: x['start'])
+    valid_candidates = find_sequential_question_boundaries(candidates) if candidates else []
+    if not valid_candidates and candidates:
+        valid_candidates = candidates
+
+    blocks = []
+    if valid_candidates:
+        for i, c in enumerate(valid_candidates):
+            start_idx = c['end']
+            end_idx = valid_candidates[i+1]['start'] if i + 1 < len(valid_candidates) else len(raw_text)
+            block_content = raw_text[start_idx:end_idx].strip()
+            if block_content:
+                page_markers = list(re.finditer(r'<!--QAI_PAGE:(\d+)-->', raw_text[:c["start"]]))
+                blocks.append({
+                    "q_num": c["q_num"],
+                    "content": block_content,
+                    "page_number": int(page_markers[-1].group(1)) if page_markers else None,
+                    "section_name": c.get("section_name"),
+                })
+
+    extracted = []
+    for block_data in blocks:
+        q_num = block_data["q_num"]
+        content = block_data["content"]
+        page_number = block_data.get("page_number")
+        section_name = block_data.get("section_name")
+
+        stem, options, marked_answer, explanation = separate_stem_and_options(content)
+        question_type, sub_parts = classify_question_type(options, explanation, marked_answer=marked_answer)
+
+        # If sub_parts not found from options, try extracting from stem (for descriptive questions)
+        if not sub_parts and stem and question_type != "mcq":
+            from ..ingest.option_answer_separator import extract_subparts_from_text, is_valid_subparts
+            extracted_sub = extract_subparts_from_text(stem)
+            if extracted_sub and is_valid_subparts(extracted_sub):
+                sub_parts = extracted_sub
+                question_type = "descriptive_subquestions"
+
+        # If sub_parts exists and is valid, extract only the introductory stem (strip sub-questions out of stem)
+        # to guarantee ZERO DUPLICATION of question text in both stem and sub_parts!
+        if sub_parts and stem:
+            first_key = sorted(sub_parts.keys())[0]
+            fk_esc = re.escape(first_key)
+            first_sub_pattern = re.compile(
+                rf'(?:(?:^|\n|\s{{2,}}|\.\s+)\([{fk_esc}{fk_esc.upper()}]\)\s*)|'
+                rf'(?:(?:^|\n|[ \t]{{2,}}|\.\s+)[{fk_esc}{fk_esc.upper()}][\.\)\:-]\s*)'
+            )
+            m_sub = first_sub_pattern.search(stem)
+            if m_sub:
+                intro = stem[:m_sub.start()].strip()
+                if re.match(r"^(?:question\s*\d*|q\d*|ചോദ്യം\s*\d*|[\d\.\:\-\s])*$", intro, re.IGNORECASE):
+                    stem = ""
+                else:
+                    stem = intro
+
+        # Build answer_text from explanation or from the answer section
+        answer_text = explanation
+        q_options = {k.upper(): v for k, v in options.items()} if question_type == "mcq" else {}
+
+        # Validate that stem/block looks like a genuine question (with safety net for accepted boundaries)
+        looks_ok = looks_like_question(stem, q_options, marked_answer, sub_parts=sub_parts)
+        if not looks_ok and len(content.strip()) >= 3 and not is_instruction_or_header(content):
+            looks_ok = True
+
+        if looks_ok:
+            extracted.append({
+                "question_number": q_num,
+                "stem": stem,
+                "options": q_options,
+                "question_type": question_type,
+                "sub_parts": sub_parts,
+                "answer_text": answer_text,
+                "marked_answer": marked_answer if question_type == "mcq" else None,
+                "marked_correct_answer": marked_answer if question_type == "mcq" else None,
+                "explanation": explanation,
+                "page_number": page_number,
+                "section": section_name,
+            })
+
+    # If duplicate question numbers exist (e.g. Section A: 1..5 and Section B: 1..5),
+    # renumber sequentially to guarantee unique IDs downstream while saving original_question_number
+    seen_qnums = set()
+    has_duplicate_qnums = any(q["question_number"] in seen_qnums or seen_qnums.add(q["question_number"]) for q in extracted)
+    if has_duplicate_qnums:
+        for idx, q in enumerate(extracted, start=1):
+            q["original_question_number"] = q["question_number"]
+            q["question_number"] = idx
     print(f"Regex parser extracted {len(extracted)} questions.", flush=True)
-    
+
     avg_length = sum(len(re.sub(r'<[^>]+>', '', b["stem"])) for b in extracted) / max(1, len(extracted))
-    
+
     # Fallback to LLM if regex fails (extracts very few questions or creates huge malformed blocks)
     if len(extracted) == 0 or (len(raw_text) > 1000 and len(extracted) < 2) or avg_length > 1500:
         llm = get_extract_llm()
@@ -423,22 +921,49 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
             prompt = EXTRACT_PROMPT.replace("{text}", raw_text)
             try:
                 response = llm.invoke([HumanMessage(content=prompt)])
-                
+
                 # Track fallback tokens
                 p_tokens = response.usage_metadata.get("input_tokens", 0) if hasattr(response, "usage_metadata") and response.usage_metadata else 0
                 c_tokens = response.usage_metadata.get("output_tokens", 0) if hasattr(response, "usage_metadata") and response.usage_metadata else 0
-                
+
                 if token_tracker is not None:
                     token_tracker["prompt_tokens"] = token_tracker.get("prompt_tokens", 0) + p_tokens
                     token_tracker["completion_tokens"] = token_tracker.get("completion_tokens", 0) + c_tokens
                     token_tracker["total_tokens"] = token_tracker.get("total_tokens", 0) + (p_tokens + c_tokens)
-                
+
                 cleaned = _clean_json_output(response.content)
-                extracted = json.loads(cleaned)
-                if isinstance(extracted, dict) and "questions" in extracted:
-                    extracted = extracted["questions"]
-                elif not isinstance(extracted, list):
-                    extracted = [extracted]
+                fallback_extracted = json.loads(cleaned)
+                if isinstance(fallback_extracted, dict) and "questions" in fallback_extracted:
+                    fallback_extracted = fallback_extracted["questions"]
+                elif not isinstance(fallback_extracted, list):
+                    fallback_extracted = [fallback_extracted]
+
+                # IMPORTANT: the regex-first path above always routes options/stem through
+                # separate_stem_and_options() -> separate_options_dict() before a question
+                # is ever appended. This Gemini-fallback branch used to skip that entirely —
+                # it took the LLM's JSON as final, structured truth. In practice the LLM
+                # regularly fails to draw the stem/answer boundary on descriptive questions
+                # (dumping the whole "Answer:"/solution block into `stem`) and can emit
+                # structurally broken LaTeX in option text. Route every fallback question
+                # through the SAME deterministic cleaning pass the regex path gets, so no
+                # extraction path can ship an unvalidated record.
+                from ..ingest.option_answer_separator import clean_question_options_and_answer
+
+                valid_fallback = []
+                for q in fallback_extracted:
+                    if not isinstance(q, dict):
+                        continue
+                    clean_question_options_and_answer(q)
+                    qn = q.get("question_number", 0)
+                    qst = q.get("stem", "")
+                    qopt = q.get("options", {})
+                    qsub = q.get("sub_parts")
+                    qans = q.get("marked_answer") or q.get("marked_correct_answer")
+                    if qn >= 1 and looks_like_question(qst, qopt, qans, sub_parts=qsub):
+                        valid_fallback.append(q)
+
+                if valid_fallback:
+                    extracted = valid_fallback
                 print(f"Successfully extracted {len(extracted)} questions using Gemini fallback.", flush=True)
             except Exception as e:
                 print(f"Extraction fallback failed with Gemini: {e}", flush=True)
@@ -450,10 +975,79 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
 
 
 def extract_node(state: GraphState) -> GraphState:
-    """Extracts question blocks from raw text using a lightweight Regex parser."""
+    """
+    Extracts question blocks from the PDF using the layout-aware pipeline
+    when span_blocks are available, or the existing regex/LLM path otherwise.
+
+    Layout-aware path (PDFs with a live text layer):
+        1. segment_questions(span_blocks) -- structural boundary detection via
+           font size, bold flag, and x-indent (not pattern matching on flat text)
+        2. classify_block_with_llm(segment, llm) per segment -- schema-constrained
+           LLM call that reads layout hints and handles "A.C. current" correctly
+        3. Falls back to separate_stem_and_options on any per-segment LLM failure
+
+    Regex/LLM fallback path (scanned/OCR-only PDFs, or when span_blocks is empty):
+        parse_questions_from_text(raw_text) -- unchanged from the previous pipeline
+    """
     raw_text = state.get("raw_text", "")
+    span_blocks = state.get("span_blocks") or []
+
     if "token_usage" not in state:
         state["token_usage"] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    if span_blocks:
+        print(f"[extract_node] Layout-aware path: {len(span_blocks)} span elements.", flush=True)
+        try:
+            from ..ingest.layout_segmenter import segment_questions
+            from ..ingest.block_classifier import classify_block_with_llm
+
+            segments = segment_questions(span_blocks)
+            print(f"[extract_node] Segmenter found {len(segments)} question segments.", flush=True)
+
+            if segments:
+                llm = get_extract_llm()
+                extracted = []
+                for seg in segments:
+                    q = classify_block_with_llm(seg, llm)
+                    if q:
+                        q["question_number"] = seg.q_num
+                        q.setdefault("page_number", seg.page)
+                        q.setdefault("section", seg.section)
+                        # Ensure required keys are present for downstream nodes
+                        q.setdefault("question_type", "descriptive_single")
+                        q.setdefault("sub_parts", None)
+                        q.setdefault("options", {})
+                        q.setdefault("marked_answer", None)
+                        q.setdefault("marked_correct_answer", None)
+                        q.setdefault("explanation", None)
+                        q.setdefault("answer_text", q.get("explanation"))
+                        extracted.append(q)
+
+                # De-duplicate and re-number if section restarts caused duplicates
+                seen_qnums: set = set()
+                has_dup = any(
+                    q["question_number"] in seen_qnums
+                    or seen_qnums.add(q["question_number"])  # type: ignore[func-returns-value]
+                    for q in extracted
+                )
+                if has_dup:
+                    for idx, q in enumerate(extracted, start=1):
+                        q["original_question_number"] = q["question_number"]
+                        q["question_number"] = idx
+
+                print(f"[extract_node] Layout-aware extraction produced {len(extracted)} questions.", flush=True)
+                return {"extracted_blocks": extracted, "token_usage": state.get("token_usage", {})}
+
+            # Segmenter found no boundaries — fall through to regex path
+            print("[extract_node] Segmenter found 0 segments, falling back to regex path.", flush=True)
+
+        except Exception as e:
+            print(f"[extract_node] Layout-aware path failed ({e}), falling back to regex path.", flush=True)
+            import traceback as _tb
+            _tb.print_exc()
+
+    # --- Existing regex / LLM fallback path (unchanged) ---
+    print("[extract_node] Using regex/LLM path.", flush=True)
     extracted = parse_questions_from_text(raw_text, state["token_usage"])
     return {"extracted_blocks": extracted, "token_usage": state.get("token_usage", {})}
 
@@ -932,37 +1526,84 @@ def repair_node(state: GraphState) -> GraphState:
 
 
 def rule_check_node(state: GraphState) -> GraphState:
-    """Filters out malformed questions and dedups."""
+    """Filters out malformed questions, invalid numbers (e.g. Q0), non-questions, and dedups."""
     blocks = state.get("extracted_blocks", [])
-    valid_blocks = []
-    seen_numbers = set()
-    
-    for b in blocks:
-        if not isinstance(b, dict):
-            continue
-        q_num = b.get("question_number")
-        if q_num in seen_numbers:
-            continue
-            
-        options = b.get("options", {})
-        marked_ans = b.get("marked_answer")
-        
-        if isinstance(options, dict) and options and marked_ans:
-            if marked_ans not in options:
-                found = False
-                for k in options:
-                    if str(k).upper() == str(marked_ans).upper():
-                        b["marked_answer"] = k
-                        found = True
-                        break
-                if not found:
-                    b["marked_answer"] = marked_ans
+    processed = state.get("processed_questions", [])
+
+    def _filter_and_dedup(items: list[dict]) -> list[dict]:
+        valid_items = []
+        seen = {}
+        for b in items:
+            if not isinstance(b, dict):
+                continue
+            q_num = b.get("question_number")
+            if q_num is None or q_num < 1:
+                continue
+            stem = b.get("stem", "")
+            options = b.get("options", {})
+            marked_ans = b.get("marked_correct_answer") or b.get("marked_answer")
+
+            sub_parts = b.get("sub_parts")
+            # Check if this item is a genuine question
+            if not looks_like_question(stem, options, marked_ans, sub_parts=sub_parts):
+                if len(stem.strip()) < 3:
+                    continue
+
+            # Standardize marked_answer
+            if isinstance(options, dict) and options and marked_ans:
+                if marked_ans not in options:
+                    for k in options:
+                        if str(k).upper() == str(marked_ans).upper():
+                            b["marked_answer"] = k
+                            if "marked_correct_answer" in b:
+                                b["marked_correct_answer"] = k
+                            break
+
+            # Deduplication: ONLY deduplicate if the item is a true duplicate (identical or near-identical stem)
+            if q_num in seen:
+                prev_idx = seen[q_num]
+                prev_b = valid_items[prev_idx]
+                prev_stem_clean = re.sub(r'\s+', ' ', prev_b.get("stem", "")).strip().lower()
+                curr_stem_clean = re.sub(r'\s+', ' ', stem).strip().lower()
+                is_same_stem = (prev_stem_clean == curr_stem_clean or 
+                                (len(prev_stem_clean) > 20 and prev_stem_clean[:50] == curr_stem_clean[:50]))
                 
-        seen_numbers.add(q_num)
-        valid_blocks.append(b)
-        
-    print(f"Rule check validated {len(valid_blocks)} out of {len(blocks)} blocks.", flush=True)
-    return {"extracted_blocks": valid_blocks}
+                if is_same_stem:
+                    # True duplicate: prefer version with options or longer stem
+                    prev_has_opts = bool(prev_b.get("options"))
+                    curr_has_opts = bool(options)
+                    if curr_has_opts and not prev_has_opts:
+                        valid_items[prev_idx] = b
+                    elif len(stem) > len(prev_b.get("stem", "")):
+                        valid_items[prev_idx] = b
+                else:
+                    # Different stems sharing a question number: do NOT overwrite! Append as separate question!
+                    valid_items.append(b)
+            else:
+                seen[q_num] = len(valid_items)
+                valid_items.append(b)
+
+        return valid_items
+
+    valid_blocks = _filter_and_dedup(blocks)
+    valid_processed = _filter_and_dedup(processed) if processed else []
+
+    # Safeguard: If valid_processed is empty but valid_blocks has items, fallback to valid_blocks
+    if not valid_processed and valid_blocks:
+        valid_processed = [dict(b) for b in valid_blocks]
+
+    # Keep summary in sync
+    summary = state.get("summary", {})
+    if summary:
+        summary["total"] = len(valid_processed) if valid_processed else len(valid_blocks)
+
+    print(f"Rule check validated {len(valid_blocks)} extracted blocks and {len(valid_processed)} processed questions.", flush=True)
+    return {
+        "extracted_blocks": valid_blocks,
+        "processed_questions": valid_processed,
+        "summary": summary
+    }
+
 
 def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Optional[str] = None):
     """Uses Groq Vision, Gemini Vision, or Local Tesseract OCR to re-extract a specific question accurately."""
@@ -1006,11 +1647,18 @@ def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Opt
             # Strip leading question number if present in stem (e.g. '12.' or '12:-')
             stem = re.sub(rf'^(?:Question\s*|Q\.?\s*)?{question_number}\s*[\.\):-]\s*', '', stem, flags=re.IGNORECASE).strip()
 
+            question_type, sub_parts = classify_question_type(options or {}, explanation)
+            q_options = (options or {}) if question_type == "mcq" else {}
+
             data = {
                 "question_number": question_number,
                 "stem": stem or raw_text,
-                "options": options or {},
+                "options": q_options,
+                "question_type": question_type,
+                "sub_parts": sub_parts,
+                "answer_text": explanation,
                 "marked_answer": marked_ans,
+                "marked_correct_answer": marked_ans,
                 "explanation": explanation
             }
             return data, 0, 0
@@ -1019,28 +1667,37 @@ def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Opt
             raise
 
     prompt = """
-Extract ONLY Question {question_number} from this page exactly as it appears.
+Extract ONLY Question {question_number} from this page exactly as it appears for STUDENTS studying for exams.
+The text must make complete, clear pedagogical and grammatical sense to a student.
 CRITICAL INSTRUCTIONS:
-1. Transcribe and preserve all mathematical equations, fractions, formulas, and symbols into standard inline LaTeX ($...) or display LaTeX ($$...$$), just like non-image math equations (e.g. $\frac{1}{2}$, $\sqrt{x^2+y^2}$, $x^2$, $\chi^2$). For multiplication, ALWAYS use LaTeX `\times` (e.g., $96 = 2^5 \times 3$, $404 = 2^2 \times 101$). Never use the letter 'x' or 'x^3' for multiplication! Preserve punctuation (commas, periods) between separate equations. Never output raw image tags or placeholders for mathematical formulas.
-2. Extract all options into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}.
-   - NEVER include options (e.g. A:-, B:-, C:-, D:-) or option contents inside the question 'stem'.
-3. Extract the given 'Correct Answer' into 'marked_answer' if present (e.g. if an option letter or option text is highlighted in yellow/color, marked with a tick mark, circled, or explicitly printed as answer / ഉത്തരം). Set to null if not marked.
-4. Extract the given 'Solution', 'Explanation', or 'Description' into 'explanation' if present below the question or options (e.g. 'Solution:', 'Explanation:', 'Description:', 'വിശദീകരണം:', 'പരിഹാരം:'). Set to null if not present in the document.
-5. For matching questions (List-I / List-II), preserve the two-column table using tabs or clear alignment. Keep matching option codes (e.g. '(a) (b) (c) (d) (e)') together on one line within each option, DO NOT break them into individual single-letter lines.
+1. Transcribe and preserve all mathematical equations, fractions, formulas, and symbols into standard inline LaTeX ($...) or display LaTeX ($$...$$).
+   - DO NOT put regular English or Malayalam sentences or words inside math delimiters ($...$ or $$...$$). Words inside math mode lose spaces and become unreadable (e.g. `isPlanck'sconstantande`).
+   - Explanatory phrases must remain normal text outside math mode: write "where $h$ is Planck's constant and $e$ is the charge of an electron", never "whereh $$isPlanck'sconstantande$$".
+   - Keep spaces between words and variables (write "where $h$", not "whereh").
+2. Preserve all HTML image tags (e.g., <img src="..." />) EXACTLY as they appear in the text. NEVER remove or modify them.
+3. Determine if the question is "mcq" (Multiple Choice) or "descriptive".
+4. For "mcq" questions:
+   - Extract options into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}.
+   - Extract the correct answer into 'marked_answer'.
+   - Extract any solution or explanation into 'explanation'.
+5. For "descriptive" questions (no A/B/C/D choices, often with sub-questions like (a), (b)):
+   - Keep the entire question, including sub-questions, inside the 'stem'.
+   - Extract the provided solution, answer, or diagrams into 'answer_text'. Make sure to include any <img> tags that are part of the answer!
+   - Leave 'options' empty.
 6. Transcribe Malayalam and Indic text faithfully into standard Unicode script. Do not invent or summarize.
 
 Output ONLY a valid JSON object exactly matching this schema, with no markdown code blocks or extra text:
 {
   "question_number": {question_number},
+  "question_type": "mcq",
   "stem": "Question stem text here\\na. $\\chi^2$ test\\nb. 't' test",
   "options": {
     "A": "Option A text",
-    "B": "Option B text",
-    "C": "Option C text",
-    "D": "Option D text"
+    "B": "Option B text"
   },
   "marked_answer": "B",
-  "explanation": "Solution or explanation text here"
+  "explanation": "Solution or explanation text here",
+  "answer_text": null
 }
 """.replace("{question_number}", str(question_number))
     # --- Engine 2: Groq Vision ---
@@ -1115,6 +1772,7 @@ def _solve_single_block(b: dict, total: int = 1) -> dict:
     q_num = b.get("question_number", "?")
     stem = b.get("stem", "")
     options = b.get("options", {})
+    explanation = b.get("explanation") or b.get("answer_text") or ""
     marked = b.get("marked_correct_answer") or b.get("marked_answer")
 
     try:
@@ -1154,7 +1812,12 @@ def _solve_single_block(b: dict, total: int = 1) -> dict:
             "_c_tokens": 0
         }
 
-    prompt = SOLVE_PROMPT.replace("{stem}", stem).replace("{options}", json.dumps(options))
+    prompt = (
+        SOLVE_PROMPT
+        .replace("{stem}", stem)
+        .replace("{options}", json.dumps(options))
+        .replace("{explanation}", explanation)
+    )
     p_tokens, c_tokens = 0, 0
     try:
         from langchain_core.messages import HumanMessage
@@ -1169,6 +1832,24 @@ def _solve_single_block(b: dict, total: int = 1) -> dict:
         validated_answer = solve_result.get("validated_answer")
         confidence = solve_result.get("confidence", "medium")
         reasoning = solve_result.get("reasoning", "")
+        corrected_explanation = solve_result.get("corrected_explanation") or explanation
+        try:
+            from ..ingest.option_answer_separator import strip_subquestion_labels_from_answer
+            corrected_explanation = strip_subquestion_labels_from_answer(corrected_explanation)
+        except Exception:
+            pass
+
+        try:
+            from ..ingest.math_normalizer import normalize_math_in_text
+            import re
+            if corrected_explanation:
+                corrected_explanation = re.sub(r'<(?!img\b|\/?div\b)[^>]+>', '', corrected_explanation)
+                corrected_explanation = normalize_math_in_text(corrected_explanation)
+            if reasoning:
+                reasoning = re.sub(r'<(?!img\b|\/?div\b)[^>]+>', '', reasoning)
+                reasoning = normalize_math_in_text(reasoning)
+        except Exception:
+            pass
         
         is_valid = (str(validated_answer).strip().upper() == str(marked).strip().upper()) if marked and validated_answer else False
         return {
@@ -1179,6 +1860,8 @@ def _solve_single_block(b: dict, total: int = 1) -> dict:
             "is_valid": is_valid,
             "confidence": confidence,
             "reasoning": reasoning,
+            "explanation": corrected_explanation,
+            "answer_text": corrected_explanation,
             "used_web_search": False,
             "_p_tokens": p_tokens,
             "_c_tokens": c_tokens
@@ -1195,4 +1878,3 @@ def _solve_single_block(b: dict, total: int = 1) -> dict:
             "_p_tokens": p_tokens,
             "_c_tokens": c_tokens
         }
-

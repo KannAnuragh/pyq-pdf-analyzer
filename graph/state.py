@@ -32,6 +32,11 @@ class GraphState(TypedDict):
     file_path: Optional[str]
     raw_text: str
     pages: List[PageMetadata]                   # per-page extraction metadata
+    # Layout-aware span stream from extract_text_from_pdf (list of LayoutElement-compatible
+    # dicts: {type, text, bbox, page, font_size, is_bold, x_indent}).  Populated only for
+    # PDFs with a live text layer; empty for scanned/OCR-only pages so extract_node falls
+    # back to parse_questions_from_text on raw_text.
+    span_blocks: List[Dict[str, Any]]
     extracted_blocks: List[QuestionBlock]
     quality_scores: Dict[int, Dict[str, Any]]   # {question_number: QualityScore dict}
     repair_log: List[Dict[str, Any]]            # log of repair actions and outcomes

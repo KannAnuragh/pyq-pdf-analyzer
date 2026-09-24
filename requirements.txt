@@ -17,3 +17,11 @@ Pillow>=10.0.0
 google-genai
 pyahocorasick>=2.0.0
 rapidfuzz>=3.0.0
+requests
+python-dotenv
+boto3
+# docling
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+docling

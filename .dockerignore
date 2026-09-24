@@ -26,14 +26,29 @@ env/
 ENV/
 .env
 
-# Node
+# Node & Frontend
 node_modules/
 .next/
 frontend/
 
-# Local DB
+# Local DB & Storage
 *.db
 *.sqlite3
+data/
+scratch/
+
+# Large binaries & documents
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.log
+raw_extracted.txt
+mentor_extracted.json
+
+# Git
+.git/
+.gitignore
 
 # OS
 .DS_Store

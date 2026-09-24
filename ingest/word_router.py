@@ -223,11 +223,14 @@ def route_words_for_page(
     for q in questions:
         q_num = q.get("question_number", 0)
 
-        # Build full question text for routing
+        # Build full question text for routing (stem, options, and explanation)
         parts = [q.get("stem", "")]
         options = q.get("options", {})
         for key in sorted(options.keys()):
             parts.append(f"{key}. {options[key]}")
+        exp = q.get("explanation") or q.get("answer_text") or ""
+        if exp:
+            parts.append(f"Explanation: {exp}")
 
         full_text = "\n".join(parts)
 

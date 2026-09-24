@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict
 from typing import Any
@@ -144,6 +145,18 @@ def calculate_token_cost(prompt_tokens: int, completion_tokens: int, provider: s
 class QuestionCorrection(BaseModel):
     """Per-question structured response from the LLM."""
     question_number: int
+    question_type: str = Field(
+        default="mcq",
+        description="The verified structural type of the question: 'mcq' | 'descriptive_single' | 'descriptive_subquestions'"
+    )
+    corrected_stem: str | None = Field(
+        default=None,
+        description="Math-corrected and typo-fixed question stem. Null if no math/typo correction needed."
+    )
+    corrected_options: dict[str, str] | None = Field(
+        default=None,
+        description="Math-corrected options dict. Empty dict {} if descriptive question. Null if no change."
+    )
     corrected_words: dict[str, str] = Field(
         default_factory=dict,
         description="Map of flagged_word -> corrected_word. Empty if no correction needed."
@@ -159,11 +172,15 @@ class QuestionCorrection(BaseModel):
     )
     validated_answer: str | None = Field(
         default=None,
-        description="The option letter (A, B, C, D) determined by the AI to be correct"
+        description="The option letter (A, B, C, D) determined by the AI to be correct. MUST be null for a question with no listed options (descriptive) — never guess a letter for those."
     )
     answer_status: str = Field(
         default="agrees",
-        description="'agrees' if the marked answer is correct, 'disagrees' if not"
+        description="'agrees' if the marked answer is correct, 'disagrees' if not, 'none' if the question is descriptive and has no options to validate against"
+    )
+    corrected_explanation: str | None = Field(
+        default=None,
+        description="The completely corrected explanation / solution text with typos and OCR errors fixed. Null if no explanation was present."
     )
 
 
@@ -175,19 +192,24 @@ class PageCorrectionResponse(BaseModel):
 class DirectQuestionCorrection(BaseModel):
     """Per-question structured response for Direct LLM Validation mode."""
     question_number: int
+    question_type: str = Field(
+        default="mcq",
+        description="'mcq' | 'descriptive_single' | 'descriptive_subquestions'"
+    )
     corrected_stem: str = Field(
         description="The completely rewritten and corrected question text (stem)."
     )
     corrected_options: dict[str, str] = Field(
-        description="The completely rewritten and corrected options. Keys are option letters (A, B, C, D)."
+        default_factory=dict,
+        description="The completely rewritten and corrected options. Keys are option letters (A, B, C, D). Empty for descriptive questions."
     )
     validated_answer: str | None = Field(
         default=None,
-        description="The option letter (A, B, C, D) determined by the AI to be correct"
+        description="The option letter (A, B, C, D) determined by the AI to be correct. Null for descriptive."
     )
     answer_status: str = Field(
         default="agrees",
-        description="'agrees' if the marked answer is correct, 'disagrees' if not"
+        description="'agrees' if the marked answer is correct, 'disagrees' if not. 'none' for descriptive."
     )
     corrected_explanation: str | None = Field(
         default=None,
@@ -203,27 +225,67 @@ class DirectPageCorrectionResponse(BaseModel):
 # Prompt construction
 # ---------------------------------------------------------------------------
 
-CORRECTION_SYSTEM_PROMPT = """You are a Malayalam language expert reviewing exam question papers extracted from PDFs.
+CORRECTION_SYSTEM_PROMPT = r"""You are a master bilingual (Malayalam and English) exam educator and mathematics editor reviewing question papers for students.
 
-You have TWO separate jobs for each question:
+CRITICAL STUDENT-CENTRIC GOAL:
+The users studying these questions, options, and explanations are STUDENTS preparing for their examinations. The text MUST make complete, clear, and natural sense to a student. Any student reading the questions and solutions must find them clean, lucid, grammatically coherent, and easy to learn from.
 
-JOB 1 — TEXT CORRECTION:
-- Fix ONLY the specific flagged words listed below each question.
-- Use the surrounding sentence context to determine the correct Malayalam word.
-- Do NOT rewrite or "improve" text that isn't flagged.
-- If there are no flagged words listed for a question, DO NOT make any text corrections for that question.
+STUDENT-FACING READABILITY & NO MANGLED MATH DELIMITERS:
+- NEVER put normal English or Malayalam words, descriptions, or sentences inside LaTeX math mode ($...$ or $$...$$). In LaTeX math mode, all spaces are stripped and words are jammed together into unreadable slanted italics (e.g. writing `$is Planck's constant and e$` renders as the nonsensical string `isPlanck'sconstantande`, which severely confuses students).
+- ALWAYS keep explanatory prose OUTSIDE math delimiters: write "where $h$ is Planck's constant and $e$ is the charge of an electron", NEVER "whereh $is Planck's constant and e$" or "whereh $$isPlanck'sconstantande$$".
+- NEVER merge variables with adjacent words: always maintain proper spacing (e.g. "where $h$", not "whereh"; "and $e$", not "ande"; "if $x$", not "ifx").
+- Math mode ($...$) is strictly reserved for mathematical formulas, variables, equations, symbols, fractions, and numeric quantities with units (e.g. $h$, $e$, $\nu$, $V_0$, $\frac{h}{e}$, $20\,\Omega$, $5 \times 10^5\text{ V/m}$).
+
+You have FOUR tasks for each question:
+
+TASK 0 — QUESTION TYPE DETERMINATION & VALIDATION (MANDATORY):
+- Carefully analyze the question content, structure, and intent:
+  * "mcq": A genuine multiple-choice question offering mutually exclusive answer choices where the student must select ONE choice (e.g. A, B, C, D).
+  * "descriptive_single": A single open-ended or worked-solution question requiring a written or calculated response, derivation, proof, essay, or definition without choices.
+  * "descriptive_subquestions": ONLY for questions where the QUESTION PROMPT itself contains multiple directive sub-tasks (e.g., (a), (b), (c) or (i), (ii)) instructing the student to solve, define, or calculate separate parts.
+- STRICT QUESTION TYPE RULES:
+  1. DO NOT LABEL ANSWERS AS SUBQUESTIONS: Numbered steps or items in answers/solutions (e.g. 1. Higher, 2. Lower, 3. RT = 20 Ohm) are ANSWER/SOLUTION STEPS, NOT sub-questions! NEVER classify questions with answer steps as "descriptive_subquestions" and NEVER put answer steps into sub-questions. Keep all solution steps in `corrected_explanation` / `answer_text`.
+  2. If a descriptive question does not have separate directive prompts in the question stem itself, classify it as "descriptive_single".
+  3. NEVER HALLUCINATE OR INVENT OPTIONS: Never fabricate "None of the above", "All of the above", or placeholder choices to complete 4 options. If a descriptive question was mistakenly presented with options, classify it as "descriptive_single", set `corrected_options` to {}, and set `validated_answer` to null.
+- Return your decision in `question_type`: "mcq" | "descriptive_single" | "descriptive_subquestions".
+
+TASK 1 — TEXT CORRECTION & MATHEMATICAL EQUATION NORMALIZATION:
+- Fix the specific flagged words listed below each question.
+- SPELLING & OCR ERROR CORRECTION: Inspect stems, options, and explanations for spelling mistakes, OCR corruptions, and truncated words. If an option or stem contains words where the initial letter was truncated (such as 'oth' instead of 'Both', 'll' instead of 'All'), correct the spelling to 'Both', 'All', etc.
+- CRITICAL (DIFFERENTIATE OPTION LABELS FROM WORDS): Never strip or merge option letters with the option text. For example, if Option (b) is "Both A and B", it must be Option B with text "Both A and B", NEVER "oth A and B".
+- MATHEMATICAL EQUATION CORRECTION & NORMALIZATION (MANDATORY):
+  * Inspect all math expressions, physics formulas, equations, fractions, and units in stems, options, and explanations.
+  * Format all mathematical formulas using standard inline LaTeX enclosed in single dollar signs ($...$).
+  * EQUATION SEPARATION & BALANCED BRACES (CRITICAL):
+    - When writing equations with equality (=), NEVER place the equals sign or the other side inside a fraction denominator, numerator, or square root!
+    - Write $\frac{A}{B} = \frac{C}{D}$, NEVER $\frac{A}{B = \frac{C}{D}}$ or $\frac{A}{\sqrt{B = C}}$.
+    - Subscripts must be properly enclosed in braces: write $V_{proton}$, $V_{\alpha}$, $m_{proton}$, $\lambda_{proton}$, $\lambda_{\alpha}$, NEVER bare underscores or broken braces like $V_}{proton}$.
+    - Repair malformed equations like \frac{V_}{proton}{V_{alpha}} = 1 by fixing the braces to \frac{V_{proton}}{V_{alpha}} = 1.
+    - Never split English words like 'given that' into 'given t hat' or 'given by' into 'given b y'.
+  * MULTIPLICATION: Always use LaTeX `\times` (e.g., `$5 \times 10^5$`, `$5 \times \frac{10^5\text{ V}}{\text{m}}$`). Never leave bare `×`, `*`, or `x` outside LaTeX delimiters.
+  * FRACTIONS & UNITS: Clean fractions and format units cleanly (e.g. `\frac{10^5 V}{m}` -> `\frac{10^5\text{ V}}{\text{m}}`, `$5 \times 10^5\text{ V/m}$`, `$R_T = 20\,\Omega$`, `$V_T = 20\text{ V}$`, `$I = 1\text{ A}$`).
+  * If the stem or options contain math errors or need formula correction, return the corrected stem in `corrected_stem` and options in `corrected_options`.
+- Use surrounding sentence context to determine the correct word in its ORIGINAL language (Malayalam or English). Do NOT translate English to Malayalam or vice versa.
 - If you're uncertain about a correction, report low confidence rather than guessing.
-- If the Malayalam text is completely unreadable or garbled beyond any possible correction (e.g., mojibake, completely wrong fonts), set 'needs_ocr_fallback' to true. Otherwise, keep it false.
+- If the text is completely unreadable or garbled beyond any possible correction (e.g., mojibake, completely wrong fonts), set 'needs_ocr_fallback' to true. Otherwise, keep it false.
 - Return the corrected word in the 'corrected_words' map.
-- If a flagged word is actually correct as-is, do NOT include it in corrected_words.
 
-JOB 2 — ANSWER VERIFICATION (MUST DO FOR EVERY QUESTION):
-- Independently solve the question and determine which option ('A', 'B', 'C', or 'D') is factually/logically correct.
-- Return the chosen option letter in 'validated_answer' ('A', 'B', 'C', or 'D').
-- If 'validated_answer' matches the marked correct answer, report 'answer_status': 'agrees'.
-- If 'validated_answer' does NOT match, report 'answer_status': 'disagrees'.
+TASK 2 — ANSWER VERIFICATION (MCQ QUESTIONS ONLY):
+- Only classify and verify an answer if the question is genuinely an "mcq" with choices to select from.
+- For "descriptive_single" and "descriptive_subquestions": you MUST return 'validated_answer': null and 'answer_status': 'none'. NEVER pick an option letter for descriptive questions — there are no choices to validate against!
+- For genuine MCQ questions: independently solve the question and determine which option ('A', 'B', 'C', or 'D') is factually/logically correct. Return the chosen option letter in 'validated_answer'. If it matches the marked correct answer, report 'answer_status': 'agrees'; if not, 'disagrees'.
 
-IMPORTANT: These are two genuinely separate judgments. A text correction does not change the answer verification, and vice versa."""
+TASK 3 — EXPLANATION / SOLUTION REVIEW & MATH CORRECTION:
+- If an 'Explanation from PDF' is provided below a question, thoroughly review it and fix ALL typos, spelling mistakes, Malayalam font/ligature corruptions, missing spaces, and punctuation errors. Return the complete, error-free, corrected explanation in 'corrected_explanation'.
+- PRESERVE MATH & FORMULAS: Format all mathematical formulas, equations, fractions, and symbols using standard inline LaTeX ($x^2$, $\frac{a}{b}$, $\sqrt{x}$, $\times$).
+- Correct mathematical notation too: repair malformed LaTeX delimiters, missing braces, broken fractions, and OCR errors in operators or symbols. Preserve the equation's mathematical meaning.
+- Do NOT translate between languages. Preserve the original language of the explanation.
+- Image markers such as [[QAI_IMAGE:q12:explanation:0]] are immutable. Preserve every marker exactly and in its original position. Never copy a marker between questions.
+- If NO 'Explanation from PDF' is provided for the question, you MUST return null for 'corrected_explanation'. DO NOT generate a new solution. DO NOT explain how to solve the question. ONLY correct the text that was explicitly provided.
+- DO NOT add new mathematical derivations, reasoning steps, or commentary that were not present in the original 'Explanation from PDF'.
+- DO NOT LABEL ANYTHING IN ANSWERS AS SUBQUESTION: Never prefix or label any answer, solution step, or explanation point with 'Subquestion', 'Sub-question', 'Subquestion 1:', or similar labels. Keep solution steps as clean items, numbered steps (1., 2.), lettered parts ((a), (b)) matching the question, or standard paragraphs.
+
+IMPORTANT: Answer verification is independent of text corrections."""
 
 JSON_CORRECTION_SYSTEM_PROMPT = f"""{CORRECTION_SYSTEM_PROMPT}
 
@@ -232,48 +294,84 @@ You MUST output valid JSON conforming exactly to this structure:
   "corrections": [
     {{
       "question_number": <int>,
+      "question_type": "mcq" | "descriptive_single" | "descriptive_subquestions",
+      "corrected_stem": "<string or null>",
+      "corrected_options": {{"A": "<string>"}} or {{}} or null,
       "corrected_words": {{"<flagged_word>": "<corrected_word>"}},
       "text_confidence": <float 0.0 to 1.0>,
       "needs_ocr_fallback": <bool>,
-      "validated_answer": "A" | "B" | "C" | "D",
-      "answer_status": "agrees" | "disagrees"
+      "validated_answer": "A" | "B" | "C" | "D" | null,
+      "answer_status": "agrees" | "disagrees" | "none",
+      "corrected_explanation": "<string or null>"
     }}
   ]
 }}"""
 
-DIRECT_CORRECTION_SYSTEM_PROMPT = """You are an elite Malayalam language and exam question expert reviewing question papers extracted from PDFs.
+DIRECT_CORRECTION_SYSTEM_PROMPT = r"""You are an elite bilingual (Malayalam and English) exam educator and mathematics tutor reviewing question papers for students.
+
+CRITICAL STUDENT-CENTRIC GOAL:
+The users studying these questions, options, and explanations are STUDENTS preparing for their exams. The text MUST make complete, clear, and intuitive sense to a student. Every question, option, and solution must be easy to read, mathematically sound, and pedagogically clear.
+
+STUDENT-FACING READABILITY & NO MASHED MATH:
+- NEVER put normal English or Malayalam words, descriptions, or sentences inside LaTeX math mode ($...$ or $$...$$). In LaTeX math mode, all spaces between words are stripped, turning words into unreadable mashed text (e.g. writing `$is Planck's constant and e$` renders as `isPlanck'sconstantande`, confusing students).
+- Explanatory phrases and connecting definitions MUST remain ordinary prose OUTSIDE math delimiters: write 'where $h$ is Planck\'s constant and $e$ is the charge of an electron', NEVER 'whereh $$isPlanck\'sconstantande$$'.
+- NEVER merge variables with adjacent words: maintain clear spacing (e.g. write 'where $h$', not 'whereh'; 'and $e$', not 'ande'; 'if $x$', not 'ifx').
+- Math mode ($...$) is ONLY for actual formulas, variables, equations, fractions, and symbols (e.g. $h$, $e$, $\nu$, $V_0$, $\frac{h}{e}$, $E = h\nu$, $20\,\Omega$, $5 \times 10^5\text{ V/m}$).
 
 You have TWO separate jobs for each question provided:
 
 JOB 1 — FULL TEXT REWRITE & STRUCTURAL FORMATTING:
 - You will receive the raw, extracted text of the question (stem) and its options. You may also receive an Explanation from the PDF.
+- Determine the structure of the question: "mcq", "descriptive_single", or "descriptive_subquestions". Return this in `question_type`.
+- CRITICAL RULES FOR QUESTION TYPE:
+  * DO NOT LABEL ANSWERS AS SUBQUESTIONS: Numbered items or steps in the answer/solution (e.g. 1. Higher, 2. Lower, 3. RT = 20 Ohm) are ANSWER/SOLUTION STEPS, NOT sub-questions! Keep all answer steps in `corrected_explanation`.
+  * Classify open-ended or worked-solution questions as "descriptive_single". "descriptive_subquestions" is ONLY for questions where the question prompt itself contains distinct sub-problems (e.g. (a) State law, (b) Find value).
+  * DO NOT invent fake options like "None of the above" or "All of the above" to fill out 4 choices!
+  * For descriptive questions, you MUST leave `corrected_options` as {} (empty object), `validated_answer` as null, and `answer_status` as "none".
 - The text may contain OCR errors, spelling mistakes, missing spaces, or formatting issues.
-- Rewrite the entire question stem and all options with perfect Malayalam spelling and grammar.
+- IMPORTANT: Preserve the ORIGINAL language! If the question is in English, rewrite it with perfect English spelling and grammar. If it is in Malayalam, rewrite it with perfect Malayalam spelling and grammar. Do NOT translate English to Malayalam or vice versa.
 - PRESERVE MULTI-LINE STRUCTURE: If the question has sub-points, numbered statements, Roman numerals (e.g. (i), (ii), (iii)), tables, poem stanzas, or lists, put EACH sub-point on its own new line using newline characters (\n). Do NOT collapse multi-line statements into a single sentence.
 - Return ONLY the question body text in `corrected_stem`. Do NOT prefix with question numbers (do NOT include "Question 1:", "Q1.", "1.", "ചോദ്യം 1:").
-- Do NOT include options or option choices inside `corrected_stem`.
-- In `corrected_options`, return the cleaned text for each option mapped to its key ('A', 'B', 'C', 'D'). Do NOT include the option prefix itself inside the value (do NOT include 'A.', '(A)', 'A)' in the string).
-- If an 'Explanation from PDF' is provided, you MUST completely rewrite it, fixing any OCR garbage, spelling mistakes, Malayalam ligatures, or formatting errors, and return the fixed text in `corrected_explanation`. Do NOT return null if an explanation was provided.
-- PRESERVE MATH & FORMULAS: Format all mathematical formulas, symbols, fractions, and Greek letters using standard inline LaTeX enclosed in dollar signs (e.g., $x^2 + y^2 = r^2$, $\frac{a}{b}$, $\sqrt{x}$, $\sigma^2$, $\chi^2$).
-- MULTIPLICATION & EQUATIONS: For multiplication, ALWAYS use LaTeX `\times` (e.g., `$96 = 2^5 \times 3$`, `$404 = 2^2 \times 101$`). Never use the lowercase letter 'x' or 'x^3' for multiplication! Preserve punctuation (commas, periods) between multiple equations.
+- In `corrected_options`, return the cleaned text for each option mapped to its key ('A', 'B', 'C', 'D'). If the question is a "descriptive" question with no true A/B/C/D choices, leave `corrected_options` empty ({}). DO NOT hallucinate options.
+- CRITICAL (DIFFERENTIATE OPTION LABELS FROM WORDS): When an option starts with a word sharing the option letter (e.g. Option B: "(b) Both A and B" or "B. Both (1) and (2)", Option A: "(a) All of the above"): NEVER strip the initial letter from the word! Option B's text MUST be "Both A and B" (NEVER "oth A and B"). Option A's text MUST be "All of the above" (NEVER "ll of the above"). Differentiate clearly between the option label (B) and the text (Both).
+- SPELLING & OCR CORRECTION (MANDATORY): Thoroughly correct all spelling mistakes and truncated words in stems, options, and explanations. If an option or stem contains words where the first letter was accidentally truncated (such as 'oth' instead of 'Both', 'll' instead of 'All'), you MUST restore and correct the spelling to 'Both', 'All', etc.
+- If an 'Explanation from PDF' is provided, correct ONLY that supplied explanation: fix OCR garbage, spelling mistakes, Malayalam ligatures, and formatting errors, then return it in `corrected_explanation`. If it is a descriptive question with sub-parts like (a) and (b), preserve the labels (e.g., "(a) ...\n(b) ..."). DO NOT add a new solution, answer explanation, or unsupported steps.
+- Image markers such as [[QAI_IMAGE:q12:explanation:0]] or {{IMG:...}} are immutable. Preserve every marker exactly and in its original position. Never copy or delete a marker.
+- DO NOT LABEL ANYTHING IN ANSWERS AS SUBQUESTION: Never prefix or label any answer, solution step, or explanation point with 'Subquestion', 'Sub-question', 'Subquestion 1:', or similar labels. Keep solution steps as clean items, numbered steps (1., 2.), lettered parts ((a), (b)) matching the question, or standard paragraphs.
+- If no 'Explanation from PDF' is provided, you MUST return null for `corrected_explanation`. NEVER generate a new explanation or solution from the question and options. I only want you to correct typos, not solve the question for the student.
+- MATHEMATICAL EQUATION CORRECTION & NORMALIZATION (MANDATORY):
+  * Format all mathematical formulas, symbols, fractions, and Greek letters using standard inline LaTeX enclosed in dollar signs (e.g., $x^2 + y^2 = r^2$, $\frac{a}{b}$, $\sqrt{x}$, $\sigma^2$, $\chi^2$, $R_T = 20\,\Omega$, $V_T = 20\text{ V}$, $I = 1\text{ A}$).
+  * EQUATION SEPARATION & BALANCED BRACES (CRITICAL):
+    - When writing equations with equality (=), NEVER place the equals sign or the other side inside a fraction denominator, numerator, or square root!
+    - Write $\frac{A}{B} = \frac{C}{D}$, NEVER $\frac{A}{B = \frac{C}{D}}$ or $\frac{A}{\sqrt{B = C}}$.
+    - Subscripts must be properly enclosed in braces: write $V_{proton}$, $V_{\alpha}$, $m_{proton}$, $\lambda_{proton}$, $\lambda_{\alpha}$, NEVER bare underscores or broken braces like $V_}{proton}$.
+    - Repair malformed equations like \frac{V_}{proton}{V_{alpha}} = 1 by fixing the braces to \frac{V_{proton}}{V_{alpha}} = 1.
+    - Never split English words like 'given that' into 'given t hat' or 'given by' into 'given b y'.
+  * For multiplication, ALWAYS use LaTeX `\times` (e.g., `$5 \times \frac{10^5\text{ V}}{\text{m}}$`, `$5 \times 10^5\text{ V/m}$`). Never use the lowercase letter 'x' or '×' outside math delimiters.
+  * Clean fraction units (e.g., `\frac{10^5 V}{m}` -> `\frac{10^5\text{ V}}{\text{m}}`).
+  * Repair malformed equations from extraction, including missing `$` delimiters, braces, fraction structure, operators, and OCR-corrupted symbols. For example, if you see `\frac{V_}{proton}{V_{alpha}}` or similar malformed LaTeX, you MUST fix it to `\frac{V_{proton}}{V_{alpha}}`. Preserve the original mathematical meaning.
 - Fix Malayalam ligature/split glyph corruptions and replace non-breaking spaces.
+- Keep `corrected_explanation` concise while preserving all necessary solution steps and formulas. Do not add self-corrections, uncertainty, or commentary.
 
 JOB 2 — ANSWER VERIFICATION:
-- Independently solve the question and determine which option ('A', 'B', 'C', or 'D') is correct.
-- Always provide the chosen option letter in `validated_answer` ('A', 'B', 'C', or 'D').
+- For genuine "mcq" questions, independently solve the question and determine which option ('A', 'B', 'C', or 'D') is correct.
+- For verification, return only the option letter and status. Do not generate a solution or explanation.
+- Always provide the chosen option letter in `validated_answer` ('A', 'B', 'C', or 'D'). For descriptive questions, return null.
 - If `validated_answer` matches the marked correct answer, report `answer_status`: 'agrees'.
 - If `validated_answer` does NOT match, report `answer_status`: 'disagrees'.
+- For descriptive questions with no marked answer, report `answer_status`: 'none'.
 
 You MUST output valid JSON conforming exactly to this structure:
 {
   "corrections": [
     {
       "question_number": <int>,
+      "question_type": "mcq" | "descriptive_single" | "descriptive_subquestions",
       "corrected_stem": "<string>",
-      "corrected_options": {"A": "<string>", "B": "<string>", "C": "<string>", "D": "<string>"},
+      "corrected_options": {"A": "<string>"} or {},
       "corrected_explanation": "<string or null>",
-      "validated_answer": "A" | "B" | "C" | "D",
-      "answer_status": "agrees" | "disagrees"
+      "validated_answer": "A" | "B" | "C" | "D" | null,
+      "answer_status": "agrees" | "disagrees" | "none"
     }
   ]
 }"""
@@ -309,6 +407,87 @@ def _parse_page_corrections(raw_text: str) -> list[QuestionCorrection]:
         raise
 
 
+FALLBACK_PLACEHOLDERS = {
+    "no explanation",
+    "no automated explanation available for this offline question.",
+    "llm validation is disabled.",
+    "llm validation skipped / offline",
+    "llm call skipped or offline",
+    "answer validation disabled in settings (.env)",
+    "answer key verified and matches",
+    "ocr fallback applied",
+}
+
+def _clean_explanation_text(text: str | None) -> str:
+    if not text:
+        return ""
+    cleaned = str(text).strip()
+    if cleaned.lower() in FALLBACK_PLACEHOLDERS:
+        return ""
+    # Strip leading option letter like "B\n\n..." or "(B) ..."
+    cleaned = re.sub(r'^\(?([A-D])\)?[\s\.\:\-]+', '', cleaned).strip()
+    # Strip leading "വിശദീകരണം:" or "Explanation:" label (only if followed by delimiter or newline)
+    cleaned = re.sub(r'^(?:Solution|Explanation|Description|Sol|Exp|Hint|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*(?:[\*\:\-]+(?:\s*|\n|$)|(?:\n|\\n))', '', cleaned, flags=re.IGNORECASE).strip()
+    # Strip any accidental subquestion labels from answers
+    try:
+        from ..ingest.option_answer_separator import strip_subquestion_labels_from_answer
+        cleaned = strip_subquestion_labels_from_answer(cleaned) or ""
+    except Exception:
+        pass
+    # Also strip raw font glitches like ~ }
+    cleaned = re.sub(r'[\~\}]+', '', cleaned)
+    return cleaned
+
+
+# Keep image ownership explicit while an LLM is allowed to edit surrounding text.
+# A single generic placeholder was ambiguous: if a model omitted, duplicated, or
+# moved it, the later positional reattachment could put a diagram in another
+# question or silently append it to the wrong part of an answer.
+_IMAGE_TAG_PATTERN = re.compile(
+    r'(?:<div[^>]*>\s*)?<img\b[^>]*\bsrc=[\'\"][^\'\"]+[\'\"][^>]*>(?:\s*</div>)?|'
+    r'\{\{IMG_BLOCK:[^}]+\}\}|\{\{IMG:[^}]+\}\}',
+    re.IGNORECASE,
+)
+_IMAGE_TOKEN_PATTERN = re.compile(r'\[\[\s*QAI_IMAGE:[^\]]+\]\]', re.IGNORECASE)
+
+
+def _mask_owned_images(text: str | None, owner: str) -> tuple[str, dict[str, str]]:
+    """Replace each image with a unique, field-scoped token for an LLM prompt."""
+    assets: dict[str, str] = {}
+
+    def replace(match: re.Match) -> str:
+        token = f"[[QAI_IMAGE:{owner}:{len(assets)}]]"
+        assets[token] = match.group(0)
+        return f"\n{token}\n"
+
+    return _IMAGE_TAG_PATTERN.sub(replace, text or ""), assets
+
+
+def _restore_owned_images(text: str | None, assets: dict[str, str], original: str | None) -> str:
+    """Restore only this field's images, at their original markers.
+
+    If the model dropped even one marker, retain the original field rather than
+    guessing a new placement. This deliberately favors correct diagram
+    association over a text-only LLM rewrite.
+    """
+    if not assets:
+        return _IMAGE_TOKEN_PATTERN.sub("", text or "")
+
+    candidate = text or ""
+    if not all(token in candidate for token in assets):
+        return original or ""
+    # A response for this field must not contain any marker owned by a different
+    # question/field. Keeping its surrounding text would still merge two answers.
+    candidate_tokens = set(_IMAGE_TOKEN_PATTERN.findall(candidate))
+    if not candidate_tokens.issubset(assets):
+        return original or ""
+
+    for token, image_tag in assets.items():
+        candidate = candidate.replace(token, image_tag)
+    # Do not allow an image token from a different question to leak into output.
+    return _IMAGE_TOKEN_PATTERN.sub("", candidate)
+
+
 def _build_page_prompt(
     questions_on_page: list[dict],
     flagged_words_by_question: dict[int, list[dict]],
@@ -316,18 +495,54 @@ def _build_page_prompt(
     """Build the prompt for one page's worth of flagged questions."""
     parts = []
 
+    from ..ingest.option_answer_separator import clean_question_options_and_answer
+
     for q in questions_on_page:
+        clean_question_options_and_answer(q)
         q_num = q.get("question_number", 0)
         stem = q.get("stem", "")
         options = q.get("options", {})
-        marked = q.get("marked_answer", "Unknown")
+        marked = q.get("marked_correct_answer") or q.get("marked_answer") or "Unknown"
         flagged = flagged_words_by_question.get(q_num, [])
+        raw_exp = q.get("explanation") or q.get("answer_text") or q.get("reasoning") or ""
+        explanation = _clean_explanation_text(raw_exp)
+
+        clean_stem = q.get("_clean_stem")
+        if clean_stem is None:
+            clean_stem, extracted_images_stem = _mask_owned_images(stem, f"q{q_num}:stem")
+            q["_extracted_images_stem"] = extracted_images_stem
+            q["_clean_stem"] = clean_stem
+
+        clean_exp = q.get("_clean_exp")
+        if clean_exp is None:
+            clean_exp, extracted_images_exp = _mask_owned_images(explanation, f"q{q_num}:explanation")
+            q["_extracted_images_exp"] = extracted_images_exp
+            q["_clean_exp"] = clean_exp
 
         parts.append(f"\n--- Question {q_num} ---")
-        parts.append(f"Stem: {stem}")
-        for key in sorted(options.keys()):
-            parts.append(f"  {key}. {options[key]}")
-        parts.append(f"Marked correct answer: {marked}")
+        detected_type = q.get("question_type", "unknown")
+        parts.append(f"Detected question type: {detected_type}")
+        parts.append(f"Stem: {clean_stem}")
+        sub_parts = q.get("sub_parts")
+        if not sub_parts and clean_stem:
+            from ..ingest.option_answer_separator import extract_subparts_from_text
+            sub_parts = extract_subparts_from_text(clean_stem)
+        if detected_type.startswith("descriptive") or sub_parts:
+            if sub_parts and isinstance(sub_parts, dict) and len(sub_parts) > 0:
+                parts.append("Question Directive Parts:")
+                for key in sorted(sub_parts.keys()):
+                    parts.append(f"  ({key.lower()}) {sub_parts[key]}")
+            else:
+                parts.append("Options: None (Descriptive open-ended question)")
+        elif options:
+            parts.append("Options (MCQ Choices):")
+            for key in sorted(options.keys()):
+                parts.append(f"  {key}. {options[key]}")
+            parts.append(f"Marked correct answer: {marked}")
+        else:
+            parts.append("Options: None extracted from PDF")
+        if clean_exp.strip():
+            parts.append(f"Explanation from PDF: {clean_exp.strip()}")
         
         if flagged:
             parts.append(f"\nFlagged words to review (for Text Correction):")
@@ -336,7 +551,7 @@ def _build_page_prompt(
                 if fw.get('context'):
                     parts.append(f"    Context: ...{fw['context']}...")
         else:
-            parts.append(f"\nNo specific text flagged for this question. Proceed directly to Answer Verification.")
+            parts.append(f"\nNo specific text flagged for this question. Proceed directly to Answer Verification and Explanation Review.")
 
     return "\n".join(parts)
 
@@ -403,6 +618,7 @@ async def _call_groq_for_page(
 
     for attempt in range(MAX_RETRIES):
         try:
+            max_tok = min(1200, max(400, len(questions_on_page) * 450))
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
@@ -411,6 +627,7 @@ async def _call_groq_for_page(
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.1,
+                max_tokens=max_tok,
             )
 
             p_tok = response.usage.prompt_tokens if hasattr(response, "usage") and response.usage else 0
@@ -430,7 +647,7 @@ async def _call_groq_for_page(
             is_transient = is_rate_limit or "503" in err_str or "500" in err_str or "timeout" in err_str.lower()
 
             if is_transient and attempt < MAX_RETRIES - 1:
-                wait = (2 ** attempt) * (2 if is_rate_limit else 1)
+                wait = (attempt + 1) * (4 if is_rate_limit else 2)
                 logger.warning(
                     "[CorrectionNode] Transient error from Groq (attempt %d/%d), retrying in %ds: %s",
                     attempt + 1, MAX_RETRIES, wait, err_str[:200]
@@ -531,10 +748,24 @@ async def _call_llm_for_page(
 
     if provider == "groq":
         logger.info("[CorrectionNode] Using Groq (%s) for page validation & correction", GROQ_CORRECTION_MODEL)
-        return await _call_groq_for_page(questions_on_page, flagged_words_by_question)
+        res, p_tok, c_tok = await _call_groq_for_page(questions_on_page, flagged_words_by_question)
+        if res is not None:
+            return res, p_tok, c_tok
+        gemini_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+        if gemini_key and not gemini_key.startswith("your_"):
+            logger.warning("[CorrectionNode] Groq failed; attempting fallback to Gemini")
+            return await _call_gemini_for_page(questions_on_page, flagged_words_by_question)
+        return None, 0, 0
     elif provider == "gemini":
         logger.info("[CorrectionNode] Using Gemini (%s) for page validation & correction", GEMINI_CORRECTION_MODEL)
-        return await _call_gemini_for_page(questions_on_page, flagged_words_by_question)
+        res, p_tok, c_tok = await _call_gemini_for_page(questions_on_page, flagged_words_by_question)
+        if res is not None:
+            return res, p_tok, c_tok
+        groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+        if groq_key and not groq_key.startswith("your_"):
+            logger.warning("[CorrectionNode] Gemini failed or quota exhausted; attempting fallback to Groq")
+            return await _call_groq_for_page(questions_on_page, flagged_words_by_question)
+        return None, 0, 0
     else:
         logger.warning("[CorrectionNode] No LLM provider available for correction & validation")
         return None, 0, 0
@@ -696,17 +927,20 @@ async def _call_llm_batched(
     provider: str,
 ) -> tuple[list[QuestionCorrection], int, int]:
     """
-    Process flagged questions in small batches (default 5 questions/batch).
-    Prevents blowing past LLM token limits (e.g. Groq 7,000 ITPM limit).
+    Process flagged questions in small batches.
+    Defaults to 2 questions/batch for Groq (to strictly stay under 7,000 ITPM and 1,000 OTPM limits).
     Returns (all_corrections, total_prompt_tokens, total_completion_tokens).
     """
     all_corrections: list[QuestionCorrection] = []
     total_p_tok = 0
     total_c_tok = 0
 
-    total_batches = (len(questions_with_flags) + BATCH_SIZE - 1) // BATCH_SIZE
-    for idx, i in enumerate(range(0, len(questions_with_flags), BATCH_SIZE)):
-        batch = questions_with_flags[i:i + BATCH_SIZE]
+    batch_size = int(os.getenv("CORRECTION_BATCH_SIZE", "2" if provider == "groq" else "5"))
+    pause_sec = 2.0 if provider == "groq" else 0.5
+
+    total_batches = (len(questions_with_flags) + batch_size - 1) // batch_size
+    for idx, i in enumerate(range(0, len(questions_with_flags), batch_size)):
+        batch = questions_with_flags[i:i + batch_size]
         batch_flagged = {
             q["question_number"]: all_flagged[q["question_number"]]
             for q in batch
@@ -726,9 +960,9 @@ async def _call_llm_batched(
         if batch_corrections:
             all_corrections.extend(batch_corrections)
 
-        # Brief pause between batches to respect rate limits
-        if i + BATCH_SIZE < len(questions_with_flags):
-            await asyncio.sleep(0.5)
+        # Pause between batches to respect rate limits
+        if i + batch_size < len(questions_with_flags):
+            await asyncio.sleep(pause_sec)
 
     return all_corrections, total_p_tok, total_c_tok
 
@@ -821,14 +1055,20 @@ def correction_and_validation_node(state: dict) -> dict:
                 if r.cache_applied:
                     corrected_stem = corrected_q.get("stem", "")
                     corrected_opts = dict(corrected_q.get("options", {}))
+                    corrected_exp = corrected_q.get("explanation") or corrected_q.get("answer_text") or ""
                     for applied in r.cache_applied:
                         garbled = applied["garbled"]
                         correction = applied["correction"]
                         corrected_stem = corrected_stem.replace(garbled, correction)
                         for opt_key in corrected_opts:
                             corrected_opts[opt_key] = corrected_opts[opt_key].replace(garbled, correction)
+                        if corrected_exp:
+                            corrected_exp = corrected_exp.replace(garbled, correction)
                     corrected_q["stem"] = corrected_stem
                     corrected_q["options"] = corrected_opts
+                    if corrected_exp:
+                        corrected_q["explanation"] = corrected_exp
+                        corrected_q["answer_text"] = corrected_exp
                 corrected_blocks.append(corrected_q)
     else:
         logger.info(
@@ -857,7 +1097,7 @@ def correction_and_validation_node(state: dict) -> dict:
                     "name": "scanned",
                     "label": "Scanned",
                     "status": "completed",
-                    "details": f"Extracted from PDF Page {q.get('page_number', 0) + 1}"
+                    "details": f"Extracted from PDF Page {(q.get('page_number') or 0) + 1}"
                 },
                 "checked_with_caches": {
                     "name": "checked_with_caches",
@@ -879,6 +1119,9 @@ def correction_and_validation_node(state: dict) -> dict:
                 }
             }
 
+            exp_val = q.get("explanation") or q.get("answer_text") or ""
+            reasoning = exp_val if exp_val.strip() else "LLM validation is disabled."
+
             processed.append({
                 **q,
                 "marked_correct_answer": marked,
@@ -886,7 +1129,9 @@ def correction_and_validation_node(state: dict) -> dict:
                 "validated_answer": None,
                 "is_valid": False,
                 "confidence": "none",
-                "reasoning": "LLM validation is disabled.",
+                "explanation": exp_val if exp_val.strip() else None,
+                "answer_text": exp_val if exp_val.strip() else None,
+                "reasoning": reasoning,
                 "used_web_search": False,
                 "pipeline_steps": p_steps
             })
@@ -904,6 +1149,20 @@ def correction_and_validation_node(state: dict) -> dict:
         "[CorrectionNode] Calling %s unconditionally for correction & validation on %d questions",
         provider.upper(), len(corrected_blocks)
     )
+
+    # Mask large base64 images from stems and explanations to avoid leaking tens of thousands of tokens
+    from ..ingest.option_answer_separator import clean_question_options_and_answer
+    for q in corrected_blocks:
+        clean_question_options_and_answer(q)
+        stem = q.get("stem", "")
+        clean_stem, extracted_images_stem = _mask_owned_images(stem, f"q{q.get('question_number', 0)}:stem")
+        q["_extracted_images_stem"] = extracted_images_stem
+        q["_clean_stem"] = clean_stem
+
+        explanation = q.get("explanation") or q.get("answer_text") or ""
+        clean_exp, extracted_images_exp = _mask_owned_images(explanation, f"q{q.get('question_number', 0)}:explanation")
+        q["_extracted_images_exp"] = extracted_images_exp
+        q["_clean_exp"] = clean_exp
 
     questions_by_number = {q["question_number"]: q for q in corrected_blocks}
 
@@ -934,6 +1193,8 @@ def correction_and_validation_node(state: dict) -> dict:
         processed = []
         for q in corrected_blocks:
             marked = q.get("marked_correct_answer") or q.get("marked_answer")
+            exp_val = q.get("explanation") or q.get("answer_text") or ""
+            reasoning = exp_val if exp_val.strip() else "no explanation"
             processed.append({
                 **q,
                 "marked_correct_answer": marked,
@@ -941,7 +1202,9 @@ def correction_and_validation_node(state: dict) -> dict:
                 "validated_answer": None,
                 "is_valid": False,
                 "confidence": "none",
-                "reasoning": "no explanation",
+                "explanation": exp_val if exp_val.strip() else None,
+                "answer_text": exp_val if exp_val.strip() else None,
+                "reasoning": reasoning,
                 "used_web_search": False,
             })
             
@@ -971,7 +1234,6 @@ def correction_and_validation_node(state: dict) -> dict:
         from ..graph.nodes import rescan_question_vision, _solve_single_block, parse_questions_from_text
         from ..storage.config_manager import get_setting
         import pymupdf
-        import re
 
         try:
             streak_threshold = int(get_setting("auto_whole_pdf_ocr_threshold", 3))
@@ -1045,7 +1307,7 @@ def correction_and_validation_node(state: dict) -> dict:
                 for q in corrected_blocks:
                     q_num = q.get("question_number")
                     if q_num in ocr_fallbacks:
-                        page_idx = q.get("page_number", 0)
+                        page_idx = q.get("page_number") or 0
                         if page_idx < len(doc):
                             page = doc[page_idx]
                             crop = _get_crop(page, q_num)
@@ -1093,6 +1355,13 @@ def correction_and_validation_node(state: dict) -> dict:
                     opts = q.get("options", {})
                     for opt_key in opts:
                         opts[opt_key] = opts[opt_key].replace(original, corrected)
+                    if q.get("sub_parts") and isinstance(q["sub_parts"], dict):
+                        for sp_key in q["sub_parts"]:
+                            q["sub_parts"][sp_key] = q["sub_parts"][sp_key].replace(original, corrected)
+                    if q.get("explanation"):
+                        q["explanation"] = q["explanation"].replace(original, corrected)
+                    if q.get("answer_text"):
+                        q["answer_text"] = q["answer_text"].replace(original, corrected)
                     break
                 
     # Next, build the final processed_questions list combining the new text and validation status
@@ -1102,12 +1371,149 @@ def correction_and_validation_node(state: dict) -> dict:
         c = correction_map.get(q_num)
         
         marked = q.get("marked_correct_answer") or q.get("marked_answer")
-        
+        orig_explanation = q.get("explanation") or q.get("answer_text") or ""
+
+        # Pop any masked base64 images extracted in _build_page_prompt
+        extracted_images_stem = q.pop("_extracted_images_stem", {})
+        extracted_images_exp = q.pop("_extracted_images_exp", {})
+        q.pop("_clean_stem", None)
+        q.pop("_clean_exp", None)
+
+        from ..ingest.math_normalizer import normalize_math_in_text
+
+        # Apply LLM stem math correction if provided, else restore owned images
+        cand_stem = getattr(c, "corrected_stem", None)
+        if cand_stem and str(cand_stem).strip():
+            cand_stem_clean = str(cand_stem).strip()
+            cand_stem_clean = _restore_owned_images(cand_stem_clean, extracted_images_stem, q.get("stem", ""))
+            q["stem"] = normalize_math_in_text(cand_stem_clean)
+        else:
+            stem_val = _restore_owned_images(q.get("stem", ""), extracted_images_stem, q.get("stem", ""))
+            q["stem"] = normalize_math_in_text(stem_val)
+
+        # Apply LLM options math correction if provided, else normalize existing options
+        cand_opts = getattr(c, "corrected_options", None)
+        if cand_opts is not None and isinstance(cand_opts, dict):
+            if len(cand_opts) > 0:
+                q["options"] = {k: normalize_math_in_text(str(v)) for k, v in cand_opts.items()}
+            else:
+                q["options"] = {}
+        elif "options" in q and isinstance(q["options"], dict):
+            for ok, ov in q["options"].items():
+                if isinstance(ov, str):
+                    q["options"][ok] = normalize_math_in_text(ov)
+
+        # Determine corrected explanation
+        final_explanation = None
+        has_corrected_exp = False
+        if c and getattr(c, "corrected_explanation", None) and str(c.corrected_explanation).strip():
+            final_explanation = _restore_owned_images(
+                str(c.corrected_explanation).strip(), extracted_images_exp, orig_explanation
+            )
+            has_corrected_exp = True
+        elif orig_explanation:
+            final_explanation = orig_explanation
+
+        if final_explanation:
+            final_explanation = normalize_math_in_text(final_explanation)
+            q["explanation"] = final_explanation
+            q["answer_text"] = final_explanation
+
         if c:
-            if not ans_val_on:
+            from ..ingest.option_answer_separator import classify_question_type, is_valid_subparts
+            cur_opts = q.get("options", {})
+            llm_qtype = getattr(c, "question_type", None)
+            llm_type_str = str(llm_qtype).strip().lower() if llm_qtype else ""
+
+            # Respect LLM question validation: never force descriptive into MCQ and never label answers as subquestions
+            if llm_type_str in ("descriptive_single", "descriptive_subquestions"):
+                q["options"] = {}
+                q["marked_answer"] = None
+                q["marked_correct_answer"] = None
+                marked = None
+                # Never copy answer options into sub_parts!
+                # Only populate sub_parts if the question stem itself has genuine directive subparts
+                if q.get("stem"):
+                    from ..ingest.option_answer_separator import extract_subparts_from_text, is_valid_subparts
+                    extracted_sub = extract_subparts_from_text(q.get("stem", ""))
+                    if extracted_sub and is_valid_subparts(extracted_sub):
+                        q["sub_parts"] = extracted_sub
+                        q["question_type"] = "descriptive_subquestions"
+                    else:
+                        q["sub_parts"] = None
+                        q["question_type"] = "descriptive_single"
+                else:
+                    q["sub_parts"] = None
+                    q["question_type"] = "descriptive_single"
+            elif cur_opts and len(cur_opts) >= 2:
+                det_type, det_sub = classify_question_type(cur_opts, final_explanation, marked)
+                if det_type == "mcq":
+                    q["question_type"] = "mcq"
+                elif det_sub and is_valid_subparts(det_sub):
+                    q["question_type"] = "descriptive_subquestions"
+                    q["sub_parts"] = det_sub
+                    q["options"] = {}
+                    q["marked_answer"] = None
+                    q["marked_correct_answer"] = None
+                    marked = None
+                else:
+                    q["question_type"] = "descriptive_single"
+                    q["sub_parts"] = None
+                    q["options"] = {}
+                    q["marked_answer"] = None
+                    q["marked_correct_answer"] = None
+                    marked = None
+            else:
+                if llm_type_str in ("mcq", "descriptive_single", "descriptive_subquestions"):
+                    verified_type = llm_type_str
+                    q["question_type"] = verified_type
+                    if verified_type == "mcq" and not q.get("options"):
+                        from ..graph.nodes import separate_stem_and_options
+                        re_stem, re_opts, re_ans, re_exp = separate_stem_and_options(q.get("stem", ""))
+                        if re_opts and len(re_opts) >= 2:
+                            q["stem"] = re_stem
+                            q["options"] = re_opts
+                            if not marked and re_ans:
+                                marked = re_ans
+                                q["marked_answer"] = re_ans
+                                q["marked_correct_answer"] = re_ans
+                    elif verified_type.startswith("descriptive"):
+                        q["options"] = {}
+                        q["marked_answer"] = None
+                        q["marked_correct_answer"] = None
+                        marked = None
+                        if not q.get("sub_parts") and q.get("stem"):
+                            from ..ingest.option_answer_separator import extract_subparts_from_text
+                            extracted_sub = extract_subparts_from_text(q.get("stem", ""))
+                            if extracted_sub and is_valid_subparts(extracted_sub):
+                                q["sub_parts"] = extracted_sub
+                                first_key = sorted(extracted_sub.keys())[0]
+                                fk_esc = re.escape(first_key)
+                                first_sub_pattern = re.compile(
+                                    rf'(?:(?:^|\n|\s{{2,}}|\.\s+)\([{fk_esc}{fk_esc.upper()}]\)\s*)|'
+                                    rf'(?:(?:^|\n|[ \t]{{2,}}|\.\s+)[{fk_esc}{fk_esc.upper()}][\.\)\:-]\s*)'
+                                )
+                                m_sub = first_sub_pattern.search(q["stem"])
+                                if m_sub:
+                                    intro = q["stem"][:m_sub.start()].strip()
+                                    if re.match(r"^(?:question\s*\d*|q\d*|ചോദ്യം\s*\d*|[\d\.\:\-\s])*$", intro, re.IGNORECASE):
+                                        q["stem"] = ""
+                                    else:
+                                        q["stem"] = intro
+
+            current_qtype = q.get("question_type", "unknown")
+            if current_qtype.startswith("descriptive"):
+                validated_answer = None
+                is_valid = True
+                reasoning = final_explanation or "Descriptive question — solution verified."
+                llm_status = "completed"
+                llm_details = f"{provider.title()} verified descriptive question."
+                if has_corrected_exp:
+                    llm_details += " Corrected solution explanation."
+            elif not ans_val_on:
                 validated_answer = None
                 is_valid = False
-                reasoning = "Answer validation disabled in settings (.env)"
+                reasoning = final_explanation or "Answer validation disabled in settings (.env)"
                 llm_status = "skipped"
                 llm_details = "Answer validation skipped (disabled in settings)"
             else:
@@ -1119,16 +1525,20 @@ def correction_and_validation_node(state: dict) -> dict:
                     validated_answer = marked if c.answer_status == "agrees" else None
 
                 is_valid = bool(validated_answer and marked and validated_answer.upper() == marked.upper())
-                reasoning = ("Answer key verified and matches" if is_valid else (f"AI verified Option {validated_answer} (differs from marked {marked})" if validated_answer else "Answer disagreement detected"))
+                reasoning = final_explanation or ("Answer key verified and matches" if is_valid else (f"AI verified Option {validated_answer} (differs from marked {marked})" if validated_answer else "Answer disagreement detected"))
                 llm_status = "completed"
                 if is_valid:
-                    llm_details = f"{provider.title()} verified answer (Agreed: Option {validated_answer})."
+                    llm_details = f"{provider.title()} verified answer (Agreed: Option {validated_answer})"
                 else:
-                    llm_details = f"{provider.title()} disagreed: verified Option {validated_answer or 'different'} vs marked Option {marked}."
+                    llm_details = f"{provider.title()} disagreed: verified Option {validated_answer or 'different'} vs marked Option {marked}"
+                if has_corrected_exp:
+                    llm_details += " and corrected solution explanation."
+                else:
+                    llm_details += "."
         else:
             validated_answer = None
             is_valid = False
-            reasoning = "LLM call skipped or offline"
+            reasoning = final_explanation or "LLM call skipped or offline"
             llm_status = "skipped"
             llm_details = "LLM validation skipped / offline"
         
@@ -1148,16 +1558,17 @@ def correction_and_validation_node(state: dict) -> dict:
         if ocr_solved:
             validated_answer = ocr_solved.get("validated_answer")
             is_valid = ocr_solved.get("is_valid", False)
-            reasoning = ocr_solved.get("reasoning", "OCR fallback applied")
+            if not final_explanation:
+                reasoning = ocr_solved.get("reasoning", "OCR fallback applied")
             llm_status = "completed"
-            llm_details = f"Re-verified after OCR: {reasoning}"
+            llm_details = f"Re-verified after OCR: {ocr_solved.get('reasoning', '')}"
 
         pipeline_steps = {
             "scanned": {
                 "name": "scanned",
                 "label": "Scanned",
                 "status": "completed",
-                "details": f"Extracted from PDF Page {q.get('page_number', 0) + 1}"
+                "details": f"Extracted from PDF Page {(q.get('page_number') or 0) + 1}"
             },
             "checked_with_caches": {
                 "name": "checked_with_caches",
@@ -1179,17 +1590,21 @@ def correction_and_validation_node(state: dict) -> dict:
             }
         }
 
-        processed.append({
+        p_item = {
             **q,
             "marked_correct_answer": marked,
             "marked_answer": marked,
             "validated_answer": validated_answer,
             "is_valid": is_valid,
             "confidence": "high",  # We can just say high if it succeeded
+            "explanation": final_explanation,
+            "answer_text": final_explanation,
             "reasoning": reasoning,
             "used_web_search": False,
             "pipeline_steps": pipeline_steps
-        })
+        }
+        clean_question_options_and_answer(p_item)
+        processed.append(p_item)
 
     logger.info(
         "[CorrectionNode] Done: %d corrections accepted, %d flags raised, %d cache promotions",
@@ -1247,29 +1662,25 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
     Called via API endpoint when a user explicitly clicks "Rewrite with AI".
     Sends the single question directly to the LLM for a full rewrite.
     """
-    import re
-
     if provider is None:
         provider = get_correction_provider()
+    # Force gemini for on-demand single question verification, even if global verification is off
+    if provider == "none":
+        provider = "gemini"
+
+    from ..ingest.option_answer_separator import clean_question_options_and_answer, separate_options_dict, classify_question_type
+    clean_question_options_and_answer(q_data)
 
     q_num = q_data.get("question_number", 0)
     stem = q_data.get("stem", "")
     options = q_data.get("options", {})
-    marked = q_data.get("marked_answer") or q_data.get("marked_correct_answer", "Unknown")
-    explanation = q_data.get("explanation") or q_data.get("reasoning", "")
+    marked = q_data.get("marked_correct_answer") or q_data.get("marked_answer") or "Unknown"
+    raw_exp = q_data.get("explanation") or q_data.get("answer_text") or q_data.get("reasoning") or ""
+    explanation = _clean_explanation_text(raw_exp)
 
-    # Extract img tags to avoid sending huge base64 strings as text tokens
-    extracted_images_stem = []
-    def img_replacer_stem(match):
-        extracted_images_stem.append(match.group(0))
-        return "\n[DIAGRAM/IMAGE PLACEHOLDER]\n"
-    clean_stem_for_prompt = re.sub(r'(<div[^>]*>\s*)?<img[^>]+src=[\'"]data:image/[^\'"]+[\'"][^>]*>(\s*</div>)?', img_replacer_stem, stem)
-
-    extracted_images_exp = []
-    def img_replacer_exp(match):
-        extracted_images_exp.append(match.group(0))
-        return "\n[DIAGRAM/IMAGE PLACEHOLDER]\n"
-    clean_exp_for_prompt = re.sub(r'(<div[^>]*>\s*)?<img[^>]+src=[\'"]data:image/[^\'"]+[\'"][^>]*>(\s*</div>)?', img_replacer_exp, explanation)
+    # Send stable, field-owned image markers instead of image bytes to the LLM.
+    clean_stem_for_prompt, extracted_images_stem = _mask_owned_images(stem, f"q{q_num}:stem")
+    clean_exp_for_prompt, extracted_images_exp = _mask_owned_images(explanation, f"q{q_num}:explanation")
 
     prompt = f"--- Question {q_num} ---\nStem: {clean_stem_for_prompt}\n"
     for key in sorted(options.keys()):
@@ -1283,12 +1694,13 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
     p_tok = 0
     c_tok = 0
 
-    if provider == "groq":
+    async def _try_groq():
+        nonlocal corrections, p_tok, c_tok
         api_key = (os.getenv("GROQ_API_KEY") or "").strip()
         if api_key and not api_key.startswith("your_"):
-            from groq import AsyncGroq
-            client = AsyncGroq(api_key=api_key)
             try:
+                from groq import AsyncGroq
+                client = AsyncGroq(api_key=api_key)
                 response = await client.chat.completions.create(
                     model=GROQ_CORRECTION_MODEL,
                     messages=[
@@ -1297,6 +1709,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.1,
+                    max_tokens=min(4000, max(1800, 900 + len(clean_exp_for_prompt) // 2)),
                 )
                 if hasattr(response, "usage") and response.usage:
                     p_tok = response.usage.prompt_tokens or 0
@@ -1308,13 +1721,14 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
             except Exception as e:
                 logger.error("[CorrectionNode] Groq single-q rewrite failed: %s", e)
 
-    elif provider == "gemini":
+    async def _try_gemini():
+        nonlocal corrections, p_tok, c_tok
         api_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
         if api_key and not api_key.startswith("your_"):
-            from google import genai
-            from google.genai import types
-            client = genai.Client(api_key=api_key)
             try:
+                from google import genai
+                from google.genai import types
+                client = genai.Client(api_key=api_key)
                 response = client.models.generate_content(
                     model=GEMINI_CORRECTION_MODEL,
                     contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
@@ -1335,6 +1749,17 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
             except Exception as e:
                 logger.error("[CorrectionNode] Gemini single-q rewrite failed: %s", e)
 
+    if provider == "groq":
+        await _try_groq()
+        if not corrections:
+            logger.warning("[CorrectionNode] Groq failed; falling back to Gemini for single-q rewrite")
+            await _try_gemini()
+    elif provider == "gemini":
+        await _try_gemini()
+        if not corrections:
+            logger.warning("[CorrectionNode] Gemini failed or quota exhausted; falling back to Groq for single-q rewrite")
+            await _try_groq()
+
     if corrections and len(corrections) > 0:
         c = corrections[0]
         cost_usd = calculate_token_cost(p_tok, c_tok, provider)
@@ -1343,21 +1768,32 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
         clean_stem = c.corrected_stem.strip()
         clean_stem = re.sub(r'^(?:Question\s*|Q\.?\s*|ചോദ്യം\s*)\d+\s*(?::\-?|[\.\):-])\s*', '', clean_stem, flags=re.IGNORECASE)
         clean_stem = re.sub(r'^\d+\s*[\.\):-]\s+', '', clean_stem)
-        clean_stem = clean_stem.strip()
+        clean_stem = re.sub(r'(?i)\s*\[\s*\d+(?:\.\d+)?(?:\s*/\s*\d+)?\s*(?:marks?|mark|m)\s*\]', '', clean_stem)
+        clean_stem = re.sub(r'(?i)\s*\(\s*\d+(?:\.\d+)?(?:\s*/\s*\d+)?\s*(?:marks?|mark|m)\s*\)', '', clean_stem)
+        from ..ingest.math_normalizer import normalize_math_in_text
+        clean_stem = normalize_math_in_text(clean_stem)
 
-        # Re-attach extracted images to stem
-        for ext_img in extracted_images_stem:
-            if "[DIAGRAM/IMAGE PLACEHOLDER]" in clean_stem:
-                clean_stem = clean_stem.replace("[DIAGRAM/IMAGE PLACEHOLDER]", ext_img, 1)
-            else:
-                clean_stem += f"\n{ext_img}"
+        clean_stem = _restore_owned_images(clean_stem, extracted_images_stem, stem)
 
-        # Clean any accidental option prefix in options
+        # Clean any accidental option prefix in options and separate any trailing answer/solution
+        # CRITICAL: Must be in parens/brackets or followed by delimiter/space.
+        # NEVER strip 'B' from 'Both' or 'A' from 'All'!
         clean_opts = {}
         for k, v in c.corrected_options.items():
             if isinstance(v, str):
-                v_clean = re.sub(rf'^(?:\(?[{k}{k.lower()}]\)?[\.\):-]?\s*)', '', v.strip())
-                clean_opts[k] = v_clean
+                k_esc = re.escape(k)
+                pat = rf"^\s*(?:\([\s]*[{k_esc}{k_esc.lower()}][\s]*\)[\.\:\-]?|\[[\s]*[{k_esc}{k_esc.lower()}][\s]*\][\.\:\-]?|[{k_esc}{k_esc.lower()}][\.\)\:\-]\s*|[{k_esc}{k_esc.lower()}](?=\s+))\s*"
+                v_clean = re.sub(pat, '', v.strip())
+                v_clean = re.sub(r'\bOth\b', 'Both', v_clean)
+                v_clean = re.sub(r'^(?:[oO]th)\b', 'Both', v_clean)
+                def _fix_both_cn(m: re.Match) -> str:
+                    idx = m.start()
+                    if idx == 0 or re.search(r'(?:^|[.!?\n]\s*)$', v_clean[:idx]):
+                        return 'Both'
+                    return 'both'
+                v_clean = re.sub(r'\both\b', _fix_both_cn, v_clean)
+                v_clean = re.sub(r'\bll\s+of\s+the\s+above\b', 'All of the above', v_clean, flags=re.IGNORECASE)
+                clean_opts[k] = normalize_math_in_text(v_clean)
             else:
                 clean_opts[k] = str(v)
 
@@ -1368,25 +1804,112 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
         else:
             val_ans = marked if c.answer_status == "agrees" else None
 
-        is_valid = bool(val_ans and marked and val_ans.upper() == marked.upper())
-        
-        # Use LLM corrected explanation if available, otherwise original explanation. No fallback text.
+        # Use only the PDF explanation, corrected by the LLM when available.
         reasoning = getattr(c, "corrected_explanation", None) or clean_exp_for_prompt
+        if reasoning:
+            reasoning = re.sub(r'^\(?([A-D])\)?[\s\.\:\-]+', '', reasoning).strip()
+            MAL_CHAR = r'[\u0D00-\u0D7F]'
+            reasoning = re.sub(rf'(?<={MAL_CHAR})[~}}]+|(?<=[~}}]){MAL_CHAR}', '', reasoning)
+            reasoning = normalize_math_in_text(reasoning)
 
-        # Re-attach extracted images to reasoning
-        for ext_img in extracted_images_exp:
-            if reasoning and "[DIAGRAM/IMAGE PLACEHOLDER]" in reasoning:
-                reasoning = reasoning.replace("[DIAGRAM/IMAGE PLACEHOLDER]", ext_img, 1)
+        reasoning = _restore_owned_images(reasoning, extracted_images_exp, raw_exp)
+
+        clean_opts, sep_ans, sep_exp = separate_options_dict(clean_opts, val_ans, reasoning)
+        if sep_ans and not val_ans:
+            val_ans = sep_ans
+        if sep_exp and not reasoning:
+            reasoning = sep_exp
+        
+        from ..ingest.option_answer_separator import heal_assertion_reason_question
+        clean_stem, clean_opts = heal_assertion_reason_question(clean_stem, clean_opts)
+        
+        sub_p = None
+        llm_qtype = getattr(c, "question_type", None)
+        llm_type_str = str(llm_qtype).strip().lower() if llm_qtype else ""
+
+        # Respect LLM question validation: never force descriptive questions into MCQs and never label answers as subquestions
+        if llm_type_str in ("descriptive_single", "descriptive_subquestions"):
+            clean_opts = {}
+            sub_p = None
+            val_ans = None
+            cur_marked = None
+            q_type = "descriptive_single"
+            if clean_stem:
+                from ..ingest.option_answer_separator import extract_subparts_from_text, is_valid_subparts
+                extracted_sub = extract_subparts_from_text(clean_stem)
+                if extracted_sub and is_valid_subparts(extracted_sub):
+                    sub_p = extracted_sub
+                    q_type = "descriptive_subquestions"
+        elif clean_opts and len(clean_opts) >= 2:
+            det_type, det_sub = classify_question_type(clean_opts, reasoning, val_ans or marked)
+            if det_type == "mcq":
+                q_type = "mcq"
+                sub_p = None
+            elif det_sub:
+                q_type = det_type
+                sub_p = det_sub
             else:
-                reasoning = (reasoning or "") + f"\n{ext_img}"
+                q_type = "descriptive_single"
+                sub_p = None
+                clean_opts = {}
+        else:
+            if not llm_type_str:
+                q_type, sub_p = classify_question_type(clean_opts, reasoning, val_ans or marked)
+            else:
+                q_type = llm_type_str
+                _, sub_p = classify_question_type(clean_opts, reasoning, val_ans or marked)
+                if not sub_p and clean_stem:
+                    from ..ingest.option_answer_separator import extract_subparts_from_text, is_valid_subparts
+                    extracted_sub = extract_subparts_from_text(clean_stem)
+                    if extracted_sub and is_valid_subparts(extracted_sub):
+                        sub_p = extracted_sub
 
-        return {
+        if q_type == "mcq" and clean_opts:
+            final_opts = clean_opts
+            cur_marked = marked if marked != "Unknown" else val_ans
+            is_valid = bool(val_ans and cur_marked and val_ans.upper() == str(cur_marked).upper())
+        elif sub_p:
+            q_type = "descriptive_subquestions"
+            final_opts = {}
+            val_ans = None
+            cur_marked = None
+            is_valid = True
+            if not reasoning:
+                reasoning = "Descriptive question — solution verified"
+            if clean_stem:
+                first_key = sorted(sub_p.keys())[0]
+                fk_esc = re.escape(first_key)
+                first_sub_pattern = re.compile(
+                    rf'(?:(?:^|\n|\s{{2,}}|\.\s+)\([{fk_esc}{fk_esc.upper()}]\)\s*)|'
+                    rf'(?:(?:^|\n|[ \t]{{2,}}|\.\s+)[{fk_esc}{fk_esc.upper()}][\.\)\:-]\s*)'
+                )
+                m_sub = first_sub_pattern.search(clean_stem)
+                if m_sub:
+                    intro = clean_stem[:m_sub.start()].strip()
+                    if re.match(r"^(?:question\s*\d*|q\d*|ചോദ്യം\s*\d*|[\d\.\:\-\s])*$", intro, re.IGNORECASE):
+                        clean_stem = ""
+                    else:
+                        clean_stem = intro
+        else:
+            q_type = "descriptive_single"
+            final_opts = {}
+            val_ans = None
+            cur_marked = None
+            is_valid = True
+            if not reasoning:
+                reasoning = "Descriptive question — solution verified"
+
+        res_dict = {
             "success": True,
             "corrected_stem": clean_stem,
-            "corrected_options": clean_opts,
+            "corrected_options": final_opts,
+            "question_type": q_type,
             "validated_answer": val_ans,
             "is_valid": is_valid,
             "reasoning": reasoning,
+            "explanation": reasoning,
+            "answer_text": reasoning,
+            "corrected_explanation": reasoning,
             "token_usage": {
                 "prompt_tokens": p_tok,
                 "completion_tokens": c_tok,
@@ -1394,4 +1917,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                 "estimated_cost_usd": cost_usd,
             }
         }
+        if sub_p:
+            res_dict["sub_parts"] = sub_p
+        return res_dict
     return {"success": False, "error": "LLM failed to return a valid correction"}

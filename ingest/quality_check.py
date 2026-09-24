@@ -185,6 +185,10 @@ def diagnose_failure_type(
     # 4. Check for equation crop failures or broken LaTeX
     eq_tags = re.findall(r'<img[^>]*alt="math"[^>]*/>', question_text)
     for tag in eq_tags:
+        # CDN-hosted images (R2/Cloudflare) are always valid
+        if re.search(r'src="https?://', tag):
+            continue
+        # Base64 images: check for near-empty data = blank crop
         src_match = re.search(r'src="data:image/png;base64,([^"]+)"', tag)
         if src_match:
             b64_data = src_match.group(1)
