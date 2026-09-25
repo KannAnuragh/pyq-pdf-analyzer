@@ -96,6 +96,7 @@ _Q_HEADER_RE = re.compile(
         \s*
         (?:[.):\-]|--)
     )
+    (?!\d)
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -156,6 +157,7 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
     segments: list[QuestionSegment] = []
     current_segment: Optional[QuestionSegment] = None
     current_section: Optional[str] = None
+    prev_elem: Optional[LayoutElement] = None
 
     for raw in span_blocks:
         text = (raw.get("text") or "").strip()
@@ -188,7 +190,10 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
         q_m = _Q_HEADER_RE.match(text)
         if q_m:
             q_num = int(q_m.group(1))
-            if 1 <= q_num <= 300 and _is_question_boundary(elem, body_size):
+            remainder = text[q_m.end():]
+            gap_size = len(remainder) - len(remainder.lstrip())
+            
+            if 1 <= q_num <= 300 and _is_question_boundary(elem, body_size, gap_size, prev_elem, current_segment):
                 # Start a new segment
                 if current_segment is not None and current_segment.elements:
                     segments.append(current_segment)
@@ -198,6 +203,7 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
                     section=current_section,
                     elements=[elem],
                 )
+                prev_elem = elem
                 continue
 
         # -----------------------------------------------------------------
@@ -207,6 +213,8 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
             current_segment.elements.append(elem)
         # Elements before the first question boundary (exam headers/instructions)
         # are silently dropped here.
+        
+        prev_elem = elem
 
     # Flush the last open segment
     if current_segment is not None and current_segment.elements:
@@ -222,34 +230,66 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
 # Structural corroboration test
 # ---------------------------------------------------------------------------
 
-def _is_question_boundary(elem: LayoutElement, body_size: float) -> bool:
+def _is_question_boundary(elem: LayoutElement, body_size: float, gap_size: int, prev_elem: Optional[LayoutElement], current_segment: Optional[QuestionSegment]) -> bool:
     """
     Return True only if structural cues support this element being a
+    Return True only if structural cues support this element being a
     question-header, not just a numbered list item inside explanation text.
-
-    Logic (two-tier):
-      Tier 1 — strong signals (sufficient alone):
-        • is_bold: explicit typographic marking.
-        • x_indent < 0.08: extremely flush-left (true question numbers in most
-          exam formats land here regardless of font).
-
-      Tier 2 — weak signals (must be combined):
-        • font_size >= body average AND x_indent < 0.18:
-          A body-size number near the left margin is likely a question header.
-          A body-size number at x_indent 0.20+ is likely a numbered point
-          inside an explanation or sub-list — reject it.
-
-    This is deliberately conservative: a false-negative (missing a question
-    boundary) is recovered by the regex fallback;  a false-positive (splitting
-    inside an explanation) is much harder to recover from.
     """
     if elem.is_bold:
         return True
-    if elem.x_indent < 0.08:
-        return True
-    # Weak: body-size + moderate indent
-    if elem.font_size >= body_size * 0.97 and elem.x_indent < 0.18:
-        return True
+
+    # Check if this line is indented noticeably further than the current question's start.
+    # If it is, it's a wrapped line inside a paragraph (e.g., "  3. Loop Q") rather than a new question.
+    base_indent = current_segment.elements[0].x_indent if current_segment and current_segment.elements else 0.0
+    is_indented_wrap = (current_segment is not None) and (elem.x_indent > base_indent + 0.02)
+
+    # We do NOT return yet. We must first evaluate if it's a continuation of the previous line.
+
+    # Check if the current segment already contains an 'Answer:' or 'Ans:' block.
+    # If it does, the next numbered item is extremely likely to be the start of a new question,
+    # regardless of horizontal gap sizes.
+    has_answer = False
+    if current_segment:
+        for e in current_segment.elements:
+            if re.search(r'^(?:Answer|Ans|ഉത്തരം)[\s:]', e.text, re.IGNORECASE):
+                has_answer = True
+                break
+
+    # Vertical Distance Check: If there is a noticeable vertical gap (e.g. 2 lines of space)
+    # between the previous block and this block, it signifies a paragraph break.
+    y_gap = 0.0
+    is_new_page = False
+    is_continuation = False
+    if prev_elem:
+        if elem.page != prev_elem.page:
+            is_new_page = True
+        else:
+            y_gap = elem.bbox[1] - prev_elem.bbox[3]
+            
+        # If the previous text ends with punctuation or words strongly implying a wrapped sentence,
+        # we track it to prevent false positive splits on typos.
+        txt = prev_elem.text.strip()
+        if txt:
+            last_word = txt.split()[-1].lower()
+            if last_word.endswith((':', ',', '-', 'the', 'a', 'an', 'and', 'or', 'of', 'in', 'to', 'for', 'with', 'is', 'are', 'ratio', '∶', '::')):
+                is_continuation = True
+                
+    # If this is physically consecutive text AND it follows a continuation marker, it is a wrapped line.
+    if is_continuation and y_gap <= (body_size * 0.8) and not is_new_page:
+        return False
+
+    if not is_indented_wrap:
+        if gap_size >= 2 or gap_size == 0 or elem.x_indent < 0.20:
+            return True
+            
+        if is_new_page or (has_answer and y_gap > body_size * 0.5) or y_gap > (body_size * 0.8):
+            return True
+
+    return False
+    # a 1-space gap (gap_size == 1) is almost certainly just a wrapped line inside the paragraph.
+    # Therefore, we NEVER treat it as a question boundary without a distinct paragraph break.
+    
     return False
 
 

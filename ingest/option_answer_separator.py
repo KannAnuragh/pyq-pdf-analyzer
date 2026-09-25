@@ -515,10 +515,10 @@ def classify_question_type(options: Dict[str, Any], explanation: Optional[str] =
         'താരതമ്യം', 'പട്ടികപ്പെടുത്തുക', 'സൂചിപ്പിക്കുക'
     )
     eng_directives = (
-        'draw ', 'calculate ', 'find the ', 'explain ', 'state ', 'prove that',
-        'derive ', 'show that', 'determine ', 'define ', 'describe ',
-        'distinguish between', 'differentiate between', 'obtain the expression',
-        'evaluate the', 'name the '
+        'draw', 'calculate', 'find', 'explain', 'state', 'prove',
+        'derive', 'show', 'determine', 'define', 'describe',
+        'distinguish', 'differentiate', 'obtain', 'evaluate', 'name',
+        'what', 'why', 'how', 'which'
     )
 
     sub_q_count = 0
@@ -530,7 +530,7 @@ def classify_question_type(options: Dict[str, Any], explanation: Optional[str] =
             elif any(v_low.startswith(e) for e in eng_directives):
                 sub_q_count += 1
 
-    if sub_q_count >= 2:
+    if sub_q_count >= 1:
         return _subq_or_single(sub_parts)
 
     # 1. Inspect explanation for numbered answer steps (e.g. "(a) ... (b) ..." or "1. ... 2. ... 3. ...")
@@ -547,6 +547,8 @@ def classify_question_type(options: Dict[str, Any], explanation: Optional[str] =
     marks_pat = re.compile(r'\[\s*\d+\s*marks?\s*\]|\(\s*\d+\s*marks?\s*\)|\b\d+\s*marks?\b', re.IGNORECASE)
     has_marks = any(isinstance(v, str) and marks_pat.search(v) for v in options.values())
     if has_marks:
+        if is_valid_subparts(sub_parts):
+            return _subq_or_single(sub_parts)
         return "descriptive_single", None
 
     # 3. Check if options contain synthetic padding (e.g. "None of the above") on top of answer steps
@@ -606,10 +608,10 @@ def classify_question_type(options: Dict[str, Any], explanation: Optional[str] =
         'താരതമ്യം', 'പട്ടികപ്പെടുത്തുക', 'സൂചിപ്പിക്കുക'
     )
     eng_directives = (
-        'draw ', 'calculate ', 'find the ', 'explain ', 'state ', 'prove that',
-        'derive ', 'show that', 'determine ', 'define ', 'describe ',
-        'distinguish between', 'differentiate between', 'obtain the expression',
-        'evaluate the', 'name the '
+        'draw', 'calculate', 'find', 'explain', 'state', 'prove',
+        'derive', 'show', 'determine', 'define', 'describe',
+        'distinguish', 'differentiate', 'obtain', 'evaluate', 'name',
+        'what', 'why', 'how', 'which'
     )
 
     sub_q_count = 0
@@ -618,11 +620,11 @@ def classify_question_type(options: Dict[str, Any], explanation: Optional[str] =
             v_low = v.strip().lower()
             if any(m in v_low for m in mal_directives):
                 sub_q_count += 1
-            elif any(v_low.startswith(e) for e in eng_directives):
+            elif any(re.search(r'\b' + re.escape(e) + r'\b', v_low) for e in eng_directives):
                 sub_q_count += 1
 
-    # Require at least 2 choices to have directive verbs before turning standard choices into subquestions
-    if sub_q_count >= 2:
+    # Require at least 1 choice to have directive verbs before turning standard choices into subquestions
+    if sub_q_count >= 1:
         return _subq_or_single(sub_parts)
 
     # If options contain images/diagrams and keys are standard choices, it is definitively an MCQ!

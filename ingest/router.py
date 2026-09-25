@@ -76,7 +76,7 @@ KNOWN_LATEX_COMMANDS = {
 #   {{IMG:https://cdn.example.com/abc.png}}   — Cloudflare R2 image
 #   {{EQ:$\frac{1}{2}$}}                      — inline LaTeX equation
 
-_ANCHOR_IMG_RE = re.compile(r'\{\{IMG:([^}]+)\}\}')
+_ANCHOR_IMG_RE = re.compile(r'\{\{\s*IMG\s*:\s*([^}]+)\}\}')
 _ANCHOR_EQ_RE  = re.compile(r'\{\{EQ:([^}]+)\}\}')
 
 
@@ -93,7 +93,7 @@ def expand_anchor_tokens(text: str) -> str:
 
     # Block diagram token (large images)
     text = re.sub(
-        r'\{\{IMG_BLOCK:([^}]+)\}\}',
+        r'\{\{\s*IMG_BLOCK\s*:\s*([^}]+)\}\}',
         lambda m: (
             f'<div class="my-3 flex flex-col items-center">'
             f'<img src="{m.group(1)}" alt="diagram" '
@@ -1331,40 +1331,41 @@ def extract_text_from_pdf(file_path: str) -> dict:
                         print(f"Page {page_idx + 1}: Dropping invalid equation crop at ({r.x0:.0f},{r.y0:.0f})-({r.x1:.0f},{r.y1:.0f})", flush=True)
                         continue
 
-                    # Try Tesseract OCR first for equations/math snippets
-                    math_text, p_tok, c_tok = ocr_equation_clip(crop_bytes, engine="tesseract")
-                    if math_text:
-                        total_p_tokens += p_tok
-                        total_c_tokens += c_tok
-                        # Emit as {{EQ:...}} anchor token — expand_anchor_tokens() resolves
-                        # it to inline LaTeX at the API serialisation layer.  This prevents
-                        # the raw LaTeX from being mistaken for prose by parse_questions_from_text.
-                        eq_token = f"{{{{EQ:{math_text}}}}}"
-                        equation_items.append({
-                            "text": f" {eq_token} ",
-                            "rect": r,
-                            "bbox": [r.x0, r.y0, r.x1, r.y1],
-                            "x0": r.x0,
-                            "x1": r.x1,
-                            "y0": r.y0,
-                            "y1": r.y1,
-                            "y_center": (r.y0 + r.y1) / 2,
-                            "is_block": False,
-                            # span_blocks metadata
-                            "type": "equation",
-                            "page": page_idx,
-                            "font_size": 0.0,
-                            "is_bold": False,
-                            "x_indent": r.x0 / max(page.rect.width, 1),
-                        })
-                        continue
-
-                    img_url = upload_image_to_cloudflare(crop_bytes, filename=base_filename)
                     h = r.height
                     w = r.width
-
                     # Distinguish block diagrams/figures from inline mathematical expressions
                     is_block = (h > 75 or (h > 55 and w > 280))
+
+                    # Try Tesseract OCR first for equations/math snippets, but SKIP for block diagrams
+                    if not is_block:
+                        math_text, p_tok, c_tok = ocr_equation_clip(crop_bytes, engine="tesseract")
+                        if math_text:
+                            total_p_tokens += p_tok
+                            total_c_tokens += c_tok
+                            # Emit as {{EQ:...}} anchor token — expand_anchor_tokens() resolves
+                            # it to inline LaTeX at the API serialisation layer.  This prevents
+                            # the raw LaTeX from being mistaken for prose by parse_questions_from_text.
+                            eq_token = f"{{{{EQ:{math_text}}}}}"
+                            equation_items.append({
+                                "text": f" {eq_token} ",
+                                "rect": r,
+                                "bbox": [r.x0, r.y0, r.x1, r.y1],
+                                "x0": r.x0,
+                                "x1": r.x1,
+                                "y0": r.y0,
+                                "y1": r.y1,
+                                "y_center": (r.y0 + r.y1) / 2,
+                                "is_block": False,
+                                # span_blocks metadata
+                                "type": "equation",
+                                "page": page_idx,
+                                "font_size": 0.0,
+                                "is_bold": False,
+                                "x_indent": r.x0 / max(page.rect.width, 1),
+                            })
+                            continue
+
+                    img_url = upload_image_to_cloudflare(crop_bytes, filename=base_filename)
                     owner_number = next(
                         (number for y_pos, number in reversed(question_anchors) if y_pos <= r.y0 + 2),
                         None,
@@ -1507,8 +1508,8 @@ def extract_text_from_pdf(file_path: str) -> dict:
         # all_spans is a local in _rebuild_text_from_font_map so we re-extract the
         # page rawdict here at minimal cost (just the dict, no re-rendering).
         try:
-            rawdict_spans = page.get_text("rawdict", flags=0)
-            for blk in rawdict_spans.get("blocks", []):
+            dict_spans = page.get_text("dict", flags=0)
+            for blk in dict_spans.get("blocks", []):
                 if "lines" not in blk:
                     continue
                 for ln in blk["lines"]:
@@ -1532,6 +1533,10 @@ def extract_text_from_pdf(file_path: str) -> dict:
                         })
         except Exception as _span_err:
             print(f"[span_blocks] Page {page_idx + 1}: could not extract span metadata: {_span_err}", flush=True)
+
+    # Sort span blocks in reading order so images (which are extracted first)
+    # are correctly interleaved vertically with text.
+    all_span_blocks.sort(key=lambda b: (b.get("page", 0), b.get("bbox", [0, 0, 0, 0])[1], b.get("bbox", [0, 0, 0, 0])[0]))
 
     return {
         "full_text": "\n\n".join(full_pages),

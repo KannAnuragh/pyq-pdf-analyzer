@@ -518,6 +518,7 @@ function healStudentReadability(text: string): string {
   const fixMathProseBlock = (match: string, inner: string) => {
     const raw = inner.trim();
     if (!raw) return match;
+    if (raw.includes('\uE000HTMLTAG')) return match;
 
     // Check if it has genuine math commands and no bare Indic characters
     const cmds = raw.match(/\\([a-zA-Z]+)/g)?.map(c => c.slice(1)) || [];
@@ -779,6 +780,7 @@ export function renderLatex(text: string): string {
   const MATH_SUFFIX = '\uE005';
 
   s = s.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
+    if (math.includes('\uE000HTMLTAG')) return `$$${math}$$`;
     try {
       const sanitized = sanitizeMathForKatex(math);
       const rendered = katex.renderToString(sanitized, { displayMode: true, throwOnError: false, strict: false });
@@ -791,6 +793,7 @@ export function renderLatex(text: string): string {
   });
 
   s = s.replace(/\\\[([\s\S]+?)\\\]/g, (_, math) => {
+    if (math.includes('\uE000HTMLTAG')) return `\\[${math}\\]`;
     try {
       const sanitized = sanitizeMathForKatex(math);
       const rendered = katex.renderToString(sanitized, { displayMode: true, throwOnError: false, strict: false });
@@ -804,6 +807,7 @@ export function renderLatex(text: string): string {
 
   // 3. Process inline math: $...$ and \(...\) (supports multi-line matrix content)
   s = s.replace(/\$([^\$]+?)\$/g, (_, math) => {
+    if (math.includes('\uE000HTMLTAG')) return `$${math}$`;
     try {
       const sanitized = sanitizeMathForKatex(math);
       const rendered = katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
@@ -816,6 +820,7 @@ export function renderLatex(text: string): string {
   });
 
   s = s.replace(/\\\(([\s\S]+?)\\\)/g, (_, math) => {
+    if (math.includes('\uE000HTMLTAG')) return `\\(${math}\\)`;
     try {
       const sanitized = sanitizeMathForKatex(math);
       const rendered = katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
@@ -932,6 +937,9 @@ export function renderLatex(text: string): string {
     s = s.replaceAll(`%%HTMLTAG_${i}%%`, cleanReplacer);
     s = s.replaceAll(`%%HTMLTAG${i}%%`, cleanReplacer);
     s = s.replaceAll(`___HTML_TAG_${i}___`, cleanReplacer);
+    s = s.replaceAll(`\x02HTMLTAG${i}\x03`, cleanReplacer);
+    s = s.replaceAll(`\u0002HTMLTAG${i}\u0003`, cleanReplacer);
+    s = s.replaceAll(`HTMLTAG${i}`, cleanReplacer);
     // Also heal any legacy/KaTeX-corrupted tag tokens like %%HTMLTA<span...G_0...%%
     s = s.replace(new RegExp(`\uE000HTMLTAG(?:<[^>]+>|[^\uE001])*?${i}(?:<[^>]+>|[^\uE001])*?\uE001`, 'g'), cleanReplacer);
   });
@@ -940,6 +948,9 @@ export function renderLatex(text: string): string {
   renderedMath.forEach((mathHtml, i) => {
     s = s.replaceAll(`${MATH_PREFIX}${i}${MATH_SUFFIX}`, () => mathHtml);
   });
+
+  // 13. Strip any stray raw HTMLTAG markers that leaked from the backend database (for older processed PDFs)
+  s = s.replace(/[\u0000-\u001F\uE000-\uE007]*HTMLTAG\d+[\u0000-\u001F\uE000-\uE007]*/gi, '');
 
   return s;
 }

@@ -490,13 +490,13 @@ def wrap_bare_math(text: str) -> str:
     # Clean bare \text{...} commands if they appear outside math delimiters
     s = re.sub(r'\\text\{\s*([^{}]+?)\s*\}', r'\1', s)
 
-    # Restore HTML tags
-    for idx in reversed(range(len(html_tags))):
-        s = s.replace(f"\uE000HTMLTAG{idx}\uE001", html_tags[idx])
-
     # Restore delimited math
     for idx in reversed(range(len(masked_parts))):
         s = s.replace(f"\uE006DELIMMATH{idx}\uE007", masked_parts[idx])
+
+    # Restore HTML tags
+    for idx in reversed(range(len(html_tags))):
+        s = s.replace(f"\uE000HTMLTAG{idx}\uE001", html_tags[idx])
 
     return s
 

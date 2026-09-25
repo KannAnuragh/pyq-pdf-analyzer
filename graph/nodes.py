@@ -178,9 +178,11 @@ The extracted questions, options, and explanations MUST make complete, clear ped
 
 CRITICAL STUDENT-CENTRIC READABILITY & MATH FORMATTING RULES:
 - THE USERS ARE STUDENTS: All text must read smoothly, clearly, and naturally.
-- DO NOT PUT REGULAR TEXT OR SENTENCES INSIDE LATEX MATH DELIMITERS ($...$ or $$...$$):
+- DO NOT PUT REGULAR TEXT, SENTENCES, OR SUBQUESTION LABELS INSIDE LATEX MATH DELIMITERS ($...$ or $$...$$):
   * LaTeX math mode strips all spaces and renders words in unreadable slanted italics.
-  * Explanatory prose and connecting words MUST remain normal text OUTSIDE math delimiters: write "where $h$ is Planck's constant and $e$ is the charge of an electron", NEVER "whereh $$isPlanck'sconstantande$$".
+  * Explanatory prose, subquestion labels like "(a)" or "(b)", and connecting words MUST remain normal text OUTSIDE math delimiters.
+  * WRONG: `$\text{(b) The reactance is given by } X_C = \frac{1}{\omega C}$`
+  * CORRECT: `(b) The reactance is given by $X_C = \frac{1}{\omega C}$`
   * EXCEPTION for Equations: If an equation inherently contains words or subscripts as words (e.g. "Power = ", "Work", or $i_{\mathrm{rms}}$), you MUST use `\text{...}` or `\mathrm{...}` inside the math block exactly as they appear in the PDF so they render in the correct font (e.g., $i_{\mathrm{rms}} = \frac{V_{\mathrm{rms}}}{R}$ or $\text{Power} = 400\text{ W}$). Do not break the equation just to keep the word out.
 - DO NOT LABEL ANYTHING IN ANSWERS AS SUBQUESTION: Numbered steps or items in answers/solutions are ANSWER/SOLUTION STEPS, NOT sub-questions! Keep all solution steps in 'explanation' / 'answer_text'. NEVER put answer steps into 'sub_parts'.
 
@@ -189,13 +191,13 @@ CRITICAL INSTRUCTIONS:
    - For example: chi-squared must be written as $\\chi^2$, t-test as 't' test or $t$-test.
 2. DIAGRAM & IMAGE POSITIONING:
    - Diagrams may appear before any sub-question starts (introductory question stem), inside a specific sub-question, as an option choice in an MCQ, or in the explanation/solution.
-   - Preserve all HTML image tags (e.g., <img src="..." /> or <div class="..."><img .../></div>) EXACTLY at their original position. NEVER move or delete them.
+   - Preserve all image tokens (e.g., {{IMG:https://...}} or {{IMG_BLOCK:https://...}}) EXACTLY at their original position. NEVER move or delete them.
 3. Determine the structure of the question:
    - "mcq": Has explicit multiple-choice options (e.g., A/B/C/D or 1/2/3/4). If options/choices are listed, it MUST be "mcq".
    - "descriptive_single": A standard descriptive question with no sub-parts.
    - "descriptive_subquestions": A descriptive question containing multiple sub-parts (e.g., (a), (b), (c) or (i), (ii)).
 4. For "mcq" questions:
-   - Extract options into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}. If an option is an image, keep the <img> tag inside that option.
+   - Extract options into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}. If an option contains an image token, keep the {{IMG:...}} token inside that option.
    - CRITICAL (DIFFERENTIATING OPTION LABELS FROM WORDS): When an option starts with a word that begins with the same letter as the option (e.g. Option B is "(b) Both A and B", Option A is "(a) All of the above"): NEVER strip the initial letter from the word! Option B's text MUST be "Both A and B" (NEVER "oth A and B"). Option A's text MUST be "All of the above" (NEVER "ll of the above"). Differentiate clearly between the option label (B) and the text (Both).
    - Extract the correct answer into 'marked_answer' (e.g., "A", "B"). DO NOT solve the question yourself to guess the answer. ONLY extract it if it is explicitly provided (e.g., in an Answer Key or if the explanation starts with "(C)"). Set to null if not explicitly marked.
    - 'sub_parts': null
@@ -241,14 +243,14 @@ Output ONLY a valid JSON array matching this schema:
   {
     "question_number": 2,
     "question_type": "descriptive_subquestions",
-    "stem": "Two point charges are placed...\\n<div class=\"my-3 flex flex-col items-center\"><img src=\"...\" alt=\"diagram\" /></div>",
+    "stem": "Two point charges are placed...\\n{{IMG_BLOCK:https://...}}",
     "options": {},
     "sub_parts": {
       "a": "Draw the surfaces.",
       "b": "Why do they get close?"
     },
     "marked_answer": null,
-    "answer_text": "(a) Equipotential surfaces:\\n<img src='...' alt='diagram' />\\n(b) Because the field is stronger."
+    "answer_text": "(a) Equipotential surfaces:\\n{{IMG:https://...}}\\n(b) Because the field is stronger."
   },
   {
     "question_number": 3,
@@ -612,7 +614,7 @@ def looks_like_question(stem: str, options: dict = None, marked_answer: str = No
         return True
     if marked_answer:
         return True
-    if '<img' in check_text or '<svg' in check_text or 'diagram' in s:
+    if '{{IMG' in check_text or '<svg' in check_text or 'diagram' in s:
         return True
     if '?' in check_text or '؟' in check_text:
         return True
@@ -751,7 +753,7 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
     # that's really part of an equation or a hyphenated fragment (e.g.
     # "...ratio 4-" should not become "Question 4"). But the inline equation
     # /diagram images this pipeline generates for numeric answers are HTML
-    # tags like <img ... class="inline-math-img" style="..." />, and that
+    # tags like {{IMG:https://...}}, and that
     # markup's own closing "/>" is made of exactly the same characters
     # ('/' and '>') the filter is watching for. A REAL question marker that
     # happens to follow an equation image in the raw text — e.g. Q3's answer
@@ -1036,6 +1038,13 @@ def extract_node(state: GraphState) -> GraphState:
                         q["question_number"] = idx
 
                 print(f"[extract_node] Layout-aware extraction produced {len(extracted)} questions.", flush=True)
+                
+                # Strip leading question numbers from stems
+                prefix_re = re.compile(r'^[Qq]*[\.\s]*\d+[\.\)\-:]?\s*')
+                for q in extracted:
+                    if q.get("stem"):
+                        q["stem"] = prefix_re.sub('', q["stem"])
+                
                 return {"extracted_blocks": extracted, "token_usage": state.get("token_usage", {})}
 
             # Segmenter found no boundaries — fall through to regex path
@@ -1049,6 +1058,13 @@ def extract_node(state: GraphState) -> GraphState:
     # --- Existing regex / LLM fallback path (unchanged) ---
     print("[extract_node] Using regex/LLM path.", flush=True)
     extracted = parse_questions_from_text(raw_text, state["token_usage"])
+    
+    # Strip leading question numbers from stems
+    prefix_re = re.compile(r'^[Qq]*[\.\s]*\d+[\.\)\-:]?\s*')
+    for q in extracted:
+        if q.get("stem"):
+            q["stem"] = prefix_re.sub('', q["stem"])
+
     return {"extracted_blocks": extracted, "token_usage": state.get("token_usage", {})}
 
 
@@ -1671,10 +1687,12 @@ Extract ONLY Question {question_number} from this page exactly as it appears for
 The text must make complete, clear pedagogical and grammatical sense to a student.
 CRITICAL INSTRUCTIONS:
 1. Transcribe and preserve all mathematical equations, fractions, formulas, and symbols into standard inline LaTeX ($...) or display LaTeX ($$...$$).
-   - DO NOT put regular English or Malayalam sentences or words inside math delimiters ($...$ or $$...$$). Words inside math mode lose spaces and become unreadable (e.g. `isPlanck'sconstantande`).
+   - DO NOT put regular English or Malayalam sentences, or subquestion labels (like "(a)" or "(b)") inside math delimiters ($...$ or $$...$$). Words inside math mode lose spaces and become unreadable.
+   - WRONG: `$\text{(b) The reactance is given by } X_C = \frac{1}{\omega C}$`
+   - CORRECT: `(b) The reactance is given by $X_C = \frac{1}{\omega C}$`
    - Explanatory phrases must remain normal text outside math mode: write "where $h$ is Planck's constant and $e$ is the charge of an electron", never "whereh $$isPlanck'sconstantande$$".
    - Keep spaces between words and variables (write "where $h$", not "whereh").
-2. Preserve all HTML image tags (e.g., <img src="..." />) EXACTLY as they appear in the text. NEVER remove or modify them.
+2. Preserve all image tokens (e.g., {{IMG:https://...}} or {{IMG_BLOCK:...}}) EXACTLY as they appear in the text. NEVER remove or modify them.
 3. Determine if the question is "mcq" (Multiple Choice) or "descriptive".
 4. For "mcq" questions:
    - Extract options into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}.
@@ -1682,7 +1700,7 @@ CRITICAL INSTRUCTIONS:
    - Extract any solution or explanation into 'explanation'.
 5. For "descriptive" questions (no A/B/C/D choices, often with sub-questions like (a), (b)):
    - Keep the entire question, including sub-questions, inside the 'stem'.
-   - Extract the provided solution, answer, or diagrams into 'answer_text'. Make sure to include any <img> tags that are part of the answer!
+   - Extract the provided solution, answer, or diagrams into 'answer_text'. Make sure to include any {{IMG:...}} tokens that are part of the answer!
    - Leave 'options' empty.
 6. Transcribe Malayalam and Indic text faithfully into standard Unicode script. Do not invent or summarize.
 
