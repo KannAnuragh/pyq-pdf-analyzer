@@ -33,10 +33,12 @@ app.include_router(pdf_router, tags=["pdfs"])
 app.include_router(font_router, prefix="/api")
 app.include_router(font_router)
 
+from .routes import trigger_queue_worker
+
+@app.on_event("startup")
+def on_startup():
+    trigger_queue_worker()
+
 @app.get("/")
 def root():
     return {"message": "Welcome to PDF QA Agent API"}
-# cache buster 3
-# cache buster 4
-# cache buster 2026-09-25 11:55:00
-# cache buster 2026-09-25 12:02:00

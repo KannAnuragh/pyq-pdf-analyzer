@@ -10,6 +10,8 @@ FALSE POSITIVES & RELABELING:
 - Worked solution steps belong in "explanation" / "answer_text", NEVER in "sub_parts".
 - "marked_answer": Explicitly printed answer key letter only (e.g., "Answer: C"), otherwise null. Never guess or solve.
 - Preserve all LaTeX math ($...$) and image tags (<img ...>) in their exact context.
+- CRITICAL: NEVER OMIT ANY TEXT from the source. Every word, formula, and option must be preserved in either stem, options, or explanation.
+- CRITICAL: If you see options like (a), (b), (c), (d) in the text, you MUST extract ALL of them into the "options" object. Do not drop or ignore any options.
 
 JSON Schema:
 [
@@ -29,40 +31,36 @@ Text:
 {text}
 """
 
-SOLVE_PROMPT = """
-You are an expert educator and tutor solving exam questions for students.
-Your solution, reasoning, and explanation will be read directly by STUDENTS preparing for exams. The text MUST make complete, clear pedagogical sense to a student.
+SOLVE_PROMPT = """\
+You are an expert bilingual (English & Malayalam) educator and math tutor reviewing an exam question for students.
 
-CRITICAL STUDENT-CENTRIC INSTRUCTIONS:
-1. Explain step-by-step with complete clarity so that any student can easily understand the concepts, formulas, substitution, and derivation.
-2. DO NOT PUT REGULAR TEXT OR SENTENCES INSIDE LATEX MATH DELIMITERS ($...$ or $$...$$):
-   - In LaTeX math mode, all spaces are stripped, producing mashed unreadable text (e.g. `$is Planck's constant and e$` renders as the nonsensical string `isPlanck'sconstantande`).
-   - Keep all explanations and definitions as clean, natural sentences OUTSIDE math delimiters: write "where $h$ is Planck's constant and $e$ is the charge of an electron", NEVER mash variables and words together (never write "whereh").
-   - Use math mode ($...$) ONLY for mathematical formulas, variables, equations, fractions, and units (e.g. $h$, $e$, $V_0$, $\\frac{h}{e}$, $5 \\times 10^5\\text{ V/m}$).
-   - EQUATION SEPARATION & BALANCED BRACES (CRITICAL):
-     * When writing equations with equality (=), NEVER place the equals sign or the other side inside a fraction denominator, numerator, or square root!
-     * Write $\\frac{A}{B} = \\frac{C}{D}$, NEVER $\\frac{A}{B = \\frac{C}{D}}$ or $\\frac{A}{\\sqrt{B = C}}$.
-     * Subscripts must be properly enclosed in braces: write $V_{proton}$, $V_{\\alpha}$, $m_{proton}$, $\\lambda_{proton}$, $\\lambda_{\\alpha}$, NEVER bare underscores or broken braces like $V_}{proton}$.
-     * Repair malformed equations like \\frac{V_}{proton}{V_{alpha}} = 1 by fixing the braces to \\frac{V_{proton}}{V_{alpha}} = 1.
-     * Never split English words like 'given that' into 'given t hat' or 'given by' into 'given b y'.
-3. DO NOT LABEL ANYTHING IN ANSWERS AS SUBQUESTION: Never prefix or label any reasoning, explanation point, or solution step with 'Subquestion' or 'Sub-question'. Use standard numbered steps (1., 2.) or natural paragraphs.
-4. Verify the explanation and return a polished, student-friendly version with all spelling, OCR, grammar, and punctuation errors fixed. Preserve the original language and mathematical meaning. If no explanation is provided, return an empty string.
-5. Provide your reasoning, the final answer key (e.g. A, B, C, D), and your confidence level ('high', 'medium', 'low').
+TASKS & RULES:
+1. LANGUAGE & TYPOS: Fix all spelling, OCR typos, and Malayalam ligature/font errors in the explanation without translating.
+2. QUESTION TYPE: Verify if question is MCQ with choices (A/B/C/D) or descriptive (single or with subquestions).
+3. LATEX EQUATIONS: Format all math, fractions, and units with valid inline LaTeX ($...$). Fix broken braces ($V_{proton}$), fractions ($\\frac{a}{b}$), and units ($5 \\times 10^5\\text{ V/m}$, $20\\,\\Omega$). Never put ordinary prose or sentences inside $...$.
+4. READABILITY & PARAGRAPHS: Format explanations with clean paragraph breaks (\\n\\n) and numbered steps (1., 2.). Un-mash joined words ("where $h$ is", not "whereh").
+5. VERIFICATION: Independently solve and return `validated_answer` ('A'|'B'|'C'|'D' or null for descriptive), reasoning, and confidence.
+
+Question Type:
+{question_type}
 
 Question Stem:
 {stem}
 
-Options:
+Sub Parts (if any):
+{sub_parts}
+
+Options (if MCQ):
 {options}
 
 Explanation:
 {explanation}
 
-Output your response as JSON matching this schema:
-{
-  "reasoning": "Step-by-step reasoning explaining why the answer is correct",
-  "corrected_explanation": "Corrected explanation text, or an empty string if none was provided",
-  "validated_answer": "A",
-  "confidence": "high"
-}
+Output valid JSON matching:
+{{
+  "reasoning": "Step-by-step reasoning",
+  "corrected_explanation": "Cleaned, readable explanation with proper paragraphs and LaTeX, or empty string if none provided",
+  "validated_answer": "A" | "B" | "C" | "D" | null,
+  "confidence": "high" | "medium" | "low"
+}}
 """

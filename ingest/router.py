@@ -625,10 +625,6 @@ def ocr_equation_clip(img_bytes: bytes, engine: Optional[str] = None) -> tuple[s
         return _try_mathpix()
 
     # Default: 'auto' waterfall
-    res, p, c = _try_tesseract()
-    if res:
-        return res, p, c
-
     res, p, c = _try_mathpix()
     if res:
         return res, p, c
@@ -638,6 +634,10 @@ def ocr_equation_clip(img_bytes: bytes, engine: Optional[str] = None) -> tuple[s
         return res, p, c
 
     res, p, c = _try_gemini()
+    if res:
+        return res, p, c
+
+    res, p, c = _try_tesseract()
     if res:
         return res, p, c
 
@@ -1195,7 +1195,7 @@ def _rebuild_text_from_font_map(page, font_map: dict, equation_items: list[dict]
 
                 if prev_x1 is not None:
                     gap = l["x0"] - prev_x1
-                    is_opt_start = bool(re.match(r'^\s*(?:\([A-Ha-h1-8]\)|\[[A-Ha-h1-8]\]|[A-Ha-h1-8][\.\)\:-])\s*', text))
+                    is_opt_start = bool(re.match(r'^\s*(?:\([A-Ea-e1-4]\)|\[[A-Ea-e1-4]\]|[A-Ea-e][\.\)\:-](?!\S)|[1-4]\.(?!\d)\s+)', text))
                     if is_opt_start:
                         if not band_str.endswith("\t") and not band_str.endswith("   "):
                             band_str += " \t "
@@ -1336,9 +1336,9 @@ def extract_text_from_pdf(file_path: str) -> dict:
                     # Distinguish block diagrams/figures from inline mathematical expressions
                     is_block = (h > 75 or (h > 55 and w > 280))
 
-                    # Try Tesseract OCR first for equations/math snippets, but SKIP for block diagrams
+                    # Try OCR first for equations/math snippets, but SKIP for block diagrams
                     if not is_block:
-                        math_text, p_tok, c_tok = ocr_equation_clip(crop_bytes, engine="tesseract")
+                        math_text, p_tok, c_tok = ocr_equation_clip(crop_bytes)
                         if math_text:
                             total_p_tokens += p_tok
                             total_c_tokens += c_tok
@@ -1481,13 +1481,33 @@ def extract_text_from_pdf(file_path: str) -> dict:
 
         # ---------------------------------------------------------------
         # Step 6: Collect span_blocks for the layout-aware segmenter
-        # Each rendered line/element is emitted as a LayoutElement-compatible
-        # dict carrying bbox, font, bold, and x_indent metadata.  This lets
-        # the new layout_segmenter / block_classifier pipeline use structural
-        # signal (indentation, font size, bold) rather than flat-text pattern
-        # matching to find question boundaries and classify internal structure.
         # ---------------------------------------------------------------
         page_width = max(page.rect.width, 1)
+        
+        # Extract candidate fraction division bars from vector drawings
+        candidate_bars = []
+        try:
+            drawings = page.get_drawings()
+            for d in drawings:
+                r = d.get("rect")
+                if r and r.height <= 2.5 and 3.5 <= r.width <= 320.0:
+                    candidate_bars.append(r)
+            candidate_bars.sort(key=lambda r: (r.y0, r.x0))
+        except Exception:
+            candidate_bars = []
+
+        # Add drawing paths (horizontal lines) to span_blocks for fraction detection
+        for bar in candidate_bars:
+            all_span_blocks.append({
+                "type": "line",
+                "text": "—",
+                "bbox": [bar.x0, bar.y0, bar.x1, bar.y1],
+                "page": page_idx,
+                "font_size": 0.0,
+                "is_bold": False,
+                "x_indent": bar.x0 / page_width,
+            })
+            
         for eq_item in equation_items:
             # equation_items already carry the span_blocks metadata fields
             # added above in Step 1 during this iteration; collect them.
@@ -1535,8 +1555,9 @@ def extract_text_from_pdf(file_path: str) -> dict:
             print(f"[span_blocks] Page {page_idx + 1}: could not extract span metadata: {_span_err}", flush=True)
 
     # Sort span blocks in reading order so images (which are extracted first)
-    # are correctly interleaved vertically with text.
-    all_span_blocks.sort(key=lambda b: (b.get("page", 0), b.get("bbox", [0, 0, 0, 0])[1], b.get("bbox", [0, 0, 0, 0])[0]))
+    # and line-spans are correctly interleaved vertically and horizontally with text.
+    from .layout_segmenter import sort_blocks_in_reading_order
+    all_span_blocks = sort_blocks_in_reading_order(all_span_blocks)
 
     return {
         "full_text": "\n\n".join(full_pages),

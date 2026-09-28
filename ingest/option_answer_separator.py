@@ -18,11 +18,20 @@ Guarantees:
 import re
 from typing import Optional, Dict, Tuple, Any
 
+
+def _plain_classification_text(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r'<(?:strong|b|em|i|mark)\b[^>]*>([\s\S]*?)</(?:strong|b|em|i|mark)>', r'\1', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?[^>]+>', '', text)
+    text = re.sub(r'(?<!\w)(?:\*{1,3}|_{1,3})([^\n]*?)(?:\*{1,3}|_{1,3})(?!\w)', r'\1', text)
+    return text.strip()
+
 # Pattern matching Answer markers:
 # Must be at the start of a line/string, OR separated by whitespace/tabs with an explicit ':' or '-' delimiter.
 # Never match a bare word followed only by newline unless at the start of a line.
+# Also allows being preceded by HTML tags like > or token ends like ]]
 ANSWER_MARKER_PATTERN = re.compile(
-    r"(?:(?:^|\n|\\n)\s*(?:\*\*\s*(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|ഉത്തരം|ശരിയായ\s*ഉത്തരം)\s*\*\*|\*?\*?(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|ഉത്തരം|ശരിയായ\s*ഉത്തരം)\*?\*?\s*(?:[\:\-]+\s*|(?=\n|\\n|$))))|"
+    r"(?:(?:^|\n|\\n|>|\}|\]|\.\s+)\s*(?:\*\*\s*(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|ഉത്തരം|ശരിയായ\s*ഉത്തരം)\s*\*\*|\*?\*?(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|ഉത്തരം|ശരിയായ\s*ഉത്തരം)\*?\*?\s*(?:[\:\-]+\s*|(?=\n|\\n|$))))|"
     r"(?:(?:[ \t]+|\t)(?:\*\*\s*(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|ഉത്തരം|ശരിയായ\s*ഉത്തരം)\s*\*\*|\*?\*?(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|ഉത്തരം|ശരിയായ\s*ഉത്തരം)\*?\*?\s*[\:\-]+\s*))",
     re.IGNORECASE
 )
@@ -30,13 +39,13 @@ ANSWER_MARKER_PATTERN = re.compile(
 # Pattern matching Solution / Explanation markers:
 # A true solution marker is a SECTION HEADER.
 # It can only be:
-# 1. At line start (or preceded by \n) followed by delimiter (:, -, .-) or on its own line before newline:
+# 1. At line start (or preceded by \n, HTML tag > or token ]]) followed by delimiter (:, -, .-) or on its own line before newline:
 #    e.g. "\nExplanation:", "\nSolution\n", "\n**Explanation:**", "\nവിശദീകരണം:"
 # 2. OR separated by 2+ spaces or tabs with explicit delimiter (:, -, .-)
 # NEVER allow a single space in the middle of a sentence without delimiter, because common exam words like
 # "... Reason is correct explanation of Assertion" will falsely match and destroy options and explanations!
 SOLUTION_MARKER_PATTERN = re.compile(
-    r"(?:(?:^|\n|\\n)\s*(?:\*\*\s*(?:Solution|Explanation|Description|Sol|Exp|Hint|Hints|Reasoning|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*\*\*|\*?\*?(?:Solution|Explanation|Description|Sol|Exp|Hint|Hints|Reasoning|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\*?\*?\s*(?:[\:\.\-]+\s*|(?=\n|\\n|$))))|"
+    r"(?:(?:^|\n|\\n|>|\}|\]|\.\s+)\s*(?:\*\*\s*(?:Solution|Explanation|Description|Sol|Exp|Hint|Hints|Reasoning|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*\*\*|\*?\*?(?:Solution|Explanation|Description|Sol|Exp|Hint|Hints|Reasoning|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\*?\*?\s*(?:[\:\.\-]+\s*|(?=\n|\\n|$))))|"
     r"(?:(?:[ \t]{2,}|\t)(?:\*\*\s*(?:Solution|Explanation|Description|Sol|Exp|Hint|Hints|Reasoning|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*\*\*|\*?\*?(?:Solution|Explanation|Description|Sol|Exp|Hint|Hints|Reasoning|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\*?\*?\s*[\:\.\-]+\s*))",
     re.IGNORECASE
 )
@@ -109,6 +118,15 @@ def validate_and_repair_latex(text: str) -> Tuple[str, bool]:
     return fixed, had_issue
 
 
+def _has_subquestion_markers(text: str) -> bool:
+    if not text or not isinstance(text, str):
+        return False
+    subsequent_b = bool(re.search(r'\S+[\s\S]+?(?:^|\n|\s)(?:\(?[b-hB-H]\)?|[b-hB-H]\.|\(ii\)|\(2\))\s+', text))
+    has_a = bool(re.search(r'(?:^|\n|\s)\(?[aA1]\)?[\s\.\:\-]+', text))
+    has_b = bool(re.search(r'(?:^|\n|\s)(?:\(?[b-hB-H2]\)?|[b-hB-H]\.)[\s\.\:\-]+', text))
+    return subsequent_b or (has_a and has_b)
+
+
 def parse_trailing_meta(text: str) -> Tuple[str, Optional[str], Optional[str]]:
     """
     Parses trailing metadata from text (e.g. at the end of an option, question stem, or block).
@@ -132,7 +150,7 @@ def parse_trailing_meta(text: str) -> Tuple[str, Optional[str], Optional[str]]:
             ans_part = clean_text[ans_m.end():sol_m.start()].strip()
             explanation = clean_text[sol_m.end():].strip()
             clean_text = clean_text[:ans_m.start()].strip()
-            has_multi_sub = len(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', ans_part, re.IGNORECASE)) >= 2
+            has_multi_sub = _has_subquestion_markers(ans_part) or _has_subquestion_markers(explanation) or len(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', ans_part, re.IGNORECASE)) >= 2
             if not has_multi_sub:
                 l_match = ANSWER_LETTER_PATTERN.match(ans_part)
                 if l_match:
@@ -149,7 +167,7 @@ def parse_trailing_meta(text: str) -> Tuple[str, Optional[str], Optional[str]]:
             explanation = clean_text[sol_m.end():ans_m.start()].strip()
             ans_part = clean_text[ans_m.end():].strip()
             clean_text = clean_text[:sol_m.start()].strip()
-            has_multi_sub = len(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', ans_part, re.IGNORECASE)) >= 2
+            has_multi_sub = _has_subquestion_markers(ans_part) or _has_subquestion_markers(explanation) or len(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', ans_part, re.IGNORECASE)) >= 2
             if not has_multi_sub:
                 l_match = ANSWER_LETTER_PATTERN.match(ans_part)
                 if l_match:
@@ -159,7 +177,7 @@ def parse_trailing_meta(text: str) -> Tuple[str, Optional[str], Optional[str]]:
     elif ans_m:
         tail = clean_text[ans_m.end():].strip()
         clean_text = clean_text[:ans_m.start()].strip()
-        has_multi_sub = len(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', tail, re.IGNORECASE)) >= 2
+        has_multi_sub = _has_subquestion_markers(tail) or len(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', tail, re.IGNORECASE)) >= 2
         if not has_multi_sub:
             l_match = ANSWER_LETTER_PATTERN.match(tail)
             if l_match:
@@ -181,7 +199,7 @@ def parse_trailing_meta(text: str) -> Tuple[str, Optional[str], Optional[str]]:
         )
         if ans_in_sol:
             marked_answer = (ans_in_sol.group(1) or ans_in_sol.group(2)).upper()
-        elif explanation:
+        elif explanation and not _has_subquestion_markers(explanation):
             leading_ans = re.match(r"^\(?([A-D])\)?(?=[^a-zA-Z0-9]|$)", explanation, re.IGNORECASE)
             if leading_ans:
                 marked_answer = leading_ans.group(1).upper()
@@ -195,10 +213,17 @@ def parse_trailing_meta(text: str) -> Tuple[str, Optional[str], Optional[str]]:
             explanation,
             flags=re.IGNORECASE
         ).strip()
-        if marked_answer:
+        has_subparts = _has_subquestion_markers(explanation)
+        if marked_answer and not has_subparts:
             explanation = re.sub(rf"^\(?{re.escape(marked_answer)}\)?[\s\.\:\-]+", "", explanation, flags=re.IGNORECASE).strip()
             if explanation.strip("() \n\t.").upper() == marked_answer.upper():
                 explanation = None
+        elif has_subparts:
+            if marked_answer == "A":
+                marked_answer = None
+            starts_with_subpart = bool(re.match(r'^\(?[a-dA-D1-9]\)?[\s\.\:\-]+|^\(?[ivxIVX]+\)?[\s\.\:\-]+', explanation))
+            if not starts_with_subpart:
+                explanation = f"(a) {explanation}"
 
     if not marked_answer:
         # Check if text ends with a naked answer like [A] or (C) on its own line
@@ -242,32 +267,45 @@ def split_merged_options(options: Dict[str, Any]) -> Dict[str, str]:
             if is_digit:
                 next_val = int(current_k) + 1
                 cand_chars = [str(next_val)] if next_val <= 8 else []
+                bare_chars = cand_chars
             elif len(str(current_k)) == 1 and str(current_k).isalpha():
                 next_ord = ord(str(current_k).upper()) + 1
                 cand_char = chr(next_ord)
-                cand_chars = [cand_char, cand_char.lower()] if next_ord <= ord('H') else []
+                if next_ord <= ord('H'):
+                    cand_chars = [cand_char, cand_char.lower()]
+                    bare_chars = [cand_char] if current_k.isupper() else [cand_char.lower()]
+                else:
+                    cand_chars = []
+                    bare_chars = []
             else:
                 cand_chars = []
+                bare_chars = []
 
             if not cand_chars:
                 out[current_k] = current_text
                 break
 
-            escaped_cands = [re.escape(c) for c in cand_chars]
-            cand_group = "|".join(escaped_cands)
+            escaped_parens = [re.escape(c) for c in cand_chars]
+            paren_group = "|".join(escaped_parens)
+            escaped_bares = [re.escape(c) for c in bare_chars]
+            bare_group = "|".join(escaped_bares) if bare_chars else ""
 
             # Look for:
-            # 1. Parenthesized/bracketed: (B), [B], (b), [b]
-            # 2. Bare letter: B., B), B:- (preceded by space/newline, followed by space)
+            # 1. Parenthesized/bracketed: (B), [B], (b), [b] (with optional : - .)
+            # 2. Bare letter: B., B), B:- (preceded by space/newline, with MANDATORY whitespace after to avoid ratios like c:1)
+            bare_branch = rf'|([{bare_group}])[\.\)\:-]\s+' if bare_group else ''
             pat = re.compile(
-                rf'(?:^|\n|[ \t]+)(?:\(([{cand_group}])\)|\[([{cand_group}])\]|([{cand_group}])[\.\)\:-])\s+'
+                rf'(?:(?<=\s)|(?<=\n)|^)(?:\(([{paren_group}])\)[\.\:\-]?\s*|\[([{paren_group}])\][\.\:\-]?\s*{bare_branch})'
             )
             m = pat.search(current_text)
-            if m:
+            if m and m.start() > 0:
                 split_idx = m.start()
                 first_part = current_text[:split_idx].strip()
-                matched_char = m.group(1) or m.group(2) or m.group(3)
-                next_k = matched_char.upper() if current_k.isupper() else matched_char
+                if not first_part:
+                    out[current_k] = current_text
+                    break
+                matched_char = m.group(1) or m.group(2) or (m.group(3) if len(m.groups()) >= 3 else None)
+                next_k = matched_char.upper() if current_k.isupper() else matched_char.lower()
                 second_part = current_text[m.end():].strip()
 
                 out[current_k] = first_part
@@ -310,7 +348,7 @@ def separate_options_dict(
         # e.g. "b. Both" strips "b. " but NOT the "B" from "Both".
         # The key insight: after stripping the label, if the remaining text starts with a
         # lowercase letter that could be the continuation of a word, don't strip.
-        pat = rf"^\s*(?:\([\s]*[{k_esc}{k_esc.lower()}][\s]*\)[\.\:\-]?|\[[\s]*[{k_esc}{k_esc.lower()}][\s]*\][\.\:\-]?|[{k_esc}{k_esc.lower()}][\.\)\:\-])\s+"
+        pat = rf"^\s*(?:\([\s]*[{k_esc}{k_esc.lower()}][\s]*\)[\.\:\-]?|\[[\s]*[{k_esc}{k_esc.lower()}][\s]*\][\.\:\-]?|[{k_esc}{k_esc.lower()}]\)[\.\:\-]?)\s+"
         v_clean = re.sub(pat, "", v.strip())
         # Auto-heal truncated words caused by historical/upstream faulty stripping
         v_clean = re.sub(r'\bOth\b', 'Both', v_clean)
@@ -323,6 +361,11 @@ def separate_options_dict(
         v_clean = re.sub(r'\both\b', _fix_both_opt, v_clean)
         v_clean = re.sub(r'\bll\s+of\s+the\s+above\b', 'All of the above', v_clean, flags=re.IGNORECASE)
 
+        # Strip marks indicators from option text (e.g. '[1 mark]', '(2 marks)', '[5 marks]')
+        v_clean = re.sub(r'(?i)\s*\[\s*\d+(?:\.\d+)?(?:\s*/\s*\d+)?\s*(?:marks?|mark|m)\s*\]', '', v_clean)
+        v_clean = re.sub(r'(?i)\s*\(\s*\d+(?:\.\d+)?(?:\s*/\s*\d+)?\s*(?:marks?|mark|m)\s*\)', '', v_clean)
+        v_clean = v_clean.strip()
+
         # Separate trailing answer or explanation from option body
         opt_body, ans, exp = parse_trailing_meta(v_clean)
         clean_opts[k] = opt_body
@@ -333,19 +376,21 @@ def separate_options_dict(
             extracted_exp = exp
     # Override extracted answer if the explanation explicitly starts with an option letter (e.g., "(C) E != 0" or "Answer: A")
     if extracted_exp:
-        pat1 = r"^\s*(?:Answer|Ans|Solution|Sol|Correct\s*Option|Option|Key)[\s\:\-\.]*[\(\[]?\s*([A-D])\s*[\)\]]?(?:[\s\.\:\-]+|is\s*correct\b)?"
-        pat2 = r"^\s*(?:[\(\[]\s*([A-D])\s*[\)\]]|([A-D])\s*[\.\:\-\)]+)(?=\s|$)"
-        
-        m1 = re.match(pat1, extracted_exp, re.IGNORECASE)
-        m2 = re.match(pat2, extracted_exp, re.IGNORECASE)
-        
-        explicit_match = m1 or m2
-        if explicit_match:
-            candidate = (explicit_match.group(1) if m1 else (m2.group(1) or m2.group(2))).upper()
-            # Only override if this candidate actually exists in the options
-            if any(k.upper() == candidate for k in clean_opts.keys()):
-                extracted_ans = candidate
-                # We no longer strip the prefix so that "Answer: C" remains visible in the explanation block.
+        has_multi_sub_exp = len(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', extracted_exp, re.IGNORECASE)) >= 2
+        if not has_multi_sub_exp:
+            pat1 = r"^\s*(?:Answer|Ans|Solution|Sol|Correct\s*Option|Option|Key)[\s\:\-\.]*[\(\[]?\s*([A-D])\s*[\)\]]?(?:[\s\.\:\-]+|is\s*correct\b)?"
+            pat2 = r"^\s*(?:[\(\[]\s*([A-D])\s*[\)\]]|([A-D])\s*[\.\:\-\)]+)(?=\s|$)"
+            
+            m1 = re.match(pat1, extracted_exp, re.IGNORECASE)
+            m2 = re.match(pat2, extracted_exp, re.IGNORECASE)
+            
+            explicit_match = m1 or m2
+            if explicit_match:
+                candidate = (explicit_match.group(1) if m1 else (m2.group(1) or m2.group(2))).upper()
+                # Only override if this candidate actually exists in the options
+                if any(k.upper() == candidate for k in clean_opts.keys()):
+                    extracted_ans = candidate
+                    # We no longer strip the prefix so that "Answer: C" remains visible in the explanation block.
 
     # If marked answer wasn't explicitly given as a letter, check if explanation/answer text
     # or its first line matches one of the option values (e.g. Answer: b/a matches Option B)
@@ -377,7 +422,7 @@ def separate_options_dict(
     return clean_opts, extracted_ans, extracted_exp
 
 
-def is_valid_subparts(sub_parts: Optional[Dict[str, Any]]) -> bool:
+def is_valid_subparts(sub_parts: Optional[Dict[str, Any]], stem: Optional[str] = None) -> bool:
     """
     Validates whether an extracted sub_parts dict represents genuine subquestions.
     Rules:
@@ -391,7 +436,8 @@ def is_valid_subparts(sub_parts: Optional[Dict[str, Any]]) -> bool:
        (Higher, Lower, Increases, Decreases, R_T = 20 Ohm) are ANSWERS, NOT SUBQUESTIONS!
        At least one part MUST contain a genuine question directive (define, calculate, state,
        derive, draw, explain, what, why, how, etc. in English or Malayalam), a question mark (?),
-       or explicit marks allocation. Pure answer steps are strictly rejected.
+       explicit marks allocation, OR the introductory question stem provides the directive prompt
+       (e.g. "Explain how ... when:"). Pure answer steps are strictly rejected.
     """
     if not sub_parts or not isinstance(sub_parts, dict):
         return False
@@ -436,17 +482,21 @@ def is_valid_subparts(sub_parts: Optional[Dict[str, Any]]) -> bool:
         'താരതമ്യം', 'പട്ടികപ്പെടുത്തുക', 'സൂചിപ്പിക്കുക', 'എന്താണ്', 'എന്ത്',
         'എങ്ങനെ', 'എവിടെ', 'എപ്പോൾ', 'ഏതാണ്', 'വിവരിക്കുക', 'തരംതിരിക്കുക'
     )
-    answer_indicators = (
-        'higher', 'lower', 'increases', 'decreases', 'constant', 'remains same',
-        'zero', 'positive', 'negative', 'forward bias', 'reverse bias',
-        'answer:', 'ans:', 'solution:', 'sol:', 'hence', 'therefore', 'we get'
-    )
 
-    has_question_feature = False
+    stem_has_directive = False
+    if stem and isinstance(stem, str):
+        stem_strip = _plain_classification_text(stem)
+        stem_low = stem_strip.lower()
+        stem_has_directive = bool(
+            re.search(r'^(?:explain|state|describe|calculate|find|define|show|prove|derive|write|determine|what|why|how|distinguish|differentiate|obtain|evaluate|name|give|list|mention|compare|വിശദീകരിക്കുക|കണക്കാക്കുക|എഴുതുക|നിർവചിക്കുക|കണ്ടെത്തുക|തെളിയിക്കുക)\b', stem_low)
+            or stem_strip.endswith((':', 'when:', 'following:', 'if:', 'below:', 'എങ്കിൽ:'))
+        )
+
+    has_question_feature = stem_has_directive
     valid_count = 0
 
     for k, v in sub_parts.items():
-        v_str = str(v or "").strip()
+        v_str = _plain_classification_text(v)
         if not v_str:
             return False
         # Remove html tags like <img .../> and <div ...> to inspect actual question text
@@ -457,17 +507,18 @@ def is_valid_subparts(sub_parts: Optional[Dict[str, Any]]) -> bool:
         t_low = text_only.lower()
 
         # Reject pure answer derivations / comparative states without question directives
-        is_answer_word = any(ans in t_low for ans in answer_indicators)
-        has_multi_eq = "=" in text_only and len(text_only.split("=")) >= 2
+        is_pure_answer_val = bool(re.match(r'^(?:higher|lower|increases?|decreases?|remains constant|constant|zero|positive|negative|forward bias|reverse bias|same|remains same|no change)[\.\s]*$', t_low))
+        has_answer_header = any(ans in t_low for ans in ('answer:', 'ans:', 'solution:', 'sol:', 'hence', 'therefore', 'we get'))
+        has_multi_eq = '=' in text_only and len(text_only.split('=')) >= 2
 
         # Check for directive question features:
-        has_qmark = "?" in text_only
+        has_qmark = '?' in text_only
         has_marks = bool(re.search(r'\[\s*\d+\s*marks?\s*\]|\(\s*\d+\s*marks?\s*\)|\b\d+\s*marks?\b', text_only, re.IGNORECASE))
-        has_directive = any(d in t_low for d in eng_directives) or any(m in t_low for m in mal_directives)
+        has_directive = any(re.match(r'^\s*' + re.escape(d) + r'\b', t_low) for d in eng_directives) or any(t_low.startswith(m) for m in mal_directives) or (has_marks and any(re.search(r'\b' + re.escape(d) + r'\b', t_low) for d in eng_directives))
 
         if has_qmark or has_marks or has_directive:
             has_question_feature = True
-        elif is_answer_word or has_multi_eq:
+        elif is_pure_answer_val or has_answer_header or has_multi_eq:
             # Answer step with no question directive is NEVER a subquestion!
             return False
 
@@ -478,22 +529,147 @@ def is_valid_subparts(sub_parts: Optional[Dict[str, Any]]) -> bool:
     return (valid_count >= 2) and has_question_feature
 
 
-def classify_question_type(options: Dict[str, Any], explanation: Optional[str] = None, marked_answer: Optional[str] = None) -> Tuple[str, Optional[Dict[str, str]]]:
+def is_equation_or_formula_text(text: Any) -> bool:
+    """Detects if an option text is predominantly a mathematical formula, equation, value, or unit."""
+    if not text:
+        return True
+    t = str(text).strip()
+    if not t:
+        return True
+    if "$" in t or r"\frac" in t or r"\sqrt" in t or r"\times" in t or r"\mu" in t or r"\pi" in t or r"\vec" in t or r"\hat" in t:
+        return True
+    if re.search(r'[\=\+\-\*\/\^\_\±\×\÷\√\∮\∴\⇒\σ\ε\ϕ\π\μ\τ°²³⁻¹⁰]', t):
+        return True
+    stripped = re.sub(r'<[^>]+>', '', t)
+    stripped = re.sub(r'[\d\s\=\+\-\*\/\^\_{\}\(\)\[\]\\\.,\:\;\%×÷±√πσεϕθμτ°²³⁻¹⁰]', '', stripped)
+    if len(stripped) < 4:
+        return True
+    return False
+
+
+def strip_and_extract_trailing_options_from_stem(
+    stem: str,
+    options: Optional[Dict[str, Any]] = None,
+    marked_answer: Optional[str] = None,
+    explanation: Optional[str] = None
+) -> Tuple[str, Dict[str, str], Optional[str], Optional[str]]:
+    """
+    Universally extracts trailing options and answers trapped at the bottom of the stem.
+    Guarantees:
+    1. Strips trailing options (e.g. '\n(D) 1.0 × 10' or ' (D) 1.0 × 10') and adds to options['D'].
+    2. Iteratively extracts preceding options (e.g. (C)... (D)...) in reverse order.
+    3. Strips trailing marks indicators like '[1 mark]', '(2 marks)'.
+    4. If explanation contains 'Answer: (b) 5.0 \times 10^{17}', extracts marked_answer='B'
+       and populates options['B'] = '5.0 \times 10^{17}' if missing.
+    """
+    opts: Dict[str, str] = {str(k): str(v) for k, v in (options or {}).items()}
+    s = (stem or "").strip()
+    cur_ans = marked_answer
+    cur_exp = explanation
+
+    # 1. Strip trailing marks bracket from stem first
+    s = re.sub(
+        r'(?i)\s*(?:\[\s*\d+(?:\.\d+)?(?:\s*/\s*\d+)?\s*(?:marks?|mark|m)\s*\]|\(\s*\d+(?:\.\d+)?(?:\s*/\s*\d+)?\s*(?:marks?|mark|m)\s*\))\s*$',
+        '',
+        s
+    ).strip()
+
+    # 2. Trailing single/multiple option stripping from stem (ONLY if options are non-empty and incomplete)
+    # If opts is empty, a descriptive question with math equations must NEVER have pieces sliced off its stem!
+    if 0 < len(opts) < 4:
+        trailing_opt_pat = re.compile(
+            r'(?:(?:\n|\s+|\.\s+)\(([A-Ea-e1-4])\)[\.\:\-]?\s*|(?:\n|\s{2,}|\.\s+)([A-Ea-e])[\.\)\:-]\s*(?!\d))([^ \n\r\t][^\n\r]*)$',
+            re.IGNORECASE
+        )
+
+        while True:
+            m = trailing_opt_pat.search(s)
+            if not m:
+                break
+            letter = (m.group(1) or m.group(2)).upper()
+            val = m.group(3).strip()
+            start_idx = m.start()
+            prefix = s[max(0, start_idx - 35):start_idx].lower()
+
+            has_paren = bool(m.group(1))
+
+            # Reject if followed by equation operator or equal sign (e.g. A = 240, A = 120, A + B)
+            # Parenthesized options like (d) \sqrt{c}: 1 or (b) +5 V are completely valid!
+            if not has_paren and re.match(r'^[\=\+\-\*\/\^\_\±\×\÷\√]', val):
+                break
+            elif has_paren and val.startswith('='):
+                break
+
+            # Reject candidate matches preceded by Assertion/Reason/Statement labels:
+            if re.search(r'(?:assertion|reason|statement|പ്രസ്താവന|കാരണം|point|points|junction|terminal|cell|cells|charge|charges|plate|plates|number|mass|each|fragment|fragments|side|radius|amplitude)[\s\:\-\*\_\(]*$', prefix, re.IGNORECASE):
+                break
+            # Reject if val contains Reason/Assertion label
+            if re.search(r'\b(?:reason|കാരണം|assertion|പ്രസ്താവന)\b', val, re.IGNORECASE):
+                break
+            # If letter already in opts with non-empty content, never overwrite or slice
+            if letter in opts and opts[letter].strip():
+                break
+
+            if s[:start_idx].strip():
+                s = s[:start_idx].strip()
+                s = re.sub(
+                    r'(?i)\s*(?:\[\s*\d+(?:\.\d+)?(?:\s*/\s*\d+)?\s*(?:marks?|mark|m)\s*\]|\(\s*\d+(?:\.\d+)?(?:\s*/\s*\d+)?\s*(?:marks?|mark|m)\s*\))\s*$',
+                    '',
+                    s
+                ).strip()
+                if re.match(r"^(?:question\s*\d*|q\d*|ചോദ്യം\s*\d*|[\d\.\:\-\s])*$", s, re.IGNORECASE):
+                    s = ""
+                opts[letter] = val
+            else:
+                s = ""
+                opts[letter] = val
+
+    # 3. If explanation has explicit answer like "Answer: (b) 5.0 \times 10^{17}"
+    if cur_exp and isinstance(cur_exp, str):
+        ans_match = re.search(
+            r'(?:^|\n|\s{2,}|\b)(?:\*\*\s*(?:Answer|Ans(?:wer)?|Correct(?:\s*Option|\s*Answer)?|ഉത്തരം)\s*\*\*|\*?\*?(?:Answer|Ans(?:wer)?|Correct(?:\s*Option|\s*Answer)?|ഉത്തരം)\*?\*?\s*[\:\.\-]+)\s*[\(\[]?\s*([A-Da-d1-4])\s*[\)\]]?[\s\:\.\-]*([^\n]*)',
+            cur_exp,
+            re.IGNORECASE
+        )
+        if ans_match:
+            ans_letter = ans_match.group(1).upper()
+            ans_text = ans_match.group(2).strip()
+            if not cur_ans:
+                cur_ans = ans_letter
+            if ans_text and (ans_letter not in opts or not opts[ans_letter]):
+                opts[ans_letter] = ans_text
+        elif not cur_ans:
+            leading_m = re.match(r'^\s*[\(\[]\s*([A-Da-d1-4])\s*[\)\]][\s\:\.\-]*([^\n]*)', cur_exp, re.IGNORECASE)
+            if leading_m:
+                ans_letter = leading_m.group(1).upper()
+                ans_text = leading_m.group(2).strip()
+                cur_ans = ans_letter
+                if ans_text and (ans_letter not in opts or not opts[ans_letter]):
+                    opts[ans_letter] = ans_text
+
+    return s, opts, cur_ans, cur_exp
+
+
+def classify_question_type(
+    options: Dict[str, Any],
+    explanation: Optional[str] = None,
+    marked_answer: Optional[str] = None,
+    stem: Optional[str] = None
+) -> Tuple[str, Optional[Dict[str, str]]]:
     """
     Determines if a question is MCQ or descriptive (single or with subquestions).
     
-    MCQ: options are standard choices (A, B, C, D) with short answer choices (values, formulas).
+    MCQ: options are standard choices (A, B, C, D) with answer choices (formulas, values, statements, equations).
     Descriptive:
-      - Has sub-questions: options are subparts like (a), (b) asking to explain, calculate, derive, define
+      - Has sub-questions: options are genuine subproblems like (a), (b) asking students to explain, calculate, derive, define
       - Or contains question marks / marks indicators [1 mark]
-      - Or explanation contains subpart solutions like (a)... (b)...
       - Or options are empty / single open-ended question.
     """
     if not options or len(options) < 2:
         return "descriptive_single", None
 
-    keys_upper = sorted([k.upper() for k in options.keys()])
-    sub_parts = {k.lower(): v for k, v in options.items()}
+    keys_upper = sorted([re.sub(r'[^A-Z0-9]', '', str(k).strip().upper()) for k in options.keys()])
+    sub_parts = {str(k).strip().lower(): v for k, v in options.items()}
 
     # Helper to return descriptive_subquestions ONLY if subparts are genuinely valid
     def _subq_or_single(parts: Dict[str, str]) -> Tuple[str, Optional[Dict[str, str]]]:
@@ -504,55 +680,11 @@ def classify_question_type(options: Dict[str, Any], explanation: Optional[str] =
             )
         }
         target_parts = filtered_parts if len(filtered_parts) >= 2 else parts
-        if is_valid_subparts(target_parts):
+        if is_valid_subparts(target_parts, stem=stem):
             return "descriptive_subquestions", target_parts
         return "descriptive_single", None
 
-    # Check if option texts look like genuine directive sub-questions (e.g. "Calculate...", "State...")
-    mal_directives = (
-        'എഴുതുക', 'വിശദീകരിക്കുക', 'കണക്കാക്കുക', 'വരയ്ക്കുക', 'നിർവചിക്കുക',
-        'കണ്ടെത്തുക', 'തെളിയിക്കുക', 'വ്യത്യാസ', 'രൂപീകരിക്കുക', 'പ്രസ്താവിക്കുക',
-        'താരതമ്യം', 'പട്ടികപ്പെടുത്തുക', 'സൂചിപ്പിക്കുക'
-    )
-    eng_directives = (
-        'draw', 'calculate', 'find', 'explain', 'state', 'prove',
-        'derive', 'show', 'determine', 'define', 'describe',
-        'distinguish', 'differentiate', 'obtain', 'evaluate', 'name',
-        'what', 'why', 'how', 'which'
-    )
-
-    sub_q_count = 0
-    for v in options.values():
-        if isinstance(v, str):
-            v_low = v.strip().lower()
-            if any(m in v_low for m in mal_directives):
-                sub_q_count += 1
-            elif any(v_low.startswith(e) for e in eng_directives):
-                sub_q_count += 1
-
-    if sub_q_count >= 1:
-        return _subq_or_single(sub_parts)
-
-    # 1. Inspect explanation for numbered answer steps (e.g. "(a) ... (b) ..." or "1. ... 2. ... 3. ...")
-    # These are ANSWER STEPS, NOT subquestions! Return descriptive_single with no subparts.
-    if explanation and isinstance(explanation, str):
-        exp_subq_matches = set(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', explanation, re.IGNORECASE))
-        if len(exp_subq_matches) >= 2:
-            return "descriptive_single", None
-        exp_numbered_items = len(re.findall(r'(?:^|\n)\s*(?:[1-9]\.|\([1-9]\)|\([ivx]+\)[\.\:]?)\s+', explanation, re.IGNORECASE))
-        if exp_numbered_items >= 2:
-            return "descriptive_single", None
-
-    # 2. Check if option values contain explicit marks indicators [1 mark], [2 marks]
-    marks_pat = re.compile(r'\[\s*\d+\s*marks?\s*\]|\(\s*\d+\s*marks?\s*\)|\b\d+\s*marks?\b', re.IGNORECASE)
-    has_marks = any(isinstance(v, str) and marks_pat.search(v) for v in options.values())
-    if has_marks:
-        if is_valid_subparts(sub_parts):
-            return _subq_or_single(sub_parts)
-        return "descriptive_single", None
-
-    # 3. Check if options contain synthetic padding (e.g. "None of the above") on top of answer steps
-    # These are answers mistakenly parsed as options -> descriptive_single, no subparts!
+    # Check if options contain synthetic padding (e.g. "None of the above") on top of multi-variable answer steps
     non_dummy = {
         k: v for k, v in options.items()
         if str(v).strip().lower() not in (
@@ -561,32 +693,117 @@ def classify_question_type(options: Dict[str, Any], explanation: Optional[str] =
     }
     if len(non_dummy) < len(options) and len(non_dummy) >= 2:
         has_states = any(str(v).strip().lower() in ("higher", "lower", "increase", "decrease", "forward bias", "reverse bias") for v in non_dummy.values())
-        has_multi_eq = any("=" in str(v) and len(str(v).split("=")) >= 2 for v in non_dummy.values())
-        if has_states or has_multi_eq:
+        has_multi_eq = any("=" in str(v) and len(str(v).split("=")) >= 3 for v in non_dummy.values())
+        if has_states and has_multi_eq:
             return "descriptive_single", None
 
-    # 4. Check if options mix comparative states with multi-variable calculations
-    has_comparative_state = any(str(v).strip().lower() in ("higher", "lower", "increases", "decreases") for v in options.values())
-    has_multi_eq = any("=" in str(v) and len(str(v).split("=")) >= 2 for v in options.values())
-    if has_comparative_state and has_multi_eq:
-        return "descriptive_single", None
+    # Check if options duplicate answer steps in explanation (e.g. 1. Higher, 2. Lower)
+    if explanation and isinstance(explanation, str) and (not marked_answer or str(marked_answer).strip().upper() not in keys_upper):
+        exp_lines = [line.strip().lower() for line in explanation.splitlines() if line.strip()]
+        opt_vals = [str(v).strip().lower() for v in options.values()]
+        if any(any(re.match(rf'^(?:[1-9]\.|\([1-9]\)|\([a-d]\))\s*{re.escape(ov)}$', el) for el in exp_lines) for ov in opt_vals if ov in ("higher", "lower", "increases", "decreases", "forward bias", "reverse bias")):
+            return "descriptive_single", None
+
+    # If options contain images/diagrams, it is an MCQ!
+    if any(isinstance(v, str) and ('<img' in v or '<svg' in v or '{{IMG' in v or '[[QAI_IMAGE' in v) for v in options.values()):
+        return "mcq", None
+
+    # ASSERTION-REASON DETECTION: If option text mentions "Assertion" and "Reason" or "Both A and R", force MCQ.
+    assertion_reason_signals = 0
+    for v in options.values():
+        if isinstance(v, str):
+            v_low = _plain_classification_text(v).lower()
+            if re.search(r'(?:both\s+)?assertion\s+and\s+reason', v_low, re.IGNORECASE):
+                assertion_reason_signals += 1
+            elif re.search(r'assertion\s+is\s+(?:true|false|correct)', v_low, re.IGNORECASE):
+                assertion_reason_signals += 1
+            elif re.search(r'\bboth\s+[aA]\s+and\s+[rR]\b', v_low, re.IGNORECASE):
+                assertion_reason_signals += 1
+            elif re.search(r'\b[aA]\s+is\s+(?:true|false)\b', v_low, re.IGNORECASE):
+                assertion_reason_signals += 1
+            elif re.search(r'\b[rR]\s+is\s+(?:the\s+)?(?:correct\s+)?explanation\b', v_low, re.IGNORECASE):
+                assertion_reason_signals += 1
+    if assertion_reason_signals >= 2:
+        return "mcq", None
+
+    if stem and isinstance(stem, str):
+        stem_low = _plain_classification_text(stem).lower()
+        if re.search(r'\b(?:assertion|പ്രസ്താവന)\b', stem_low) and re.search(r'\b(?:reason|കാരണം)\b', stem_low):
+            if len(options) >= 2:
+                return "mcq", None
+
+    # A/B (or 1/2) directive answers are descriptive subquestions, even when
+    # an answer extractor supplied a matching letter. Do this before the
+    # generic MCQ-key check below; otherwise two-part questions become MCQs.
+    if len(options) in (2, 3) and is_valid_subparts(sub_parts, stem=stem):
+        directive_values = [_plain_classification_text(v).lower() for v in options.values()]
+        has_directive = any(
+            re.match(r'^(?:define|explain|calculate|draw|state|derive|determine|find|show|prove|write|what|why|how|which|describe|compare|evaluate|obtain|വിശദീകരിക്കുക|കണക്കാക്കുക|എഴുതുക|നിർവചിക്കുക|കണ്ടെത്തുക|തെളിയിക്കുക)\b', value)
+            for value in directive_values
+        )
+        has_marks = any(re.search(r'\b\d+\s*marks?\b|\[\s*\d+\s*marks?', value, re.IGNORECASE) for value in directive_values)
+        if has_directive or has_marks:
+            return "descriptive_subquestions", sub_parts
 
     # If marked answer is provided and matches an option key, it is an MCQ!
     if marked_answer and str(marked_answer).strip().upper() in keys_upper:
         return "mcq", None
 
-    # ASSERTION-REASON DETECTION: If any option text mentions "both Assertion and Reason",
-    # "Assertion is true", or similar truth-value evaluations, force MCQ classification.
-    assertion_reason_signals = 0
+    # Check if question stem is an introductory directive command (e.g. "Explain how ... when:" or "Calculate the following:")
+    # introducing sub-tasks (a) and (b) without an answer key
+    if stem and isinstance(stem, str) and not marked_answer and len(options) in (2, 3):
+        stem_strip = _plain_classification_text(stem)
+        has_directive_stem = bool(
+            re.search(r'^(?:explain|state|describe|calculate|find|define|show|prove|derive|write|determine|what|why|how|distinguish|differentiate|obtain|evaluate|name|give|list|mention|compare|വിശദീകരിക്കുക|കണക്കാക്കുക|എഴുതുക|നിർവചിക്കുക|കണ്ടെത്തുക|തെളിയിക്കുക)\b', stem_strip, re.IGNORECASE)
+            or stem_strip.endswith((':', 'when:', 'following:', 'if:', 'below:', 'എങ്കിൽ:', ':'))
+        )
+        if has_directive_stem and is_valid_subparts(sub_parts, stem=stem):
+            return "descriptive_subquestions", sub_parts
+
+    # ---- Directive sub-question check (MUST run BEFORE generic MCQ key check) ----
+    # If option texts look like genuine directive sub-questions (start with imperative
+    # commands, contain marks indicators, or have question marks), classify as descriptive
+    # BEFORE we even check if keys are A/B/C/D. This prevents (a) Name device, (b) Draw
+    # circuit, (c) Explain output, (d) Define from being classified as MCQ.
+    mal_directives = (
+        'എഴുതുക', 'വിശദീകരിക്കുക', 'കണക്കാക്കുക', 'വരയ്ക്കുക', 'നിർവചിക്കുക',
+        'കണ്ടെത്തുക', 'തെളിയിക്കുക', 'വ്യത്യാസ', 'രൂപീകരിക്കുക', 'പ്രസ്താവിക്കുക',
+        'താരതമ്യം', 'പട്ടികപ്പെടുത്തുക', 'സൂചിപ്പിക്കുക'
+    )
+    eng_directives = (
+        'draw', 'calculate', 'find', 'explain', 'state', 'prove',
+        'derive', 'show that', 'determine', 'define', 'describe',
+        'distinguish', 'differentiate', 'obtain', 'evaluate', 'name',
+        'what', 'why', 'how', 'which'
+    )
+
+    sub_q_count = 0
+    has_marks = False
+    has_qmark_in_opts = False
+    marks_pat = re.compile(r'\[\s*\d+\s*marks?\s*\]|\(\s*\d+\s*marks?\s*\)|\b\d+\s*marks?\b', re.IGNORECASE)
+
     for v in options.values():
         if isinstance(v, str):
-            v_low = v.strip().lower()
-            if re.search(r'(?:both\s+)?assertion\s+and\s+reason', v_low, re.IGNORECASE):
-                assertion_reason_signals += 1
-            elif re.search(r'assertion\s+is\s+(?:true|false|correct)', v_low, re.IGNORECASE):
-                assertion_reason_signals += 1
-    if assertion_reason_signals >= 2:
-        return "mcq", None
+            v_low = _plain_classification_text(v).lower()
+            if marks_pat.search(v):
+                has_marks = True
+            if '?' in v_low:
+                has_qmark_in_opts = True
+            if any(v_low.startswith(m) for m in mal_directives):
+                sub_q_count += 1
+            elif any(re.match(r'^\s*' + re.escape(e) + r'\b', v_low) for e in eng_directives):
+                sub_q_count += 1
+
+    # If 2+ options are directive sub-questions, OR options have marks indicators,
+    # OR options contain question marks — classify as descriptive subquestions.
+    if (has_marks or sub_q_count >= 2 or (has_qmark_in_opts and sub_q_count >= 1)) and is_valid_subparts(sub_parts, stem=stem):
+        return _subq_or_single(sub_parts)
+
+    # Check if option texts are unreasonably long for MCQ choices (> 350 chars avg of actual text)
+    clean_lens = [len(_plain_classification_text(v)) for v in options.values()]
+    avg_len = sum(clean_lens) / max(1, len(options))
+    if avg_len > 350 and is_valid_subparts(sub_parts, stem=stem):
+        return _subq_or_single(sub_parts)
 
     valid_mcq_sets = (
         ["A", "B", "C", "D"],
@@ -595,65 +812,26 @@ def classify_question_type(options: Dict[str, Any], explanation: Optional[str] =
         ["A", "B"],
         ["1", "2", "3", "4"],
         ["1", "2", "3"],
-        ["1", "2"]
+        ["1", "2"],
+        ["I", "II", "III", "IV"],
+        ["I", "II", "III"]
     )
-    if keys_upper not in valid_mcq_sets:
+
+    is_valid_digit_mcq = all(k in ('1', '2', '3', '4', '5') for k in keys_upper) and '1' in keys_upper and len(keys_upper) >= 2
+    is_valid_letter_mcq = all(k in ('A', 'B', 'C', 'D', 'E') for k in keys_upper) and ('A' in keys_upper or 'B' in keys_upper) and len(keys_upper) >= 2
+    is_valid_roman_mcq = all(k in ('I', 'II', 'III', 'IV', 'V') for k in keys_upper) and 'I' in keys_upper and len(keys_upper) >= 2
+
+    is_valid_mcq = (keys_upper in valid_mcq_sets) or is_valid_digit_mcq or is_valid_letter_mcq or is_valid_roman_mcq
+
+    if not is_valid_mcq:
         return _subq_or_single(sub_parts)
 
-    # 3. Check if option texts look like genuine directive sub-questions
-    # (Must be imperative commands instructing students to perform an exercise)
-    mal_directives = (
-        'എഴുതുക', 'വിശദീകരിക്കുക', 'കണക്കാക്കുക', 'വരയ്ക്കുക', 'നിർവചിക്കുക',
-        'കണ്ടെത്തുക', 'തെളിയിക്കുക', 'വ്യത്യാസ', 'രൂപീകരിക്കുക', 'പ്രസ്താവിക്കുക',
-        'താരതമ്യം', 'പട്ടികപ്പെടുത്തുക', 'സൂചിപ്പിക്കുക'
-    )
-    eng_directives = (
-        'draw', 'calculate', 'find', 'explain', 'state', 'prove',
-        'derive', 'show', 'determine', 'define', 'describe',
-        'distinguish', 'differentiate', 'obtain', 'evaluate', 'name',
-        'what', 'why', 'how', 'which'
-    )
-
-    sub_q_count = 0
-    for v in options.values():
-        if isinstance(v, str):
-            v_low = v.strip().lower()
-            if any(m in v_low for m in mal_directives):
-                sub_q_count += 1
-            elif any(re.search(r'\b' + re.escape(e) + r'\b', v_low) for e in eng_directives):
-                sub_q_count += 1
-
-    # Require at least 1 choice to have directive verbs before turning standard choices into subquestions
-    if sub_q_count >= 1:
-        return _subq_or_single(sub_parts)
-
-    # If options contain images/diagrams and keys are standard choices, it is definitively an MCQ!
-    if any(isinstance(v, str) and ('<img' in v or '<svg' in v) for v in options.values()):
+    # If all or most options are formulas/equations/values/units/ratios, force MCQ classification
+    # This MUST happen before _subq_or_single to prevent equation MCQ options from being
+    # misclassified as subquestions (Bug 4: A,B,C,D with all-equation options -> 'a,b,c,d' subparts)
+    formula_count = sum(1 for v in options.values() if is_equation_or_formula_text(v))
+    if formula_count >= len(options) - 1 and len(options) >= 2:
         return "mcq", None
-
-    # FORMULA-ONLY OPTIONS: If ALL option values are purely mathematical expressions
-    # (LaTeX, fractions, numbers with units, single symbols), force MCQ classification.
-    # These are answer choices, not sub-questions.
-    formula_opt_count = 0
-    for v in options.values():
-        if isinstance(v, str):
-            # Strip LaTeX, HTML, numbers, math symbols, units to see if any directive text remains
-            v_stripped = re.sub(r'\$[^$]*\$', '', v)
-            v_stripped = re.sub(r'<[^>]+>', '', v_stripped)
-            v_stripped = re.sub(r'\\(?:frac|sqrt|times|div|pm|cdot|hat|vec|overline)\b', '', v_stripped)
-            v_stripped = re.sub(r'[\d\s\=\+\-\*\/\^\_{\}\(\)\[\]\\\.,\:\;\%×÷±√πσεϕθμτ°²³⁻¹⁰]', '', v_stripped)
-            v_stripped = re.sub(r'\b[a-zA-Z]{1,3}\b', '', v_stripped)  # Single short variables/units
-            if len(v_stripped.strip()) < 3:
-                formula_opt_count += 1
-    if formula_opt_count == len(options) and len(options) >= 2:
-        return "mcq", None
-
-    # 4. Check if option texts are unreasonably long for MCQ choices (> 350 chars avg of actual text)
-    # Strip HTML tags (e.g. <img .../>) so diagram choices are never penalized or converted into sub-questions!
-    clean_lens = [len(re.sub(r'<[^>]+>', '', str(v)).strip()) for v in options.values()]
-    avg_len = sum(clean_lens) / max(1, len(options))
-    if avg_len > 350:
-        return _subq_or_single(sub_parts)
 
     return "mcq", None
 
@@ -709,8 +887,8 @@ def extract_subparts_from_text(text: str) -> Optional[Dict[str, str]]:
 
     # Matches markers like (a), (b) or (1), (2) or (i), (ii), or bare letters a., b., a), b)
     subq_pattern = re.compile(
-        r'(?:(?:^|\n|\s{2,}|\.\s+)\(([a-hA-H1-8]|[ivxlcdmIVXLCDM]+)\)\s*)|'
-        r'(?:(?:^|\n|[ \t]{2,}|\.\s+)([a-hA-H]|[ivxlcdmIVXLCDM]+)[\.\)\:-]\s*)'
+        r'(?:(?:^|\n|\s{2,}|\.\s+)\(([a-eA-E1-4]|[ivxlcdmIVXLCDM]+)\)\s*)|'
+        r'(?:(?:^|\n|[ \t]{2,}|\.\s+)([a-eA-E]|[ivxlcdmIVXLCDM]+)[\.\)\:-]\s*(?!\d))'
     )
     raw_matches = list(subq_pattern.finditer(text))
     if len(raw_matches) < 2:
@@ -723,10 +901,18 @@ def extract_subparts_from_text(text: str) -> Optional[Dict[str, str]]:
         prefix = text[max(0, start_idx - 35):start_idx].lower()
         has_paren = bool(m.group(1))
 
+        # Reject if followed by equation operator or equal sign (e.g. A = 240, A = 120, A + B)
+        # Parenthesized markers like (b) +5 V or (c) \sqrt{2} should never be rejected
+        post_snippet = text[m.end():m.end() + 10].strip()
+        if not has_paren and re.match(r'^[\=\+\-\*\/\^\_\±\×\÷\√]', post_snippet):
+            continue
+        elif has_paren and post_snippet.startswith('='):
+            continue
+
         # Reject candidate matches preceded by Assertion/Reason/Statement labels:
         if re.search(r'(?:assertion|reason|statement|പ്രസ്താവന|കാരണം)[\s\:\-\*\_\(]*$', prefix, re.IGNORECASE):
             continue
-        # Reject candidate matches preceded by prepositions / linkers / points:
+        # Reject candidate matches preceded by prepositions / linkers / points / math variable contexts:
         # ONLY reject if the preceding word is a full word (2+ chars)
         prev_word_m = re.search(r'([a-zA-Z]+)\s*(?:and\s*)?$', prefix)
         if prev_word_m:
@@ -734,7 +920,9 @@ def extract_subparts_from_text(text: str) -> Optional[Dict[str, str]]:
             reject_set = {'both', 'between', 'from', 'to', 'and', 'or', 'is', 'are', 'was', 'were',
                          'if', 'whether', 'that', 'when', 'where', 'of', 'in', 'for', 'with',
                          'junction', 'terminal', 'point', 'points', 'cell', 'cells',
-                         'charge', 'charges', 'plate', 'plates'}
+                         'charge', 'charges', 'plate', 'plates', 'number', 'mass',
+                         'each', 'fragment', 'fragments', 'side', 'radius', 'amplitude',
+                         'wavelength', 'frequency', 'constant', 'variable'}
             if len(pw) >= 2 and pw in reject_set:
                 continue
         # Reject candidate matches preceded by digits (e.g. scientific unit "0.2 A.")
@@ -890,10 +1078,14 @@ def clean_question_options_and_answer(q: Any) -> Any:
     # stem is stripped out and folded into marked/exp before option-cleaning runs.
     new_stem, marked, exp = clean_stem_contamination(stem, marked, exp)
 
+    # Trailing option & answer stripping: extract dangling trailing options like '(D) 1.0 \times 10'
+    # or answer choices from explanation/stem into opts before separate_options_dict runs.
+    new_stem, opts, marked, exp = strip_and_extract_trailing_options_from_stem(new_stem, opts, marked, exp)
+
     # Check if sub_parts already exists on q. If invalid (e.g. empty part or marks-only part),
     # collapse it back into new_stem so diagrams and text are preserved in the stem!
     existing_sub = (q.get("sub_parts") if is_dict else getattr(q, "sub_parts", None))
-    if existing_sub and not is_valid_subparts(existing_sub):
+    if existing_sub and not is_valid_subparts(existing_sub, stem=new_stem):
         parts_to_reintegrate = []
         for k in sorted(existing_sub.keys()):
             v_content = str(existing_sub[k] or "").strip()
@@ -916,9 +1108,11 @@ def clean_question_options_and_answer(q: Any) -> Any:
 
     clean_opts, new_marked, new_exp = separate_options_dict(opts, marked, exp)
     new_stem, clean_opts = heal_assertion_reason_question(new_stem, clean_opts)
-    q_type, sub_parts = classify_question_type(clean_opts, new_exp, marked_answer=new_marked)
-    if not sub_parts and existing_sub and is_valid_subparts(existing_sub):
+    q_type, sub_parts = classify_question_type(clean_opts, new_exp, marked_answer=new_marked, stem=new_stem)
+    if not sub_parts and existing_sub and is_valid_subparts(existing_sub, stem=new_stem):
         sub_parts = existing_sub
+        q_type = "descriptive_subquestions"
+        clean_opts = {}
 
     # LaTeX structural validation across every text field. Best-effort repair, but we
     # ALWAYS flag `needs_review` if any field had to be repaired — a mechanically fixed
@@ -941,19 +1135,33 @@ def clean_question_options_and_answer(q: Any) -> Any:
             needs_review = True
             latex_issues.append("explanation")
     
-    # Adopt LLM-verified question_type if present
-    if llm_q_type and str(llm_q_type).strip().lower() in ("mcq", "descriptive_single", "descriptive_subquestions", "descriptive"):
-        q_type = str(llm_q_type).strip().lower()
-        if q_type == "mcq" and not clean_opts:
-            from ..graph.nodes import separate_stem_and_options
-            rec_stem, rec_opts, rec_ans, rec_exp = separate_stem_and_options(new_stem)
-            if rec_opts and len(rec_opts) >= 2:
+    # If options are empty or incomplete (< 4), attempt to recover options from stem
+    if not clean_opts or len(clean_opts) < 4:
+        from ..graph.nodes import separate_stem_and_options
+        rec_stem, rec_opts, rec_ans, rec_exp = separate_stem_and_options(new_stem)
+        if rec_opts and len(rec_opts) >= 2:
+            rec_type, rec_sub = classify_question_type(rec_opts, new_exp or rec_exp, marked_answer=new_marked or rec_ans, stem=rec_stem)
+            if rec_type == "mcq" and len(rec_opts) > len(clean_opts):
                 new_stem = rec_stem
                 clean_opts = rec_opts
                 if not new_marked and rec_ans:
                     new_marked = rec_ans
                 if not new_exp and rec_exp:
                     new_exp = rec_exp
+                q_type = "mcq"
+                sub_parts = None
+            elif rec_type == "descriptive_subquestions" and not sub_parts and rec_sub:
+                sub_parts = rec_sub
+                q_type = "descriptive_subquestions"
+                clean_opts = {}
+                if not new_marked and rec_ans:
+                    new_marked = rec_ans
+                if not new_exp and rec_exp:
+                    new_exp = rec_exp
+
+    # Adopt LLM-verified question_type if options are still empty and no MCQ detected
+    if not clean_opts and llm_q_type and str(llm_q_type).strip().lower() in ("descriptive_single", "descriptive_subquestions", "descriptive"):
+        q_type = str(llm_q_type).strip().lower()
 
     try:
         from .math_normalizer import normalize_math_in_text
@@ -970,13 +1178,13 @@ def clean_question_options_and_answer(q: Any) -> Any:
     # If sub_parts not found from options, try extracting from stem
     if not sub_parts and new_stem and q_type != "mcq":
         extracted_sub = extract_subparts_from_text(new_stem)
-        if extracted_sub and is_valid_subparts(extracted_sub):
+        if extracted_sub and is_valid_subparts(extracted_sub, stem=new_stem):
             sub_parts = extracted_sub
             q_type = "descriptive_subquestions"
 
     # If sub_parts exists and is valid, extract only the introductory stem (strip sub-questions out of stem)
     # to prevent duplicating the question in both stem and sub_parts!
-    if sub_parts and is_valid_subparts(sub_parts) and new_stem:
+    if sub_parts and is_valid_subparts(sub_parts, stem=new_stem) and new_stem:
         first_key = sorted(sub_parts.keys())[0]
         fk_esc = re.escape(first_key)
         first_sub_pattern = re.compile(
@@ -1001,11 +1209,17 @@ def clean_question_options_and_answer(q: Any) -> Any:
         final_opts = clean_opts
         sub_parts = None
     elif q_type.startswith("descriptive"):
-        q_type = "descriptive_single"
-        final_opts = {}
-        new_marked = None
-        if clean_opts and not new_exp:
-            new_exp = "\n".join(f"{k}. {v}" for k, v in clean_opts.items())
+        mcq_keys = set(str(k).upper() for k in clean_opts.keys())
+        if len(clean_opts) >= 2 and mcq_keys.issubset({'A', 'B', 'C', 'D', 'E'}):
+            q_type = "mcq"
+            final_opts = clean_opts
+            sub_parts = None
+        else:
+            q_type = "descriptive_single"
+            final_opts = {}
+            new_marked = None
+            if clean_opts and not new_exp:
+                new_exp = "\n".join(f"{k}. {v}" for k, v in clean_opts.items())
     else:
         final_opts = clean_opts
 

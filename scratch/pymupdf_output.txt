@@ -1,0 +1,63 @@
+warning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.
+CURRENT ELECTRICITY 
+UNIT TEST 
+CBSE Class 12; Physics 
+1. A steady current of 8 mA flows through a wire. The number of electrons passing 
+through a cross-section of the wire in 10 s is: 
+ 
+ 
+ 
+[1 mark] 
+(a) 4.0 × 1016 
+(b) 5.0 × 1017 
+(c) 1.6 × 1016 
+(d) 1.0 × 1017 
+Answer: 
+(b) 5.0 × 1017 
+ 
+2. By increasing the temperature, the specific resistance of a conductor and a 
+semiconductor:   
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+[1 mark] 
+(a) increases for both.  
+(b) decreases for both.  
+(c) increases for a conductor and decreases for a semiconductor.  
+(d) decreases for a conductor and increases for a semiconductor. 
+Answer: 
+(c) increases for a conductor and decreases for a semiconductor 
+ 
+3. A cell of emf E is connected across an external resistance R. When current 'I' is 
+drawn from the cell, the potential difference across the electrodes of the cell drops 
+to V. The internal resistance 'r' of the cell is: 
+ 
+ 
+ 
+[1 mark] 
+(a) (
+E−V
+E )R 
+(b) (
+E−V
+E ) 
+(c) 
+(E−V)R
+I
+ 
+(d) (
+E−V
+V )R  
+Answer: 
+(d) (
+E−V
+V ) R 
+ 
+ 
+ 
+ 
+

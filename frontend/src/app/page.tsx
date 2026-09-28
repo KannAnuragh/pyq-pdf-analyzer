@@ -10,7 +10,11 @@ import {
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || (
+  typeof window === 'undefined'
+    ? 'http://localhost:8000'
+    : `${window.location.protocol}//${window.location.hostname}:8000`
+);
 
 const KNOWN_KATEX_COMMANDS = new Set([
   'frac', 'dfrac', 'tfrac', 'sqrt', 'times', 'div', 'pm', 'mp', 'cdot', 'circ', 'degree',
@@ -115,8 +119,21 @@ function formatQuestionStem(text: string): string {
   let s = text.replace(/\u00a0/g, ' ');
 
   // Remove redundant leading Question prefix if duplicated in stem (e.g. "Q1: ", "Question 1:- ", "1. ")
-  s = s.replace(/^(?:Question\s*|Q\.?\s*|ചോദ്യം\s*)\d+\s*(?::\-?|[\.\):-])\s*/i, '');
+  s = s.replace(/^(?:Question\s*|Q\.?\s*|\u0d1a\u0d4b\u0d26\u0d4d\u0d2f\u0d02\s*)\d+\s*(?::\-?|[\.\):-])\s*/i, '');
   s = s.replace(/^\d+\s*[\.\):-]\s+/, '');
+
+  // Strip trailing marks indicators like [1 mark], (2 marks), [5 marks]
+  s = s.replace(/\s*\[\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\]/gi, '');
+  s = s.replace(/\s*\(\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\)/gi, '');
+
+  // Separate Reason onto a newline if it was merged right after Assertion
+  s = s.replace(/(?<=[^\n])\s*(?=\b(?:Reason|\u0d15\u0d3e\u0d30\u0d23\u0d02)\s*(?:\([rR]\)|[\:\.\-]+))/gi, '\n');
+
+  // Bold Assertion and Reason labels if not already wrapped in bold
+  s = s.replace(/(?<!\*\*)\b(Assertion(?:\s*\([aA]\))?\s*[:\.\-])(?!\*\*)/gi, '**$1**');
+  s = s.replace(/(?<!\*\*)\b(Reason(?:\s*\([rR]\))?\s*[:\.\-])(?!\*\*)/gi, '**$1**');
+  s = s.replace(/(?<!\*\*)\b(\u0d2a\u0d4d\u0d30\u0d38\u0d4d\u0d24\u0d3e\u0d35\u0d28(?:\s*\([aA]\))?\s*[:\.\-])(?!\*\*)/gi, '**$1**');
+  s = s.replace(/(?<!\*\*)\b(\u0d15\u0d3e\u0d30\u0d23\u0d02(?:\s*\([rR]\))?\s*[:\.\-])(?!\*\*)/gi, '**$1**');
 
   // Ensure Roman numerals like (i), (ii), (iii), (iv), (v) or i), ii) have a newline before them
   s = s.replace(/(?<=[^\n])\s+(\([ivxlcdmIVXLCDM]+\))\s*/g, '\n$1 ');
@@ -131,72 +148,107 @@ function formatQuestionStem(text: string): string {
   return s.trim();
 }
 
-/**
- * Determines if a question is MCQ type.
- * Prioritizes explicit backend classification and protects descriptive subquestions from false MCQ conversion.
- */
+function plainClassificationText(value: unknown): string {
+  return String(value ?? '')
+    .replace(/<(?:strong|b|em|i|mark)\b[^>]*>([\s\S]*?)<\/(?:strong|b|em|i|mark)>/gi, '$1')
+    .replace(/<[^>]+>/g, '')
+    .replace(/(?<!\w)(?:\*{1,3}|_{1,3})([^\n]*?)(?:\*{1,3}|_{1,3})(?!\w)/g, '$1')
+    .trim();
+}
+
 export function isMcq(q: any): boolean {
   if (!q) return false;
   
-  // 1. Strict priority to backend / LLM classification
+  const healed = healAssertionReasonQuestion(q);
+  const opts: Record<string, any> = (healed && healed.options && Object.keys(healed.options).length > 0) ? healed.options : (q.options || {});
+  const hasOptions = Object.keys(opts).length >= 2;
+
+  // 1. Strict priority to backend / LLM classification if explicitly confirmed
+  // BUT only trust it when it makes sense with the actual data:
+  // - Trust 'mcq' ONLY if options actually exist (otherwise show nothing = bug)  
+  // - Trust 'descriptive_*' ONLY if no mcq-like options with marked answer exist
   if (q.question_type) {
     const qt = String(q.question_type).toLowerCase().trim();
-    if (qt.startsWith('descriptive')) return false;
-    if (qt === 'mcq') return true;
+    if (qt === 'mcq') {
+      // A persisted MCQ label can be stale when A/B are actually directive
+      // subquestions. Validate the content before trusting the label.
+      if (q.sub_parts && isValidSubparts(q.sub_parts, q.stem)) return false;
+      const candidateParts = q.options && isValidSubparts(q.options, q.stem) ? q.options : null;
+      if (candidateParts) {
+        const values = Object.values(candidateParts).map(v => plainClassificationText(v).toLowerCase());
+        const hasDirective = values.some(v => /^(?:define|explain|calculate|draw|state|derive|determine|find|show|prove|write|what|why|how|which|describe|compare|evaluate|obtain)\b/i.test(v));
+        const hasMarks = values.some(v => /\b\d+\s*marks?\b|\[\s*\d+\s*marks?/i.test(v));
+        if (hasDirective || hasMarks) return false;
+      }
+      // Only trust MCQ classification if options actually exist
+      if (hasOptions) return true;
+      // If options are empty despite mcq classification, fall through to check
+    }
+    if (qt === 'descriptive_subquestions') return false;
+    if (qt === 'descriptive_single') {
+      // Only trust if no options with a marked answer (which would be an MCQ)
+      const marked = (q.marked_correct_answer || q.marked_answer || '').toString().toUpperCase().trim();
+      if (!hasOptions || !marked) return false;
+      // Has options + marked answer -> might be a miscategorized MCQ, fall through
+    }
   }
 
-  // 2. If sub_parts exist and are populated, it is descriptive
-  if (q.sub_parts && isValidSubparts(q.sub_parts)) return false;
-  if (extractSubpartsFromText(q.stem)) return false;
+  // 2. If sub_parts exist and are populated with genuine subquestions, it is descriptive
+  if (q.sub_parts && isValidSubparts(q.sub_parts, q.stem)) return false;
 
-  const opts: Record<string, any> = q.options || {};
-  const entries = Object.entries(opts);
-  if (entries.length < 2) return false;
+  if (!hasOptions) return false;
 
-  const keys = Object.keys(opts).map(k => k.toUpperCase()).sort();
+  // If marked answer matches an option, it's an MCQ!
+  const marked = (q.marked_correct_answer || q.marked_answer || '').toString().toUpperCase().trim();
+  const keys = Object.keys(opts).map(k => k.toUpperCase().trim()).sort();
+  if (marked && keys.includes(marked)) return true;
+
+
+  // Check if stem is a directive command asking subtasks (e.g. "Explain how ... when:") without an answer key
+  const stemClean = plainClassificationText(q.stem);
+  const hasDirectiveStem = /^(?:explain|state|describe|calculate|find|define|show|prove|derive|write|determine|what|why|how|distinguish|differentiate|obtain|evaluate|name|give|list|mention|compare|വിശദീകരിക്കുക|കണക്കാക്കുക|എഴുതുക|നിർവചിക്കുക|കണ്ടെത്തുക|തെളിയിക്കുക)\b/i.test(stemClean) || stemClean.endsWith(':');
+  if (hasDirectiveStem && keys.length <= 3 && isValidSubparts(opts, stemClean)) return false;
+
   const isStandardMcqKeys = (
     (keys.length === 4 && keys.join(',') === 'A,B,C,D') ||
     (keys.length === 3 && keys.join(',') === 'A,B,C') ||
     (keys.length === 5 && keys.join(',') === 'A,B,C,D,E') ||
+    (keys.length === 2 && keys.join(',') === 'A,B') ||
     (keys.length === 4 && keys.join(',') === '1,2,3,4') ||
-    (keys.length === 3 && keys.join(',') === '1,2,3')
+    (keys.length === 3 && keys.join(',') === '1,2,3') ||
+    (keys.length === 2 && keys.join(',') === '1,2') ||
+    (keys.length === 4 && keys.join(',') === 'I,II,III,IV') ||
+    (keys.length === 3 && keys.join(',') === 'I,II,III')
   );
 
-  if (!isStandardMcqKeys) return false;
+  const isDigitMcq = keys.every(k => ['1', '2', '3', '4', '5'].includes(k)) && keys.includes('1') && keys.length >= 2;
+  const isLetterMcq = keys.every(k => ['A', 'B', 'C', 'D', 'E'].includes(k)) && (keys.includes('A') || keys.includes('B')) && keys.length >= 2;
+  const isRomanMcq = keys.every(k => ['I', 'II', 'III', 'IV', 'V'].includes(k)) && keys.includes('I') && keys.length >= 2;
 
-  // 3. Inspect option content for sub-question signals (directive verbs, marks, question marks)
-  const subQStarters = [
-    'draw ', 'calculate ', 'find ', 'explain ', 'state ', 'prove ',
-    'derive ', 'show ', 'write ', 'determine ', 'define ', 'describe ',
-    'why ', 'what ', 'how ', 'when ', 'where ', 'which ',
-    'mention ', 'list ', 'compare ', 'differentiate ', 'distinguish ',
-    'obtain ', 'verify ', 'establish ', 'evaluate ', 'solve ', 'name ', 'give ',
-    // Malayalam directives & question starters
-    'എഴുതുക', 'വിശദീകരിക്കുക', 'കണക്കാക്കുക', 'വരയ്ക്കുക', 'നിർവചിക്കുക',
-    'കണ്ടെത്തുക', 'തെളിയിക്കുക', 'എന്താണ്', 'എന്ത്', 'എങ്ങനെ', 'എന്തുകൊണ്ട്',
-    'വ്യത്യാസ', 'രൂപീകരിക്കുക', 'പ്രസ്താവിക്കുക', 'താരതമ്യം', 'പട്ടികപ്പെടുത്തുക',
-    'സൂചിപ്പിക്കുക', 'പേരെഴുതുക'
-  ];
+  const isImperfectMcqKeys = isDigitMcq || isLetterMcq || isRomanMcq;
 
+  if (!isStandardMcqKeys && !isImperfectMcqKeys) return false;
+
+  // 3. Inspect option content for genuine sub-question signals (imperative command starters, marks, question marks)
   let subQCount = 0;
   let hasQuestionMark = false;
   let hasMarksIndicator = false;
-  let totalLength = 0;
 
   for (const v of Object.values(opts)) {
-    const text = String(v ?? '').trim().toLowerCase();
-    totalLength += text.length;
+    const text = String(v ?? '').trim();
+    const textLower = text.toLowerCase();
     if (text.includes('?')) hasQuestionMark = true;
     if (/\[\s*\d+\s*marks?\s*\]|\(\s*\d+\s*marks?\s*\)|\b\d+\s*marks?\b/i.test(text)) hasMarksIndicator = true;
-    if (subQStarters.some(s => text.startsWith(s) || text.includes(s))) subQCount++;
+    if (/^\s*(?:draw|calculate|find|explain|state|prove|derive|show\s+that|determine|define|describe|why|what|how|when|where|which|mention|list|compare|differentiate|distinguish|obtain|verify|establish|evaluate|solve|write|name|give)\b/i.test(textLower)) {
+      subQCount++;
+    }
   }
 
-  // If options have question marks, marks brackets, or directive prompts, treat as descriptive subquestions
-  if (hasQuestionMark || hasMarksIndicator || subQCount >= 1) return false;
+  // If options have question marks, marks brackets, or multiple directive prompts, treat as descriptive subquestions
+  if ((hasQuestionMark || hasMarksIndicator) && subQCount >= 1) return false;
+  if (subQCount >= 2) return false;
 
-  const avgLen = totalLength / Math.max(1, keys.length);
-  if (avgLen > 250) return false;
-
+  // If options consist only of equations (e.g. no prose/commands), they are likely MCQ options or parts, but since we verified MCQ keys, treat as MCQ.
   return true;
 }
 
@@ -229,7 +281,7 @@ function healUnitsAndSlashes(text: string): string {
  * Rejects empty sub-questions, marks-only sub-questions, non-consecutive letters,
  * or false splits from numbers/units (e.g. "0.2 A." or "points A and B.").
  */
-function isValidSubparts(subparts: Record<string, any> | null | undefined): boolean {
+function isValidSubparts(subparts: Record<string, any> | null | undefined, stem?: string): boolean {
   if (!subparts || typeof subparts !== 'object') return false;
   const entries = Object.entries(subparts);
   if (entries.length < 2) return false;
@@ -259,23 +311,26 @@ function isValidSubparts(subparts: Record<string, any> | null | undefined): bool
     'താരതമ്യം', 'പട്ടികപ്പെടുത്തുക', 'സൂചിപ്പിക്കുക', 'എന്താണ്', 'എന്ത്',
     'എങ്ങനെ', 'എവിടെ', 'എപ്പോൾ', 'ഏതാണ്', 'വിവരിക്കുക', 'തരംതിരിക്കുക'
   ];
-  const answerKeywords = [
-    'higher', 'lower', 'increases', 'decreases', 'constant', 'remains same',
-    'zero', 'positive', 'negative', 'forward bias', 'reverse bias',
-    'answer:', 'ans:', 'solution:', 'sol:', 'hence', 'therefore'
-  ];
 
-  let hasQuestionFeature = false;
+  let stemHasDirective = false;
+  if (stem && typeof stem === 'string') {
+    const s = stem.trim().toLowerCase();
+    stemHasDirective = /^(?:explain|state|describe|calculate|find|define|show|prove|derive|write|determine|what|why|how|distinguish|differentiate|obtain|evaluate|name|give|list|mention|compare|വിശദീകരിക്കുക|കണക്കാക്കുക|എഴുതുക|നിർവചിക്കുക|കണ്ടെത്തുക|തെളിയിക്കുക)\b/i.test(s) || s.endsWith(':') || s.endsWith('when:');
+  }
+
+  let hasQuestionFeature = stemHasDirective;
 
   for (const [_, v] of entries) {
-    const val = String(v ?? '').trim();
+    const val = plainClassificationText(v);
     // Any empty sub-part means it's NOT a valid set of sub-questions
     if (!val) return false;
 
     const valLower = val.toLowerCase();
 
     // If an item contains explicit answer markers or comparative states without any directive, it is an answer step!
-    const isAnswerStep = answerKeywords.some(kw => valLower.includes(kw));
+    const isPureAnswerVal = /^(?:higher|lower|increases?|decreases?|remains constant|constant|zero|positive|negative|forward bias|reverse bias|same|remains same|no change)[\.\s]*$/i.test(valLower);
+    const hasAnswerHeader = /answer:|ans:|solution:|sol:|hence|therefore|we get/i.test(valLower);
+    const isAnswerStep = isPureAnswerVal || hasAnswerHeader;
 
     // Check for question features: question mark, marks allocation, or directive verbs
     const hasQMark = val.includes('?');
@@ -295,8 +350,11 @@ function isValidSubparts(subparts: Record<string, any> | null | undefined): bool
       .replace(/<img[^>]*>/gi, '')
       .replace(/[\s\.\:\-\,\;]/g, '');
 
-    // Every subpart MUST have actual question text or formula (at least 2 letters/symbols)
-    if (substantive.length < 2) return false;
+    // Check if it's a math equation or formula
+    const isMath = val.includes('$') || val.includes('\\') || /[\=\+\-\*\/\^\_\±\×\÷\√]/.test(val);
+
+    // Every subpart MUST have actual question text or formula (at least 2 letters/symbols unless it's math)
+    if (substantive.length < 2 && !isMath) return false;
   }
   return hasQuestionFeature;
 }
@@ -306,10 +364,10 @@ export function extractSubpartsFromText(text?: string): Record<string, string> |
 
   // Truncate at answer/solution boundary so answers are NEVER extracted as subquestions!
   const ansIdx = text.search(/(?:\n|\s{2,}|\t)\*?\*?(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|Solution|Explanation|Description|Hint|Hints|ഉത്തരം|ശരിയായ\s*ഉത്തരം|വിശദീകരണം|പരിഹാരം)\s*(?:[\*\:\-]+|\s*$)/i);
-  const stemOnly = ansIdx !== -1 ? text.substring(0, ansIdx).trim() : text;
+  const stemOnly = plainClassificationText(ansIdx !== -1 ? text.substring(0, ansIdx) : text);
 
   // Matches markers like (a), (b) or (1), (2) or (i), (ii), or bare letters a., b., a), b)
-  const subqPattern = /(?:(?:^|\n|\s{2,}|\.\s+)\(([a-hA-H1-8]|[ivxlcdmIVXLCDM]+)\)\s*)|(?:(?:^|\n|[ \t]{2,}|\.\s+)([a-hA-H]|[ivxlcdmIVXLCDM]+)[\.\)\:-]\s*)/g;
+  const subqPattern = /(?:(?:^|\n|\s{2,}|\.\s+)\(([a-eA-E1-4]|[ivxlcdmIVXLCDM]+)\)\s*)|(?:(?:^|\n|[ \t]{2,}|\.\s+)([a-eA-E]|[ivxlcdmIVXLCDM]+)[\.\)\:-]\s*(?!\d))/g;
   const matches = [...stemOnly.matchAll(subqPattern)];
   if (matches.length < 2) return null;
 
@@ -318,8 +376,13 @@ export function extractSubpartsFromText(text?: string): Record<string, string> |
     const idx = m.index ?? 0;
     const prefix = stemOnly.substring(Math.max(0, idx - 35), idx).toLowerCase();
     const hasParen = Boolean(m[1]);
+    const postSnippet = stemOnly.substring(idx + m[0].length, idx + m[0].length + 10).trim();
+
+    // Reject if followed by equation operator or equal sign (e.g. A = 240, A = 120, A + B)
+    if (/^[\=\+\-\*\/\^\_\±\×\÷\√]/.test(postSnippet)) return false;
+
     if (/(?:assertion|reason|statement|പ്രസ്താവന|കാരണം)[\s\:\-\*\_\(]*$/i.test(prefix)) return false;
-    if (/(?:both|between|from|to|and|or|is|are|was|were|if|whether|that|when|where|of|in|for|with|junction|terminal|point|points|cell|cells|charge|charges|plate|plates)\s*(?:and\s*)?$/i.test(prefix)) return false;
+    if (/(?:both|between|from|to|and|or|is|are|was|were|if|whether|that|when|where|of|in|for|with|junction|terminal|point|points|cell|cells|charge|charges|plate|plates|number|mass|each|fragment|fragments|side|radius|amplitude|wavelength|frequency|constant|variable)\s*(?:and\s*)?$/i.test(prefix)) return false;
     if (!hasParen && /\d+(?:\.\d+)?\s*$/.test(prefix)) return false;
     return true;
   });
@@ -378,42 +441,282 @@ export function getIntroductoryStem(stem: string, hasSubparts: boolean, firstKey
   return intro;
 }
 
-export function healAssertionReasonQuestion(q: any): { stem: string; options: Record<string, string> } {
-  const stem = q?.stem || '';
-  const options = q?.options ? { ...q.options } : {};
-  const optA = options.A || options.a || '';
+export function splitMergedOptionsFrontend(options: Record<string, string>): Record<string, string> {
+  if (!options || typeof options !== 'object') return options || {};
+  const out: Record<string, string> = {};
+  const keys = Object.keys(options);
 
-  if (!optA || typeof optA !== 'string') {
-    return { stem, options };
-  }
+  for (const k of keys) {
+    let currentK = k;
+    let currentText = String(options[k] || '').trim();
 
-  const hasReason = /\b(?:reason|കാരണം)\s*(?:\([rR]\)|[\:\.\-]+|\s*$)/i.test(optA);
-  const stemClean = stem.trim();
-  const stemIsShortAssertion = /\b(?:assertion|പ്രസ്താവന)\b/i.test(stemClean) && stemClean.replace(/<[^>]+>/g, '').trim().length < 120;
-
-  if (hasReason || stemIsShortAssertion) {
-    const splitMatch = optA.match(/(?:(?:^|\n|\s{2,}|\.\s+)\(?([aA1])\)?[\.\:\-]?\s+(?=(?:if\s+both|both|assertion|statement|[aA]\s+is\b)))|(?:(?:^|\n)\s*(?=(?:if\s+both|both\s+(?:assertion|a\b|r\b)|assertion\s+is\s+true|[aA]\s+is\s+true)))/i);
-    if (splitMatch && splitMatch.index !== undefined) {
-      const splitIdx = splitMatch.index;
-      let statementBlock = optA.substring(0, splitIdx).trim();
-      let choiceText = optA.substring(splitIdx).trim().replace(/^\s*\(?[aA1]\)?[\.\:\-]?\s*/, '').trim();
-
-      statementBlock = statementBlock.replace(/\s*\[\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\]/gi, '');
-      statementBlock = statementBlock.replace(/\s*\(\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\)/gi, '').trim();
-
-      if (statementBlock) {
-        let newStem = stemClean;
-        if (!stemClean || /^(?:assertion|പ്രസ്താവന)\s*[\:\.\-]?$/i.test(stemClean)) {
-          newStem = `Assertion (A): ${statementBlock}`;
-        } else if (!/\b(?:reason|കാരണം)\b/i.test(stemClean)) {
-          newStem = `${stemClean}\n${statementBlock}`;
+    while (true) {
+      let candChars: string[] = [];
+      let bareChars: string[] = [];
+      if (/^\d+$/.test(currentK)) {
+        const nextVal = parseInt(currentK, 10) + 1;
+        if (nextVal <= 8) {
+          candChars = [String(nextVal)];
+          bareChars = candChars;
         }
-        const keyA = options.A !== undefined ? 'A' : 'a';
-        options[keyA] = choiceText;
-        return { stem: newStem, options };
+      } else if (currentK.length === 1 && /[a-zA-Z]/.test(currentK)) {
+        const nextCharCode = currentK.toUpperCase().charCodeAt(0) + 1;
+        if (nextCharCode <= 72) { // up to 'H'
+          const nextChar = String.fromCharCode(nextCharCode);
+          candChars = [nextChar, nextChar.toLowerCase()];
+          bareChars = /^[A-Z]/.test(currentK) ? [nextChar] : [nextChar.toLowerCase()];
+        }
+      }
+
+      if (candChars.length === 0) {
+        out[currentK] = currentText;
+        break;
+      }
+
+      const parenGroup = candChars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+      const bareGroup = bareChars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+      const bareBranch = bareGroup ? `|([${bareGroup}])[\\.\\)\\:\\-]\\s+` : '';
+      const pat = new RegExp(`(?:(?<=\\s)|(?<=\\n)|^)(?:\\(([${parenGroup}])\\)[\\.\\:\\-]?\\s*|\\[([${parenGroup}])\\][\\.\\:\\-]?\\s*${bareBranch})`);
+      const m = currentText.match(pat);
+      if (m && m.index !== undefined && m.index > 0) {
+        const splitIdx = m.index;
+        const firstPart = currentText.substring(0, splitIdx).trim();
+        if (!firstPart) {
+          out[currentK] = currentText;
+          break;
+        }
+        const matchedChar = m[1] || m[2] || m[3];
+        const nextK = /^[A-Z]/.test(currentK) ? matchedChar.toUpperCase() : matchedChar.toLowerCase();
+        const secondPart = currentText.substring(m.index + m[0].length).trim();
+
+        out[currentK] = firstPart;
+        currentK = nextK;
+        currentText = secondPart;
+      } else {
+        out[currentK] = currentText;
+        break;
       }
     }
   }
+  return out;
+}
+
+export function extractOptionsFromStemFrontend(content: string): { stem: string; options: Record<string, string> } | null {
+  if (!content || typeof content !== 'string') return null;
+
+  const optPattern = /(?:(?:^|\n|\s+)\(([A-Ea-e1-4])\)[\.\:\-]?\s*)|(?:(?:^|\n|[ \t]+|\.\s+)([A-Ea-e1-4])[\.\)\:-]\s*(?!\d))/g;
+  const matches = [...content.matchAll(optPattern)];
+  if (matches.length < 2) return null;
+
+  const validMatches = matches.filter(m => {
+    const startIdx = m.index ?? 0;
+    const prefix = content.substring(Math.max(0, startIdx - 35), startIdx).toLowerCase();
+    const fullMatch = m[0].trim();
+    const hasParen = fullMatch.startsWith('(');
+    const postSnippet = content.substring(startIdx + m[0].length, startIdx + m[0].length + 10).trim();
+
+    // Reject if followed by equation operator or equal sign (e.g. A = 240, A = 120, A + B)
+    // CRITICAL: Parenthesized options like (d) \sqrt{c}: 1 or (b) +5 V are completely valid!
+    if (!hasParen && /^[\=\+\-\*\/\^\_\±\×\÷\√]/.test(postSnippet)) return false;
+    if (hasParen && postSnippet.startsWith('=')) return false;
+
+    // Reject Assertion/Reason prefixes
+    if (/(?:assertion|reason|statement|പ്രസ്താവന|കാരണം)[\s\:\-\*\_\(]*$/i.test(prefix)) return false;
+
+    // Reject prepositions, linkers, and math variables
+    const prevWordMatch = prefix.match(/([a-zA-Z]+)\s*(?:and\s*)?$/);
+    if (prevWordMatch) {
+      const prevWord = prevWordMatch[1].toLowerCase();
+      if (!hasParen) {
+        const rejectWords = new Set(['both', 'between', 'from', 'and', 'or', 'is', 'are', 'was', 'were',
+          'if', 'whether', 'that', 'when', 'where', 'of', 'in', 'for', 'with',
+          'junction', 'terminal', 'point', 'points', 'cell', 'cells',
+          'charge', 'charges', 'plate', 'plates', 'to', 'number', 'mass',
+          'each', 'fragment', 'fragments', 'side', 'radius', 'amplitude']);
+        if (rejectWords.has(prevWord)) return false;
+      } else {
+        const structuralReject = new Set(['point', 'points', 'junction', 'terminal', 'cell', 'cells', 'number', 'mass']);
+        if (structuralReject.has(prevWord)) return false;
+      }
+    }
+
+    if (!hasParen && /\d+(?:\.\d+)?\s*$/.test(prefix)) return false;
+    return true;
+  });
+
+  if (validMatches.length < 2) return null;
+
+  let bestSeq: RegExpMatchArray[] = [];
+  for (let i = 0; i < validMatches.length; i++) {
+    const letter = (validMatches[i][1] || validMatches[i][2]).toUpperCase();
+    if (letter !== 'A' && letter !== '1') continue;
+    const currSeq = [validMatches[i]];
+    let currLetter = letter;
+
+    for (let j = i + 1; j < validMatches.length; j++) {
+      const nextLetter = (validMatches[j][1] || validMatches[j][2]).toUpperCase();
+      if (nextLetter > currLetter) {
+        const letterGap = nextLetter.charCodeAt(0) - currLetter.charCodeAt(0);
+        if (letterGap <= 2) {
+          currSeq.push(validMatches[j]);
+          currLetter = nextLetter;
+        }
+      }
+    }
+
+    if (currSeq.length >= 2 && currSeq.length > bestSeq.length) {
+      bestSeq = currSeq;
+    }
+  }
+
+  if (bestSeq.length < 2) return null;
+
+  const stem = content.substring(0, bestSeq[0].index).trim();
+  const options: Record<string, string> = {};
+
+  for (let idx = 0; idx < bestSeq.length; idx++) {
+    const mInfo = bestSeq[idx];
+    const letter = (mInfo[1] || mInfo[2]).toUpperCase();
+    const startPos = (mInfo.index ?? 0) + mInfo[0].length;
+    const endPos = idx < bestSeq.length - 1 ? (bestSeq[idx + 1].index ?? content.length) : content.length;
+    let optText = content.substring(startPos, endPos).trim();
+
+    if (idx === bestSeq.length - 1) {
+      const ansIdx = optText.search(/(?:\n|\s{2,}|\t)\*?\*?(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|Solution|Explanation|Description|Hint|Hints|ഉത്തരം|ശരിയായ\s*ഉത്തരം|വിശദീകരണം)\s*(?:[\*\:\-]+|\s*$)/i);
+      if (ansIdx !== -1) {
+        optText = optText.substring(0, ansIdx).trim();
+      }
+    }
+    options[letter] = optText;
+  }
+
+  return { stem, options };
+}
+
+export function healAssertionReasonQuestion(q: any): { stem: string; options: Record<string, string> } {
+  let stem = q?.stem || '';
+  let options = q?.options ? { ...q.options } : {};
+
+  // 0. Auto-heal: If existing options contain invalid keys like '7', '8', or numbers > 5, strip them and restore stem
+  const currentKeys = Object.keys(options);
+  const hasInvalidKeys = currentKeys.some(k => /^[6-9]$/.test(k) || (!['A', 'B', 'C', 'D', 'E', '1', '2', '3', '4', '5'].includes(k.toUpperCase()) && !/^[IVX]+$/i.test(k)));
+  if (hasInvalidKeys) {
+    for (const k of Object.keys(options).sort((a, b) => (parseInt(a) || 0) - (parseInt(b) || 0))) {
+      stem = `${stem} ${k}.${options[k]}`.trim();
+    }
+    options = {};
+  }
+
+  // 1. Split any merged options in existing options
+  if (options && Object.keys(options).length > 0) {
+    options = splitMergedOptionsFrontend(options);
+  }
+
+  // Strip trailing marks bracket from stem first
+  stem = stem.replace(/\s*(?:\[\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\]|\(\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\))\s*$/i, '').trim();
+
+  // 1.5. Trailing option extraction from stem (ONLY if options are non-empty and incomplete)
+  // If options is empty, a descriptive question with math equations must NEVER have pieces sliced off!
+  if (Object.keys(options).length > 0 && Object.keys(options).length < 4) {
+    const trailingOptPat = /(?:(?:\n|\s+|\.\s+)\(([A-Ea-e1-4])\)[\.\:\-]?\s*|(?:\n|\s{2,}|\.\s+)([A-Ea-e])[\.\)\:-]\s*(?!\d))([^ \n\r\t][^\n\r]*)$/i;
+    while (true) {
+      const m = stem.match(trailingOptPat);
+      if (!m || m.index === undefined) break;
+      const letter = (m[1] || m[2]).toUpperCase();
+      const val = m[3].trim();
+      const prefix = stem.substring(Math.max(0, m.index - 35), m.index).toLowerCase();
+
+      const hasParen = Boolean(m[1]);
+      // Reject if val starts with equation operator or equal sign (e.g. = 240, = 120)
+      // Parenthesized options like (d) \sqrt{c}: 1 or (b) +5 V are completely valid!
+      if (!hasParen && /^[\=\+\-\*\/\^\_\±\×\÷\√]/.test(val)) break;
+      if (hasParen && val.startsWith('=')) break;
+
+      // Reject if preceded by Assertion / Reason / Statement labels or math variable words
+      if (/(?:assertion|reason|statement|പ്രസ്താവന|കാരണം|point|points|junction|terminal|cell|cells|charge|charges|plate|plates|number|mass|each|fragment|fragments|side|radius|amplitude)[\s\:\-\*\_\(]*$/i.test(prefix)) break;
+      // Reject if val contains Reason / Assertion label
+      if (/\b(?:reason|കാരണം|assertion|പ്രസ്താവന)\b/i.test(val)) break;
+      // If option already exists and is non-empty, never slice or overwrite
+      if (options[letter] && options[letter].trim()) break;
+
+      stem = stem.substring(0, m.index).trim();
+      stem = stem.replace(/\s*(?:\[\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\]|\(\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\))\s*$/i, '').trim();
+      options[letter] = val;
+    }
+  }
+
+  // 1.6. Recover answer choice from explanation / answer_text if missing from options
+  const exp = q?.explanation || q?.answer_text;
+  if (exp && typeof exp === 'string') {
+    const ansMatch = exp.match(/(?:^|\n|\s{2,}|\b)(?:\*\*\s*(?:Answer|Ans(?:wer)?|Correct(?:\s*Option|\s*Answer)?|ഉത്തരം)\s*\*\*|\*?\*?(?:Answer|Ans(?:wer)?|Correct(?:\s*Option|\s*Answer)?|ഉത്തരം)\*?\*?\s*[\:\.\-]+)\s*[\(\[]?\s*([A-Da-d1-4])\s*[\)\]]?[\s\:\.\-]*([^\n]*)/i);
+    if (ansMatch) {
+      const ansLetter = ansMatch[1].toUpperCase();
+      const ansText = ansMatch[2].trim();
+      if (ansText && !options[ansLetter]) {
+        options[ansLetter] = ansText;
+      }
+    } else {
+      const leadingM = exp.match(/^\s*[\(\[]\s*([A-Da-d1-4])\s*[\)\]][\s\:\.\-]*([^\n]*)/i);
+      if (leadingM) {
+        const ansLetter = leadingM[1].toUpperCase();
+        const ansText = leadingM[2].trim();
+        if (ansText && !options[ansLetter]) {
+          options[ansLetter] = ansText;
+        }
+      }
+    }
+  }
+
+  // 2. Check for Assertion/Reason format where Reason is bundled inside Option A
+  const optA = options.A || options.a || '';
+  if (optA && typeof optA === 'string') {
+    const hasReason = /\b(?:reason|കാരണം)\s*(?:\([rR]\)|[\:\.\-]+|\s*$)/i.test(optA);
+    const stemClean = stem.trim();
+    const stemIsShortAssertion = /\b(?:assertion|പ്രസ്താവന)\b/i.test(stemClean) && stemClean.replace(/<[^>]+>/g, '').trim().length < 120;
+
+    if (hasReason || stemIsShortAssertion) {
+      const splitMatch = optA.match(/(?:(?:^|\n|\s{2,}|\.\s+)\(?([aA1])\)?[\.\:\-]?\s+(?=(?:if\s+both|both|assertion|statement|[aA]\s+is\b)))|(?:(?:^|\n)\s*(?=(?:if\s+both|both\s+(?:assertion|a\b|r\b)|assertion\s+is\s+true|[aA]\s+is\s+true)))/i);
+      if (splitMatch && splitMatch.index !== undefined) {
+        const splitIdx = splitMatch.index;
+        let statementBlock = optA.substring(0, splitIdx).trim();
+        let choiceText = optA.substring(splitIdx).trim().replace(/^\s*\(?[aA1]\)?[\.\:\-]?\s*/, '').trim();
+
+        statementBlock = statementBlock.replace(/\s*\[\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\]/gi, '');
+        statementBlock = statementBlock.replace(/\s*\(\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\)/gi, '').trim();
+
+        if (statementBlock) {
+          let newStem = stemClean;
+          if (!stemClean || /^(?:assertion|പ്രസ്താവന)\s*[\:\.\-]?$/i.test(stemClean)) {
+            newStem = `Assertion (A): ${statementBlock}`;
+          } else if (!/\b(?:reason|കാരണം)\b/i.test(stemClean)) {
+            newStem = `${stemClean}\n${statementBlock}`;
+          }
+          const keyA = options.A !== undefined ? 'A' : 'a';
+          options[keyA] = choiceText;
+          return { stem: newStem, options: splitMergedOptionsFrontend(options) };
+        }
+      }
+    }
+  }
+
+  // 3. If options are empty or incomplete (< 4), attempt to recover options from stem ONLY if stem is an MCQ
+  const optCount = Object.keys(options).length;
+  if (optCount === 0 && stem) {
+    const recovered = extractOptionsFromStemFrontend(stem);
+    if (recovered && Object.keys(recovered.options).length >= 3) {
+      const recKeys = Object.keys(recovered.options).map(k => k.toUpperCase());
+      const isCleanSeq = recKeys.join(',') === 'A,B,C,D' || recKeys.join(',') === 'A,B,C' || recKeys.join(',') === '1,2,3,4' || recKeys.join(',') === '1,2,3';
+      if (isCleanSeq) {
+        return { stem: recovered.stem, options: splitMergedOptionsFrontend(recovered.options) };
+      }
+    }
+  } else if (optCount > 0 && optCount < 4 && stem) {
+    const recovered = extractOptionsFromStemFrontend(stem);
+    if (recovered && Object.keys(recovered.options).length >= 2 && Object.keys(recovered.options).length > optCount) {
+      return { stem: recovered.stem, options: splitMergedOptionsFrontend(recovered.options) };
+    }
+  }
+
   return { stem, options };
 }
 
@@ -425,16 +728,22 @@ function cleanOptionDisplay(text: string, optionKey?: string): string {
   // NEVER strip 'B' from 'Both' or 'A' from 'All'!
   if (optionKey) {
     const k = optionKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pat = new RegExp(`^\\s*(?:\\([\\s]*[${k}${k.toLowerCase()}][\\s]*\\)[\\.\\:\\-]?|\\[[\\s]*[${k}${k.toLowerCase()}][\\s]*\\][\\.\\:\\-]?|[${k}${k.toLowerCase()}][\\.\\)\\:\\-]\\s*|[${k}${k.toLowerCase()}](?=\\s+))\\s*`);
+    const pat = new RegExp(`^\\s*(?:\\([\\s]*[${k}${k.toLowerCase()}][\\s]*\\)[\\.\\:\\-]?|\\[[\\s]*[${k}${k.toLowerCase()}][\\s]*\\][\\.\\:\\-]?|[${k}${k.toLowerCase()}]\\)[\\.\\:\\-]?\\s*)\\s*`);
     s = s.replace(pat, '').trim();
   } else {
-    s = s.replace(/^\s*(?:\([\s]*[a-dA-D][\s]*\)[\.\:\-]?|\[[\s]*[a-dA-D][\s]*\][\.\:\-]?|[a-dA-D][\.\)\:\-]\s*|[a-dA-D](?=\s+))\s*/, '').trim();
+    s = s.replace(/^\s*(?:\([\s]*[a-dA-D][\s]*\)[\.\:\-]?|\[[\s]*[a-dA-D][\s]*\][\.\:\-]?|[a-dA-D]\)[\.\:\-]?\s*)\s*/, '').trim();
   }
   // Auto-heal truncated words anywhere in options
   s = s.replace(/\bOth\b/g, 'Both').replace(/\both\b/g, (match, offset) => {
     return (offset === 0 || /(?:^|[.!?\n]\s*)$/.test(s.slice(0, offset))) ? 'Both' : 'both';
   });
   s = s.replace(/\bll\s+of\s+the\s+above\b/gi, 'All of the above');
+
+  // Strip marks indicators from option text (e.g. '[1 mark]', '(2 marks)', '[5 marks]')
+  s = s.replace(/\s*\[\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\]/gi, '');
+  s = s.replace(/\s*\(\s*\d+(?:\.\d+)?(?:\s*\/\s*\d+)?\s*(?:marks?|mark|m)\s*\)/gi, '');
+  s = s.trim();
+
   // Strip trailing answer or solution markers if accidentally present (requires delimiter or end-of-string)
   const ansIdx = s.search(/(?:\n|\s{2,}|\t)\*?\*?(?:Correct(?:\s*Option|\s*Answer)?|Answer|Ans(?:wer)?|Solution|Explanation|Description|Hint|Hints|ഉത്തരം|ശരിയായ\s*ഉത്തരം|വിശദീകരണം)\s*(?:[\*\:\-]+|\s*$)/i);
   if (ansIdx !== -1) {
@@ -626,19 +935,42 @@ function sanitizeHtmlAndCleanText(text: string): string {
   return s.trim();
 }
 
-function cleanExplanationDisplay(text: string, markedAnswer?: string): string {
+function cleanExplanationDisplay(text: string, markedAnswer?: string, isMcqQuestion?: boolean): string {
   if (!text) return '';
   let s = text.trim();
   s = sanitizeHtmlAndCleanText(s);
-  // Strip leading answer letter (e.g. "B\n\n..." or "(B) ...")
-  if (markedAnswer) {
-    s = s.replace(new RegExp(`^\\(?${markedAnswer}\\)?[\\s\\.\\:\\-]+`, 'i'), '').trim();
-  } else {
-    s = s.replace(/^\(?[A-D]\)?[\s\.\:\-]+/i, '').trim();
+
+  // 1. Strip redundant leading "Solution:" or "Explanation:" label FIRST so subpart detection works on actual content
+  s = s.replace(/^(?:Solution|Explanation|Description|Sol|Exp|Hint|Answer|Ans|ഉത്തരം|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*(?:[\*\:\-]+(?:\s*|\n|$)|(?:\n|\\n))/i, '').trim();
+
+  // 2. Detect subparts in text: (b) after prior text, or presence of both (a) and (b)
+  const subsequentB = /\S+[\s\S]+?(?:^|\n|\s)(?:\(?[b-hB-H]\)?|[b-hB-H]\.|\(ii\)|\(2\))[\s\:\-\.]+/i.test(s);
+  const hasA = /(?:^|\n|\s)\(?[aA1]\)?[\s\.\:\-]+/i.test(s);
+  const hasB = /(?:^|\n|\s)(?:\(?[b-hB-H2]\)?|[b-hB-H]\.)[\s\.\:\-]+/i.test(s);
+  const isMultiPart = subsequentB || (hasA && hasB);
+
+  const startsWithSubpart = /^\(?[a-dA-D1-9]\)?[\s\.\:\-]+|^\(?[ivxIVX]+\)?[\s\.\:\-]+/i.test(s);
+
+  // 3. Auto-heal missing (a) at start of multi-part answer:
+  // e.g. "Rectifier (b) Circuit diagram of full wave rectifier" -> "(a) Rectifier (b) Circuit diagram..."
+  if (isMultiPart && !startsWithSubpart) {
+    s = `(a) ${s}`;
   }
-  // Strip redundant leading "വിശദീകരണം:" or "Explanation:" label ONLY when followed by delimiter or newline
-  s = s.replace(/^(?:Solution|Explanation|Description|Sol|Exp|Hint|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*(?:[\*\:\-]+(?:\s*|\n|$)|(?:\n|\\n))/i, '').trim();
-  // Thoroughly strip any accidental "Subquestion:" or "Sub-question:" or "Subpart" labels from answers
+
+  // 4. Strip leading answer letter ONLY if this is genuinely an MCQ (and NOT a multi-part answer with subparts)
+  if (!isMultiPart && isMcqQuestion !== false) {
+    if (markedAnswer) {
+      s = s.replace(new RegExp(`^\\(?${markedAnswer}\\)?[\\s\\.\\:\\-]+`, 'i'), '').trim();
+    } else if (isMcqQuestion === true) {
+      // Only strip generic A-D if explicitly known to be MCQ
+      s = s.replace(/^\(?[A-D]\)?[\s\.\:\-]+/i, '').trim();
+    }
+  }
+
+  // 5. Place inline subparts on newlines for clean multi-part formatting if merged
+  s = s.replace(/([^\n])\s*\(([b-hB-H])\)\s+([A-Z\u0D00-\u0D7F\$\\\*0-9])/g, '$1\n($2) $3');
+
+  // 6. Thoroughly strip any accidental "Subquestion:" or "Sub-question:" or "Subpart" labels from answers
   s = s.replace(/(?:^|\n|\s+)\*?\*?Sub-?\s*questions?\s*(?:\(([a-zA-Z0-9]+)\)|([a-zA-Z0-9]+))?[\s\:\-\.]*\*?\*?/gi, (match, p1, p2) => {
     if (p1) return `\n(${p1}) `;
     if (p2) return `\n${p2}. `;
@@ -650,7 +982,6 @@ function cleanExplanationDisplay(text: string, markedAnswer?: string): string {
     return '\n';
   });
   s = s.replace(/\n{3,}/g, '\n\n').trim();
-  // (Removed bare \text{} stripping)
   // Strip stray font ligature glitches like ~ } ONLY when adjacent to Malayalam characters
   s = s.replace(/([\u0D00-\u0D7F])[~}]+/g, '$1').replace(/[~}]+([\u0D00-\u0D7F])/g, '$1');
   // Heal student readability (unwrap mistakenly wrapped prose, un-mash words and variables)
@@ -700,6 +1031,9 @@ export function renderLatex(text: string): string {
 
   s = sanitizeHtmlAndCleanText(s);
 
+  // Convert markdown bold **...** into styled HTML strong tags
+  s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong style="font-weight: 700; color: inherit;">$1</strong>');
+
   // Auto-heal truncated words caused by faulty stripping or OCR
   s = s.replace(/\bOth\b/g, 'Both').replace(/\both\b/g, (match, offset) => {
     return (offset === 0 || /(?:^|[.!?\n]\s*)$/.test(text.slice(0, offset))) ? 'Both' : 'both';
@@ -714,6 +1048,11 @@ export function renderLatex(text: string): string {
   s = healUnitsAndSlashes(s);
   // Heal student readability (unwrap mistakenly wrapped prose, un-mash words and variables)
   s = healStudentReadability(s);
+  // Restore exponents flattened by PDF text extraction, e.g. 4.0 × 1016.
+  s = s.replace(
+    /(\b\d+(?:\.\d+)?)\s*(?:×|x|\\times)\s*10\s*(\d{2,3})(?!\d)/gi,
+    '$1 \\times 10^{$2}'
+  );
 
   // 0a. Normalize vector hat characters in running text
   s = s.replace(/î/g, '$\\hat{i}$').replace(/ĵ/g, '$\\hat{j}$');
@@ -736,7 +1075,7 @@ export function renderLatex(text: string): string {
   // Handle standalone subscript digits (not preceded by a letter)
   s = s.replace(/[\u2080-\u2089]+/g, (subs) => {
     const subStr = Array.from(subs).map((c: any) => subscriptMap[c] || c).join('');
-    return `_{${subStr}}`;
+    return `$_{${subStr}}$`;
   });
 
   // 0c. Normalize arrow and logical symbols
@@ -1106,6 +1445,8 @@ export default function Home() {
   const [jobResult, setJobResult] = useState<any>(null);
   const [selectedQuestion, setSelectedQuestion] = useState<any>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgressText, setUploadProgressText] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [rescanStates, setRescanStates] = useState<Record<number, 'rescanning' | 'success' | 'error'>>({});
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
 
@@ -1454,9 +1795,11 @@ export default function Home() {
   const fetchJobs = async () => {
     try {
       const res = await fetch(`${API_BASE}/pdfs`);
+      if (!res.ok) throw new Error(`Could not load uploaded PDFs (${res.status})`);
       const data = await res.json();
       setJobs(data);
     } catch (e) {
+      setUploadError(e instanceof Error ? e.message : 'Could not load uploaded PDFs');
       console.error('Failed to fetch jobs', e);
     }
   };
@@ -1474,22 +1817,62 @@ export default function Home() {
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || e.target.files.length === 0) return;
+    const rawFiles = e.target.files;
+    if (!rawFiles || rawFiles.length === 0) return;
+    const fileList = Array.from(rawFiles).filter(f => f.name.toLowerCase().endsWith('.pdf'));
+    if (fileList.length === 0) {
+      setUploadError('Only PDF files (.pdf) are allowed');
+      e.target.value = '';
+      return;
+    }
+
     setIsUploading(true);
-    
-    const formData = new FormData();
-    formData.append('file', e.target.files[0]);
+    setUploadError(null);
+    setUploadProgressText(fileList.length > 1 ? `Uploading ${fileList.length} PDFs...` : `Uploading ${fileList[0].name}...`);
 
     try {
-      await fetch(`${API_BASE}/pdfs/upload`, {
-        method: 'POST',
-        body: formData,
-      });
-      fetchJobs();
+      if (fileList.length === 1) {
+        const formData = new FormData();
+        formData.append('file', fileList[0]);
+        const res = await fetch(`${API_BASE}/pdfs/upload`, {
+          method: 'POST',
+          body: formData,
+        });
+        if (!res.ok) {
+          let detail = `Upload failed (${res.status})`;
+          try {
+            const errorData = await res.json();
+            detail = errorData.detail || detail;
+          } catch {}
+          throw new Error(detail);
+        }
+      } else {
+        const formData = new FormData();
+        for (const file of fileList) {
+          formData.append('files', file);
+        }
+        const res = await fetch(`${API_BASE}/pdfs/upload-bulk`, {
+          method: 'POST',
+          body: formData,
+        });
+        if (!res.ok) {
+          let detail = `Bulk upload failed (${res.status})`;
+          try {
+            const errorData = await res.json();
+            detail = errorData.detail || detail;
+          } catch {}
+          throw new Error(detail);
+        }
+      }
+      await fetchJobs();
     } catch (e) {
+      const message = e instanceof Error ? e.message : 'Upload failed';
+      setUploadError(message);
       console.error('Upload failed', e);
     } finally {
       setIsUploading(false);
+      setUploadProgressText(null);
+      e.target.value = '';
     }
   };
 
@@ -1497,7 +1880,18 @@ export default function Home() {
     setSelectedJobId(jobId);
     try {
       const res = await fetch(`${API_BASE}/pdfs/${jobId}/result`);
+      if (!res.ok) {
+        let detail = `Could not load PDF result (${res.status})`;
+        try {
+          const errorData = await res.json();
+          detail = errorData.detail || detail;
+        } catch {
+          // Keep the HTTP status when the backend did not return JSON.
+        }
+        throw new Error(detail);
+      }
       const data = await res.json();
+      if (!data.result) throw new Error('This PDF has no processed result yet.');
       const normalizedResult = normalizeCdnUrls(data.result);
       setJobResult(normalizedResult);
       if (selectedQuestion && normalizedResult?.questions) {
@@ -1505,6 +1899,8 @@ export default function Home() {
         if (matching) setSelectedQuestion(matching);
       }
     } catch (e) {
+      const message = e instanceof Error ? e.message : 'Could not load PDF result';
+      setUploadError(message);
       console.error('Failed to load result', e);
     }
   };
@@ -1610,14 +2006,68 @@ export default function Home() {
                 <UploadCloud size={30} className={isUploading ? "spin" : ""} />
               </div>
               <h3 style={{ fontSize: '1.15rem', fontWeight: 600, color: '#f8fafc' }}>
-                {isUploading ? 'Uploading & Indexing PDF Document...' : 'Upload Question Paper PDF'}
+                {isUploading ? (uploadProgressText || 'Uploading & Queueing PDFs...') : 'Upload Question Paper PDF(s)'}
               </h3>
               <p style={{ color: 'var(--text-muted)', marginTop: '0.35rem', fontSize: '0.86rem' }}>
-                Drag and drop your document here, or click to browse files (.pdf)
+                {isUploading
+                  ? 'Adding documents to sequential processing queue...'
+                  : 'Select or drop single or multiple PDFs — processed sequentially one at a time'}
               </p>
-              <input type="file" accept=".pdf" onChange={handleFileUpload} style={{ display: 'none' }} disabled={isUploading} />
+              <input type="file" accept=".pdf" multiple onChange={handleFileUpload} style={{ display: 'none' }} disabled={isUploading} />
             </label>
           </div>
+          {uploadError && (
+            <div style={{ marginTop: '0.75rem', color: '#fca5a5', fontSize: '0.86rem' }} role="alert">
+              {uploadError}
+            </div>
+          )}
+
+          {(() => {
+            const activeJob = jobs.find(j => j.status === 'processing' || j.status === 'validating');
+            const queuedJobs = jobs.filter(j => j.status === 'pending' || j.status === 'queued');
+            if (activeJob || queuedJobs.length > 0) {
+              return (
+                <div style={{
+                  marginTop: '1.25rem',
+                  padding: '0.75rem 1.1rem',
+                  borderRadius: '12px',
+                  background: 'rgba(56, 189, 248, 0.05)',
+                  border: '1px solid rgba(56, 189, 248, 0.2)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '1rem',
+                  fontSize: '0.84rem'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', minWidth: 0 }}>
+                    <span className="spin" style={{ display: 'inline-flex', color: '#38bdf8', fontSize: '1rem' }}>⟳</span>
+                    <span style={{ color: '#e2e8f0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {activeJob ? (
+                        <>Processing: <strong style={{ color: '#38bdf8' }}>{activeJob.filename}</strong></>
+                      ) : (
+                        'Queue ready'
+                      )}
+                    </span>
+                  </div>
+                  {queuedJobs.length > 0 && (
+                    <span style={{
+                      flexShrink: 0,
+                      padding: '0.2rem 0.65rem',
+                      borderRadius: '20px',
+                      background: 'rgba(148, 163, 184, 0.12)',
+                      border: '1px solid rgba(148, 163, 184, 0.25)',
+                      color: '#cbd5e1',
+                      fontSize: '0.75rem',
+                      fontWeight: 600
+                    }}>
+                      {queuedJobs.length} queued (1 by 1)
+                    </span>
+                  )}
+                </div>
+              );
+            }
+            return null;
+          })()}
 
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '2rem', marginBottom: '0.5rem' }}>
             <h3 style={{ fontSize: '0.92rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600 }}>
@@ -1631,7 +2081,11 @@ export default function Home() {
                 key={job.job_id} 
                 className="card job-card" 
                 onClick={() => (job.status === 'done' || job.status === 'validating') && loadJobResult(job.job_id)}
-                style={{ padding: '1.25rem' }}
+                style={{
+                  padding: '1.25rem',
+                  cursor: (job.status === 'done' || job.status === 'validating') ? 'pointer' : 'default',
+                  opacity: (job.status === 'pending' || job.status === 'queued') ? 0.75 : 1
+                }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.75rem' }}>
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', minWidth: 0 }}>
@@ -1683,6 +2137,11 @@ export default function Home() {
                     {job.status === 'validating' && (
                       <span className="pill-badge flagged" style={{ padding: '0.2rem 0.6rem', fontSize: '0.72rem' }}>
                         <span className="pill-dot" /> Validating
+                      </span>
+                    )}
+                    {(job.status === 'pending' || job.status === 'queued') && (
+                      <span className="pill-badge" style={{ padding: '0.2rem 0.6rem', fontSize: '0.72rem', background: 'rgba(148, 163, 184, 0.1)', color: '#94a3b8', border: '1px solid rgba(148, 163, 184, 0.2)' }}>
+                        <span className="pill-dot" style={{ background: '#94a3b8' }} /> Queued
                       </span>
                     )}
                     {job.status === 'failed' && (
@@ -1925,10 +2384,10 @@ export default function Home() {
                             fontSize: '0.62rem',
                             fontWeight: 700,
                             letterSpacing: '0.5px',
-                            color: isMcq(q) ? '#38bdf8' : '#a78bfa',
-                            opacity: 0.85
+                            color: isMcq(q) ? '#38bdf8' : ((q.sub_parts && isValidSubparts(q.sub_parts, q.stem)) || (q.options && !isMcq(q) && isValidSubparts(q.options, q.stem)) || q.question_type === 'descriptive_subquestions') ? '#a78bfa' : '#94a3b8',
+                            opacity: 0.9
                           }}>
-                            {isMcq(q) ? 'MCQ' : 'DESC'}
+                            {isMcq(q) ? 'MCQ' : ((q.sub_parts && isValidSubparts(q.sub_parts, q.stem)) || (q.options && !isMcq(q) && isValidSubparts(q.options, q.stem)) || q.question_type === 'descriptive_subquestions') ? 'SUB-Q' : 'DESC'}
                           </div>
                         </td>
                         <td style={{ maxWidth: '420px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -1939,8 +2398,8 @@ export default function Home() {
                                 (() => {
                                   let baseText = (healAssertionReasonQuestion(q).stem || '').trim();
                                   if (!baseText) {
-                                    const parts = (q.sub_parts && isValidSubparts(q.sub_parts) ? q.sub_parts : null) || 
-                                      (q.options && !isMcq(q) && isValidSubparts(q.options) ? q.options : null) || 
+                                    const parts = (q.sub_parts && isValidSubparts(q.sub_parts, q.stem) ? q.sub_parts : null) || 
+                                      (q.options && !isMcq(q) && isValidSubparts(q.options, q.stem) ? q.options : null) || 
                                       extractSubpartsFromText(q.stem);
                                     if (parts && Object.keys(parts).length > 0) {
                                       baseText = Object.entries(parts).map(([k, v]) => `(${k}) ${v}`).join(' ');
@@ -2344,7 +2803,7 @@ export default function Home() {
                   validSub = candidate;
                 }
               }
-              if (!validSub) {
+              if (!validSub && !isMcq(selectedQuestion)) {
                 validSub = extractSubpartsFromText(effectiveStem);
               }
 
@@ -2414,7 +2873,7 @@ export default function Home() {
               );
             })()}
 
-            {isMcq(selectedQuestion) ? (
+            {isMcq(selectedQuestion) || (healAssertionReasonQuestion(selectedQuestion).options && Object.keys(healAssertionReasonQuestion(selectedQuestion).options).length >= 2 && !isValidSubparts(selectedQuestion.sub_parts)) ? (
               <>
                 {/* MCQ: Answer Options Box */}
                 <div className="detail-box">
@@ -2554,7 +3013,7 @@ export default function Home() {
                         color: 'var(--text-secondary)',
                         whiteSpace: 'pre-wrap'
                       }}
-                      dangerouslySetInnerHTML={{ __html: renderLatex(cleanExplanationDisplay(selectedQuestion.explanation || selectedQuestion.answer_text, selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer)) }}
+                      dangerouslySetInnerHTML={{ __html: renderLatex(cleanExplanationDisplay(selectedQuestion.explanation || selectedQuestion.answer_text, selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer, isMcq(selectedQuestion))) }}
                     />
                   ) : (
                     <div style={{ fontSize: '0.88rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
@@ -2569,12 +3028,15 @@ export default function Home() {
                 {(() => {
                   let rawSub = selectedQuestion.sub_parts;
                   
-                  let parts = isValidSubparts(rawSub) ? rawSub : null;
+                  let parts = isValidSubparts(rawSub, selectedQuestion.stem) ? rawSub : null;
+                  if (!parts && selectedQuestion.options && !isMcq(selectedQuestion)) {
+                    parts = isValidSubparts(selectedQuestion.options, selectedQuestion.stem) ? selectedQuestion.options : null;
+                  }
                   if (!parts && selectedQuestion.stem) {
                     parts = extractSubpartsFromText(selectedQuestion.stem);
                   }
                   
-                  if (parts && isValidSubparts(parts)) {
+                  if (parts && isValidSubparts(parts, selectedQuestion.stem)) {
                     return (
                       <div className="detail-box">
                         <div className="detail-box-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
@@ -2612,7 +3074,13 @@ export default function Home() {
                             // Clean answer content from sub-part text (stop at "Answer:" marker)
                             const rawText = typeof v === 'string' ? v : String(v || '');
                             const answerMarkerIdx = rawText.search(/\*?\*?Answer:?\*?\*?/i);
-                            const cleanText = answerMarkerIdx > 0 ? rawText.slice(0, answerMarkerIdx).trim() : rawText.trim();
+                            let cleanText = answerMarkerIdx > 0 ? rawText.slice(0, answerMarkerIdx).trim() : rawText.trim();
+
+                            // Ensure nested sub-subquestions (a), (b) or (i), (ii) break onto new lines
+                            cleanText = cleanText.replace(/(?<=[^\n])\s+(\([ivxlcdmIVXLCDM]+\))\s*/g, '\n$1 ');
+                            cleanText = cleanText.replace(/(?<=[?.!:;])\s*([ivxlcdmIVXLCDM]+\))\s*/g, '\n$1 ');
+                            cleanText = cleanText.replace(/(?<=[?.!:;])\s*(\([1-9a-dA-D]\))\s*/g, '\n$1 ');
+                            cleanText = cleanText.replace(/\n{3,}/g, '\n\n');
 
                             return (
                               <div
@@ -2679,18 +3147,52 @@ export default function Home() {
                       }
                     }
                     
-                    if (answerContent) {
+                    if (answerContent || selectedQuestion.answer_latex) {
                       return (
-                        <div
-                          style={{
-                            fontSize: '0.94rem',
-                            lineHeight: '1.8',
-                            color: 'var(--text-secondary)',
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'break-word'
-                          }}
-                          dangerouslySetInnerHTML={{ __html: renderLatex(cleanExplanationDisplay(answerContent, selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer)) }}
-                        />
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                          {selectedQuestion.answer_latex && (
+                            <div
+                              style={{
+                                fontSize: '1.05rem',
+                                padding: '12px',
+                                background: 'rgba(56, 189, 248, 0.05)',
+                                borderLeft: '3px solid #38bdf8',
+                                borderRadius: '4px',
+                                overflowX: 'auto',
+                              }}
+                            >
+                              {(() => {
+                                try {
+                                  return (
+                                    <span 
+                                      dangerouslySetInnerHTML={{ 
+                                        __html: katex.renderToString(selectedQuestion.answer_latex, { displayMode: true, throwOnError: true, strict: false }) 
+                                      }} 
+                                    />
+                                  );
+                                } catch (e) {
+                                  return (
+                                    <span style={{ fontFamily: 'monospace', color: '#ef4444' }}>
+                                      {selectedQuestion.answer_latex}
+                                    </span>
+                                  );
+                                }
+                              })()}
+                            </div>
+                          )}
+                          {answerContent && (
+                            <div
+                              style={{
+                                fontSize: '0.94rem',
+                                lineHeight: '1.8',
+                                color: 'var(--text-secondary)',
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-word'
+                              }}
+                              dangerouslySetInnerHTML={{ __html: renderLatex(cleanExplanationDisplay(answerContent, selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer, false)) }}
+                            />
+                          )}
+                        </div>
                       );
                     }
                     return (

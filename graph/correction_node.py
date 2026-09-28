@@ -225,71 +225,35 @@ class DirectPageCorrectionResponse(BaseModel):
 # Prompt construction
 # ---------------------------------------------------------------------------
 
-CORRECTION_SYSTEM_PROMPT = r"""You are a master bilingual (Malayalam and English) exam educator and mathematics editor reviewing question papers for students.
+CORRECTION_SYSTEM_PROMPT = r"""You are an expert bilingual (English & Malayalam) exam educator and math editor reviewing question papers for students.
 
-CRITICAL STUDENT-CENTRIC GOAL:
-The users studying these questions, options, and explanations are STUDENTS preparing for their examinations. The text MUST make complete, clear, and natural sense to a student. Any student reading the questions and solutions must find them clean, lucid, grammatically coherent, and easy to learn from.
+TASKS & RULES:
+1. LANGUAGE & TYPOS:
+   - Correct all spelling, OCR errors, and flagged words in their original language without cross-translating.
+   - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Preserve authentic Malayalam.
+   - For English: Fix spelling, restore truncated words ('oth'->'Both', 'll'->'All'), and punctuation.
 
-STUDENT-FACING READABILITY & NO MANGLED MATH DELIMITERS:
-- NEVER put normal English or Malayalam words, descriptions, or sentences inside LaTeX math mode ($...$ or $$...$$). In LaTeX math mode, all spaces are stripped and words are jammed together into unreadable slanted italics (e.g. writing `$is Planck's constant and e$` renders as the nonsensical string `isPlanck'sconstantande`, which severely confuses students).
-- ALWAYS keep explanatory prose OUTSIDE math delimiters: write "where $h$ is Planck's constant and $e$ is the charge of an electron", NEVER "whereh $is Planck's constant and e$" or "whereh $$isPlanck'sconstantande$$".
-- NEVER merge variables with adjacent words: always maintain proper spacing (e.g. "where $h$", not "whereh"; "and $e$", not "ande"; "if $x$", not "ifx").
-- Math mode ($...$) is strictly reserved for mathematical formulas, variables, equations, symbols, fractions, and numeric quantities with units (e.g. $h$, $e$, $\nu$, $V_0$, $\frac{h}{e}$, $20\,\Omega$, $5 \times 10^5\text{ V/m}$).
+2. QUESTION TYPE & VERIFICATION:
+   - Identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks in stem like (a), (b), (i), (ii)), or "descriptive_single" (open-ended).
+   - For MCQ: Independently solve, set `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Map cleaned choices in `corrected_options`.
+   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) in `corrected_explanation`, not subquestions.
 
-You have FOUR tasks for each question:
+3. LATEX EQUATIONS & MATH:
+   - Format all math, formulas, fractions, and units using valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$.
+   - Fix broken braces and subscripts ($V_{proton}$, $\lambda_{\alpha}$, never $V_}{proton}$).
+   - Repair fraction equations: write $\frac{A}{B} = \frac{C}{D}$, never $\frac{A}{B = \frac{C}{D}}$.
+   - Use `\times` for multiplication ($5 \times 10^5$).
+   - NEVER enclose normal English/Malayalam sentences in $...$ (avoids mashed text like `isPlanck'sconstantande`). Keep prose outside math delimiters.
 
-TASK 0 — QUESTION TYPE DETERMINATION & VALIDATION (MANDATORY):
-- Carefully analyze the question content, structure, and intent:
-  * "mcq": A genuine multiple-choice question offering mutually exclusive answer choices where the student must select ONE choice (e.g. A, B, C, D).
-  * "descriptive_single": A single open-ended or worked-solution question requiring a written or calculated response, derivation, proof, essay, or definition without choices.
-  * "descriptive_subquestions": ONLY for questions where the QUESTION PROMPT itself contains multiple directive sub-tasks (e.g., (a), (b), (c) or (i), (ii)) instructing the student to solve, define, or calculate separate parts.
-- STRICT QUESTION TYPE RULES:
-  1. DO NOT LABEL ANSWERS AS SUBQUESTIONS: Numbered steps or items in answers/solutions (e.g. 1. Higher, 2. Lower, 3. RT = 20 Ohm) are ANSWER/SOLUTION STEPS, NOT sub-questions! NEVER classify questions with answer steps as "descriptive_subquestions" and NEVER put answer steps into sub-questions. Keep all solution steps in `corrected_explanation` / `answer_text`.
-  2. If a descriptive question does not have separate directive prompts in the question stem itself, classify it as "descriptive_single".
-  3. NEVER HALLUCINATE OR INVENT OPTIONS: Never fabricate "None of the above", "All of the above", or placeholder choices to complete 4 options. If a descriptive question was mistakenly presented with options, classify it as "descriptive_single", set `corrected_options` to {}, and set `validated_answer` to null.
-- Return your decision in `question_type`: "mcq" | "descriptive_single" | "descriptive_subquestions".
-
-TASK 1 — TEXT CORRECTION & MATHEMATICAL EQUATION NORMALIZATION:
-- Fix the specific flagged words listed below each question.
-- SPELLING & OCR ERROR CORRECTION: Inspect stems, options, and explanations for spelling mistakes, OCR corruptions, and truncated words. If an option or stem contains words where the initial letter was truncated (such as 'oth' instead of 'Both', 'll' instead of 'All'), correct the spelling to 'Both', 'All', etc.
-- CRITICAL (DIFFERENTIATE OPTION LABELS FROM WORDS): Never strip or merge option letters with the option text. For example, if Option (b) is "Both A and B", it must be Option B with text "Both A and B", NEVER "oth A and B".
-- MATHEMATICAL EQUATION CORRECTION & NORMALIZATION (MANDATORY):
-  * Inspect all math expressions, physics formulas, equations, fractions, and units in stems, options, and explanations.
-  * Format all mathematical formulas using standard inline LaTeX enclosed in single dollar signs ($...$).
-  * EQUATION SEPARATION & BALANCED BRACES (CRITICAL):
-    - When writing equations with equality (=), NEVER place the equals sign or the other side inside a fraction denominator, numerator, or square root!
-    - Write $\frac{A}{B} = \frac{C}{D}$, NEVER $\frac{A}{B = \frac{C}{D}}$ or $\frac{A}{\sqrt{B = C}}$.
-    - Subscripts must be properly enclosed in braces: write $V_{proton}$, $V_{\alpha}$, $m_{proton}$, $\lambda_{proton}$, $\lambda_{\alpha}$, NEVER bare underscores or broken braces like $V_}{proton}$.
-    - Repair malformed equations like \frac{V_}{proton}{V_{alpha}} = 1 by fixing the braces to \frac{V_{proton}}{V_{alpha}} = 1.
-    - Never split English words like 'given that' into 'given t hat' or 'given by' into 'given b y'.
-  * MULTIPLICATION: Always use LaTeX `\times` (e.g., `$5 \times 10^5$`, `$5 \times \frac{10^5\text{ V}}{\text{m}}$`). Never leave bare `×`, `*`, or `x` outside LaTeX delimiters.
-  * FRACTIONS & UNITS: Clean fractions and format units cleanly (e.g. `\frac{10^5 V}{m}` -> `\frac{10^5\text{ V}}{\text{m}}`, `$5 \times 10^5\text{ V/m}$`, `$R_T = 20\,\Omega$`, `$V_T = 20\text{ V}$`, `$I = 1\text{ A}$`).
-  * If the stem or options contain math errors or need formula correction, return the corrected stem in `corrected_stem` and options in `corrected_options`.
-- Use surrounding sentence context to determine the correct word in its ORIGINAL language (Malayalam or English). Do NOT translate English to Malayalam or vice versa.
-- If you're uncertain about a correction, report low confidence rather than guessing.
-- If the text is completely unreadable or garbled beyond any possible correction (e.g., mojibake, completely wrong fonts), set 'needs_ocr_fallback' to true. Otherwise, keep it false.
-- Return the corrected word in the 'corrected_words' map.
-
-TASK 2 — ANSWER VERIFICATION (MCQ QUESTIONS ONLY):
-- Only classify and verify an answer if the question is genuinely an "mcq" with choices to select from.
-- For "descriptive_single" and "descriptive_subquestions": you MUST return 'validated_answer': null and 'answer_status': 'none'. NEVER pick an option letter for descriptive questions — there are no choices to validate against!
-- For genuine MCQ questions: independently solve the question and determine which option ('A', 'B', 'C', or 'D') is factually/logically correct. Return the chosen option letter in 'validated_answer'. If it matches the marked correct answer, report 'answer_status': 'agrees'; if not, 'disagrees'.
-
-TASK 3 — EXPLANATION / SOLUTION REVIEW & MATH CORRECTION:
-- If an 'Explanation from PDF' is provided below a question, thoroughly review it and fix ALL typos, spelling mistakes, Malayalam font/ligature corruptions, missing spaces, and punctuation errors. Return the complete, error-free, corrected explanation in 'corrected_explanation'.
-- PRESERVE MATH & FORMULAS: Format all mathematical formulas, equations, fractions, and symbols using standard inline LaTeX ($x^2$, $\frac{a}{b}$, $\sqrt{x}$, $\times$).
-- Correct mathematical notation too: repair malformed LaTeX delimiters, missing braces, broken fractions, and OCR errors in operators or symbols. Preserve the equation's mathematical meaning.
-- Do NOT translate between languages. Preserve the original language of the explanation.
-- Image markers such as [[QAI_IMAGE:q12:explanation:0]] are immutable. Preserve every marker exactly and in its original position. Never copy a marker between questions.
-- If NO 'Explanation from PDF' is provided for the question, you MUST return null for 'corrected_explanation'. DO NOT generate a new solution. DO NOT explain how to solve the question. ONLY correct the text that was explicitly provided.
-- DO NOT add new mathematical derivations, reasoning steps, or commentary that were not present in the original 'Explanation from PDF'.
-- DO NOT LABEL ANYTHING IN ANSWERS AS SUBQUESTION: Never prefix or label any answer, solution step, or explanation point with 'Subquestion', 'Sub-question', 'Subquestion 1:', or similar labels. Keep solution steps as clean items, numbered steps (1., 2.), lettered parts ((a), (b)) matching the question, or standard paragraphs.
-
-IMPORTANT: Answer verification is independent of text corrections."""
+4. PARAGRAPH FORMATTING & READABILITY:
+   - Structure dense explanations and multi-point stems with clean paragraph breaks (\n\n) or numbered steps (1., 2.).
+   - Un-mash concatenated words/variables (e.g. "where $h$ is", not "whereh").
+   - Immutable image markers (e.g. [[QAI_IMAGE:...]]) must remain in exact positions.
+   - If no explanation was in input, return null for `corrected_explanation`. Do not invent new solutions."""
 
 JSON_CORRECTION_SYSTEM_PROMPT = f"""{CORRECTION_SYSTEM_PROMPT}
 
-You MUST output valid JSON conforming exactly to this structure:
+Output valid JSON matching:
 {{
   "corrections": [
     {{
@@ -307,61 +271,32 @@ You MUST output valid JSON conforming exactly to this structure:
   ]
 }}"""
 
-DIRECT_CORRECTION_SYSTEM_PROMPT = r"""You are an elite bilingual (Malayalam and English) exam educator and mathematics tutor reviewing question papers for students.
+DIRECT_CORRECTION_SYSTEM_PROMPT = r"""You are an expert bilingual (English & Malayalam) exam educator and math editor reviewing question papers for students.
 
-CRITICAL STUDENT-CENTRIC GOAL:
-The users studying these questions, options, and explanations are STUDENTS preparing for their exams. The text MUST make complete, clear, and intuitive sense to a student. Every question, option, and solution must be easy to read, mathematically sound, and pedagogically clear.
+TASKS & RULES:
+1. LANGUAGE & TYPOS:
+   - Correct all spelling, OCR errors, and truncated words (e.g. 'oth'->'Both', 'll'->'All').
+   - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Do NOT translate between English and Malayalam.
 
-STUDENT-FACING READABILITY & NO MASHED MATH:
-- NEVER put normal English or Malayalam words, descriptions, or sentences inside LaTeX math mode ($...$ or $$...$$). In LaTeX math mode, all spaces between words are stripped, turning words into unreadable mashed text (e.g. writing `$is Planck's constant and e$` renders as `isPlanck'sconstantande`, confusing students).
-- Explanatory phrases and connecting definitions MUST remain ordinary prose OUTSIDE math delimiters: write 'where $h$ is Planck\'s constant and $e$ is the charge of an electron', NEVER 'whereh $$isPlanck\'sconstantande$$'.
-- NEVER merge variables with adjacent words: maintain clear spacing (e.g. write 'where $h$', not 'whereh'; 'and $e$', not 'ande'; 'if $x$', not 'ifx').
-- Math mode ($...$) is ONLY for actual formulas, variables, equations, fractions, and symbols (e.g. $h$, $e$, $\nu$, $V_0$, $\frac{h}{e}$, $E = h\nu$, $20\,\Omega$, $5 \times 10^5\text{ V/m}$).
+2. QUESTION TYPE & VERIFICATION:
+   - Identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks (a), (b) in stem), or "descriptive_single".
+   - For MCQ: Independently solve, return `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Put cleaned choices in `corrected_options`.
+   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Never treat answer steps (1., 2.) as subquestions.
 
-You have TWO separate jobs for each question provided:
+3. LATEX EQUATIONS & MATH:
+   - Enclose all math, formulas, fractions, and units in valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$.
+   - Fix broken braces and subscripts ($V_{proton}$, $\lambda_{\alpha}$).
+   - Fix equations with fractions: write $\frac{A}{B} = \frac{C}{D}$, never $\frac{A}{B = \frac{C}{D}}$.
+   - Use `\times` for multiplication ($5 \times 10^5$).
+   - NEVER enclose ordinary English/Malayalam sentences inside $...$ (avoids mashed text like `isPlanck'sconstantande`). Keep prose outside math delimiters.
 
-JOB 1 — FULL TEXT REWRITE & STRUCTURAL FORMATTING:
-- You will receive the raw, extracted text of the question (stem) and its options. You may also receive an Explanation from the PDF.
-- Determine the structure of the question: "mcq", "descriptive_single", or "descriptive_subquestions". Return this in `question_type`.
-- CRITICAL RULES FOR QUESTION TYPE:
-  * DO NOT LABEL ANSWERS AS SUBQUESTIONS: Numbered items or steps in the answer/solution (e.g. 1. Higher, 2. Lower, 3. RT = 20 Ohm) are ANSWER/SOLUTION STEPS, NOT sub-questions! Keep all answer steps in `corrected_explanation`.
-  * Classify open-ended or worked-solution questions as "descriptive_single". "descriptive_subquestions" is ONLY for questions where the question prompt itself contains distinct sub-problems (e.g. (a) State law, (b) Find value).
-  * DO NOT invent fake options like "None of the above" or "All of the above" to fill out 4 choices!
-  * For descriptive questions, you MUST leave `corrected_options` as {} (empty object), `validated_answer` as null, and `answer_status` as "none".
-- The text may contain OCR errors, spelling mistakes, missing spaces, or formatting issues.
-- IMPORTANT: Preserve the ORIGINAL language! If the question is in English, rewrite it with perfect English spelling and grammar. If it is in Malayalam, rewrite it with perfect Malayalam spelling and grammar. Do NOT translate English to Malayalam or vice versa.
-- PRESERVE MULTI-LINE STRUCTURE: If the question has sub-points, numbered statements, Roman numerals (e.g. (i), (ii), (iii)), tables, poem stanzas, or lists, put EACH sub-point on its own new line using newline characters (\n). Do NOT collapse multi-line statements into a single sentence.
-- Return ONLY the question body text in `corrected_stem`. Do NOT prefix with question numbers (do NOT include "Question 1:", "Q1.", "1.", "ചോദ്യം 1:").
-- In `corrected_options`, return the cleaned text for each option mapped to its key ('A', 'B', 'C', 'D'). If the question is a "descriptive" question with no true A/B/C/D choices, leave `corrected_options` empty ({}). DO NOT hallucinate options.
-- CRITICAL (DIFFERENTIATE OPTION LABELS FROM WORDS): When an option starts with a word sharing the option letter (e.g. Option B: "(b) Both A and B" or "B. Both (1) and (2)", Option A: "(a) All of the above"): NEVER strip the initial letter from the word! Option B's text MUST be "Both A and B" (NEVER "oth A and B"). Option A's text MUST be "All of the above" (NEVER "ll of the above"). Differentiate clearly between the option label (B) and the text (Both).
-- SPELLING & OCR CORRECTION (MANDATORY): Thoroughly correct all spelling mistakes and truncated words in stems, options, and explanations. If an option or stem contains words where the first letter was accidentally truncated (such as 'oth' instead of 'Both', 'll' instead of 'All'), you MUST restore and correct the spelling to 'Both', 'All', etc.
-- If an 'Explanation from PDF' is provided, correct ONLY that supplied explanation: fix OCR garbage, spelling mistakes, Malayalam ligatures, and formatting errors, then return it in `corrected_explanation`. If it is a descriptive question with sub-parts like (a) and (b), preserve the labels (e.g., "(a) ...\n(b) ..."). DO NOT add a new solution, answer explanation, or unsupported steps.
-- Image markers such as [[QAI_IMAGE:q12:explanation:0]] or {{IMG:...}} are immutable. Preserve every marker exactly and in its original position. Never copy or delete a marker.
-- DO NOT LABEL ANYTHING IN ANSWERS AS SUBQUESTION: Never prefix or label any answer, solution step, or explanation point with 'Subquestion', 'Sub-question', 'Subquestion 1:', or similar labels. Keep solution steps as clean items, numbered steps (1., 2.), lettered parts ((a), (b)) matching the question, or standard paragraphs.
-- If no 'Explanation from PDF' is provided, you MUST return null for `corrected_explanation`. NEVER generate a new explanation or solution from the question and options. I only want you to correct typos, not solve the question for the student.
-- MATHEMATICAL EQUATION CORRECTION & NORMALIZATION (MANDATORY):
-  * Format all mathematical formulas, symbols, fractions, and Greek letters using standard inline LaTeX enclosed in dollar signs (e.g., $x^2 + y^2 = r^2$, $\frac{a}{b}$, $\sqrt{x}$, $\sigma^2$, $\chi^2$, $R_T = 20\,\Omega$, $V_T = 20\text{ V}$, $I = 1\text{ A}$).
-  * EQUATION SEPARATION & BALANCED BRACES (CRITICAL):
-    - When writing equations with equality (=), NEVER place the equals sign or the other side inside a fraction denominator, numerator, or square root!
-    - Write $\frac{A}{B} = \frac{C}{D}$, NEVER $\frac{A}{B = \frac{C}{D}}$ or $\frac{A}{\sqrt{B = C}}$.
-    - Subscripts must be properly enclosed in braces: write $V_{proton}$, $V_{\alpha}$, $m_{proton}$, $\lambda_{proton}$, $\lambda_{\alpha}$, NEVER bare underscores or broken braces like $V_}{proton}$.
-    - Repair malformed equations like \frac{V_}{proton}{V_{alpha}} = 1 by fixing the braces to \frac{V_{proton}}{V_{alpha}} = 1.
-    - Never split English words like 'given that' into 'given t hat' or 'given by' into 'given b y'.
-  * For multiplication, ALWAYS use LaTeX `\times` (e.g., `$5 \times \frac{10^5\text{ V}}{\text{m}}$`, `$5 \times 10^5\text{ V/m}$`). Never use the lowercase letter 'x' or '×' outside math delimiters.
-  * Clean fraction units (e.g., `\frac{10^5 V}{m}` -> `\frac{10^5\text{ V}}{\text{m}}`).
-  * Repair malformed equations from extraction, including missing `$` delimiters, braces, fraction structure, operators, and OCR-corrupted symbols. For example, if you see `\frac{V_}{proton}{V_{alpha}}` or similar malformed LaTeX, you MUST fix it to `\frac{V_{proton}}{V_{alpha}}`. Preserve the original mathematical meaning.
-- Fix Malayalam ligature/split glyph corruptions and replace non-breaking spaces.
-- Keep `corrected_explanation` concise while preserving all necessary solution steps and formulas. Do not add self-corrections, uncertainty, or commentary.
+4. PARAGRAPH FORMATTING & READABILITY:
+   - Format dense text and multi-step explanations with clean paragraph breaks (\n\n) or numbered steps (1., 2.).
+   - Un-mash concatenated words/variables (write "where $h$ is", not "whereh").
+   - Immutable image markers ([[QAI_IMAGE:...]]) must remain in exact positions.
+   - If no explanation was in input, return null for `corrected_explanation`.
 
-JOB 2 — ANSWER VERIFICATION:
-- For genuine "mcq" questions, independently solve the question and determine which option ('A', 'B', 'C', or 'D') is correct.
-- For verification, return only the option letter and status. Do not generate a solution or explanation.
-- Always provide the chosen option letter in `validated_answer` ('A', 'B', 'C', or 'D'). For descriptive questions, return null.
-- If `validated_answer` matches the marked correct answer, report `answer_status`: 'agrees'.
-- If `validated_answer` does NOT match, report `answer_status`: 'disagrees'.
-- For descriptive questions with no marked answer, report `answer_status`: 'none'.
-
-You MUST output valid JSON conforming exactly to this structure:
+Output valid JSON matching:
 {
   "corrections": [
     {
@@ -492,10 +427,9 @@ def _build_page_prompt(
     questions_on_page: list[dict],
     flagged_words_by_question: dict[int, list[dict]],
 ) -> str:
-    """Build the prompt for one page's worth of flagged questions."""
+    """Build a concise, token-efficient prompt for one page's worth of questions."""
     parts = []
-
-    from ..ingest.option_answer_separator import clean_question_options_and_answer
+    from ..ingest.option_answer_separator import clean_question_options_and_answer, extract_subparts_from_text
 
     for q in questions_on_page:
         clean_question_options_and_answer(q)
@@ -520,38 +454,28 @@ def _build_page_prompt(
             q["_clean_exp"] = clean_exp
 
         parts.append(f"\n--- Question {q_num} ---")
-        detected_type = q.get("question_type", "unknown")
-        parts.append(f"Detected question type: {detected_type}")
         parts.append(f"Stem: {clean_stem}")
         sub_parts = q.get("sub_parts")
         if not sub_parts and clean_stem:
-            from ..ingest.option_answer_separator import extract_subparts_from_text
             sub_parts = extract_subparts_from_text(clean_stem)
-        if detected_type.startswith("descriptive") or sub_parts:
-            if sub_parts and isinstance(sub_parts, dict) and len(sub_parts) > 0:
-                parts.append("Question Directive Parts:")
-                for key in sorted(sub_parts.keys()):
-                    parts.append(f"  ({key.lower()}) {sub_parts[key]}")
-            else:
-                parts.append("Options: None (Descriptive open-ended question)")
+
+        if sub_parts and isinstance(sub_parts, dict) and len(sub_parts) > 0:
+            parts.append("Sub-parts:")
+            for key in sorted(sub_parts.keys()):
+                parts.append(f"  ({key.lower()}) {sub_parts[key]}")
         elif options:
-            parts.append("Options (MCQ Choices):")
+            parts.append("Options:")
             for key in sorted(options.keys()):
-                parts.append(f"  {key}. {options[key]}")
-            parts.append(f"Marked correct answer: {marked}")
-        else:
-            parts.append("Options: None extracted from PDF")
+                parts.append(f"  ({key}) {options[key]}")
+            parts.append(f"Marked Answer: {marked}")
+
         if clean_exp.strip():
-            parts.append(f"Explanation from PDF: {clean_exp.strip()}")
-        
+            parts.append(f"Explanation: {clean_exp.strip()}")
+
         if flagged:
-            parts.append(f"\nFlagged words to review (for Text Correction):")
+            parts.append("Flagged words to check:")
             for fw in flagged:
-                parts.append(f"  - '{fw['word']}' (reason: {fw['reason']})")
-                if fw.get('context'):
-                    parts.append(f"    Context: ...{fw['context']}...")
-        else:
-            parts.append(f"\nNo specific text flagged for this question. Proceed directly to Answer Verification and Explanation Review.")
+                parts.append(f"  - '{fw['word']}' ({fw.get('reason', 'typo')})")
 
     return "\n".join(parts)
 
@@ -1683,12 +1607,14 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
     clean_exp_for_prompt, extracted_images_exp = _mask_owned_images(explanation, f"q{q_num}:explanation")
 
     prompt = f"--- Question {q_num} ---\nStem: {clean_stem_for_prompt}\n"
-    for key in sorted(options.keys()):
-        prompt += f"  {key}. {options[key]}\n"
+    if options:
+        prompt += "Options:\n"
+        for key in sorted(options.keys()):
+            prompt += f"  ({key}) {options[key]}\n"
     prompt += f"Marked correct answer: {marked}\n"
     if clean_exp_for_prompt:
         prompt += f"Explanation from PDF: {clean_exp_for_prompt}\n"
-    prompt += "\nPreserve multi-line formatting (e.g. sub-points (i), (ii), lists). Proceed to full rewrite and answer verification."
+    prompt += "\nReview typos (Malayalam/English), question type, LaTeX equations, and format paragraphs for readability."
 
     corrections = None
     p_tok = 0
@@ -1709,7 +1635,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.1,
-                    max_tokens=min(4000, max(1800, 900 + len(clean_exp_for_prompt) // 2)),
+                    max_tokens=min(1800, max(500, 400 + len(clean_exp_for_prompt) // 2)),
                 )
                 if hasattr(response, "usage") and response.usage:
                     p_tok = response.usage.prompt_tokens or 0

@@ -11,6 +11,8 @@ class QuestionResult(BaseModel):
     question_type: Optional[str] = None  # "mcq" or "descriptive"
     sub_parts: Optional[Dict[str, str]] = None  # For descriptive: {"a": "Draw...", "b": "Why..."}
     answer_text: Optional[str] = None  # Full answer/solution text (for both types)
+    answer_latex: Optional[str] = None # Mathematical formulas (separated from plain text)
+    ocr_source: Optional[str] = None   # Which engine/path generated the math OCR (e.g. "gemini-2.5-flash", "tesseract")
     marked_correct_answer: Optional[str] = None
     marked_answer: Optional[str] = None
     validated_answer: Optional[str] = None

@@ -21,7 +21,7 @@ router = APIRouter()
 from ..ingest.router import route_and_extract, ocr_equation_clip, clean_latex_equation
 from ..graph.workflow import app_graph
 from ..graph.state import GraphState
-from ..graph.nodes import get_gemini_status, is_gemini_enabled, get_groq_status, is_groq_enabled, get_llm_status, is_llm_enabled, is_answer_validation_enabled, rescan_question_vision, _solve_single_block, separate_stem_and_options, parse_trailing_meta
+from ..graph.nodes import get_gemini_status, is_gemini_enabled, get_groq_status, is_groq_enabled, get_llm_status, is_llm_enabled, is_answer_validation_enabled, rescan_question_vision, _solve_single_block, separate_stem_and_options, parse_questions_from_text, parse_trailing_meta
 
 _math_conversion_tasks: dict[str, dict] = {}
 
@@ -30,57 +30,50 @@ def _count_math_images(questions: list) -> int:
     cnt = 0
     for q in questions:
         for text in [q.get("stem", "")] + list(q.get("options", {}).values()):
-            if '<img' in text:
-                for m in re.finditer(r'<img[^>]*>', text):
-                    tag = m.group(0)
-                    if 'alt="diagram"' not in tag:
-                        cnt += 1
+            if '{{IMG:' in text or '{{IMG_BLOCK:' in text:
+                cnt += len(re.findall(r'\{\{IMG(?:_BLOCK)?:\s*[^}]+\}\}', text))
     return cnt
 
 def _replace_math_images_in_text(text: str, engine: Optional[str] = None) -> tuple[str, bool]:
     """Replaces equation and diagram image tags with LaTeX by running targeted OCR on each clip."""
-    if not text or '<img' not in text:
+    if not text or ('{{IMG:' not in text and '{{IMG_BLOCK:' not in text):
         return text, False
 
-    # Match both standalone <img ... /> and wrapper <div ...><img ... /></div>
-    pattern = r'(?:<div[^>]*>\s*)?<img[^>]*src="data:image/png;base64,([^"]+)"[^>]*\/?>\s*(?:<\/div>)?'
-    matches = list(re.finditer(pattern, text, re.IGNORECASE))
+    # Match anchor tokens like {{IMG:https://...}}
+    pattern = r'\{\{IMG(?:_BLOCK)?:\s*([^}]+)\}\}'
+    matches = list(re.finditer(pattern, text))
     if not matches:
         return text, False
 
     modified = False
     new_text = text
+    import urllib.request
+    
     for m in reversed(matches):
         tag_str = m.group(0)
-        # Skip genuine geometry/drawing diagrams (e.g. alt="diagram" with large size)
-        if 'alt="diagram"' in tag_str and 'inline-math-img' not in tag_str:
-            try:
-                b64_chk = m.group(1).strip()
-                pad = len(b64_chk) % 4
-                if pad:
-                    b64_chk += '=' * (4 - pad)
-                img_bytes_chk = base64.b64decode(b64_chk)
+        img_url = m.group(1).strip()
+        
+        try:
+            req = urllib.request.Request(img_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                img_bytes = response.read()
+                
+            # Skip genuine geometry/drawing diagrams
+            if 'IMG_BLOCK' in tag_str:
                 from PIL import Image
-                chk_img = Image.open(io.BytesIO(img_bytes_chk))
+                import io
+                chk_img = Image.open(io.BytesIO(img_bytes))
                 cw, ch = chk_img.size
                 if cw > 180 and ch > 120:
                     continue
-            except Exception:
-                pass
 
-        b64_str = m.group(1).strip()
-        try:
-            pad = len(b64_str) % 4
-            if pad:
-                b64_str += '=' * (4 - pad)
-            img_bytes = base64.b64decode(b64_str)
             latex, _, _ = ocr_equation_clip(img_bytes, engine=engine)
             clean_math = clean_latex_equation(latex)
             if clean_math and clean_math != "$$":
                 # If Gemini returned a Diagram/Image fallback description, REJECT it and keep the image!
                 if re.match(r'^\[\s*(?:Diagram|Image|Chart|Graph|Figure)\b', clean_math, re.IGNORECASE):
                     continue
-                new_text = new_text[:m.start()] + f" {clean_math} " + new_text[m.end():]
+                new_text = new_text[:m.start()] + f" {{{{EQ:{clean_math}}}}} " + new_text[m.end():]
                 modified = True
         except Exception as e:
             print(f"[Progressive Math OCR] Tag parse failed: {e}", flush=True)
@@ -210,6 +203,27 @@ def get_job_file_path(job: models.Job) -> Optional[str]:
         return fallback_target
     return None
 
+
+def recover_question_from_source_pdf(job: models.Job, question_number: int) -> Optional[dict]:
+    """Recover a malformed question from the PDF text layer when processed data lost options."""
+    file_path = get_job_file_path(job)
+    if not file_path:
+        return None
+
+    try:
+        document = pymupdf.open(file_path)
+        try:
+            for page in document:
+                page_questions = parse_questions_from_text(page.get_text())
+                for candidate in page_questions:
+                    if candidate.get("question_number") == question_number and len(candidate.get("options") or {}) >= 2:
+                        return candidate
+        finally:
+            document.close()
+    except Exception as exc:
+        print(f"Warning: Source PDF question recovery failed for Q{question_number}: {exc}", flush=True)
+    return None
+
 def process_pdf_background(job_id: str, file_path: str, db: Session):
     try:
         # Mark as processing
@@ -274,7 +288,9 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
                             answer_text=b.get("answer_text"),
                             marked_answer=marked,
                             marked_correct_answer=marked,
-                            page_number=b.get("page_number")
+                            page_number=b.get("page_number"),
+                            answer_latex=b.get("answer_latex"),
+                            ocr_source=b.get("ocr_source")
                         ))
                         
                     summary_data = current_full_state.get("summary", {"total": len(questions), "validated": 0, "flagged": 0})
@@ -357,12 +373,112 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
             job.status = "failed"
             db.commit()
 
+# ---------------------------------------------------------------------------
+# Sequential PDF Queue Worker: strictly processes one PDF at a time
+# ---------------------------------------------------------------------------
+_pdf_queue_lock = threading.Lock()
+_pdf_processing_lock = threading.Lock()
+_pdf_queue_event = threading.Event()
+_pdf_worker_thread: Optional[threading.Thread] = None
+
+def _run_pdf_queue_worker():
+    print("[QueueWorker] Background PDF processing worker started.", flush=True)
+    # One-time startup check: reset any interrupted jobs left in 'processing' or 'validating' back to 'pending'
+    try:
+        startup_db = database.SessionLocal()
+        interrupted = startup_db.query(models.Job).filter(
+            models.Job.status.in_(["processing", "validating"])
+        ).all()
+        for ij in interrupted:
+            if not ij.result_json:
+                print(f"[QueueWorker] Resetting interrupted job {ij.id} ({ij.filename}) to pending", flush=True)
+                ij.status = "pending"
+            else:
+                ij.status = "done"
+        startup_db.commit()
+        startup_db.close()
+    except Exception as _startup_err:
+        print(f"[QueueWorker] Startup check error: {_startup_err}", flush=True)
+
+    while True:
+        _pdf_queue_event.wait(timeout=3.0)
+        _pdf_queue_event.clear()
+
+        while True:
+            db = database.SessionLocal()
+            next_job_id = None
+            next_file_path = None
+            try:
+                pending_job = db.query(models.Job).filter(
+                    models.Job.status == "pending"
+                ).order_by(models.Job.created_at.asc()).first()
+                if pending_job:
+                    next_job_id = pending_job.id
+                    next_file_path = get_job_file_path(pending_job)
+            except Exception as e:
+                print(f"[QueueWorker] Error checking pending queue: {e}", flush=True)
+            finally:
+                db.close()
+
+            if not next_job_id:
+                break
+
+            # Strictly process ONE PDF at a time
+            with _pdf_processing_lock:
+                worker_db = database.SessionLocal()
+                try:
+                    current_job = worker_db.query(models.Job).filter(models.Job.id == next_job_id).first()
+                    if not current_job or current_job.status != "pending":
+                        continue
+
+                    if not next_file_path or not os.path.exists(next_file_path):
+                        print(f"[QueueWorker] File not found for job {next_job_id}: {next_file_path}", flush=True)
+                        current_job.status = "failed"
+                        worker_db.commit()
+                        continue
+
+                    print(f"[QueueWorker] >>> Processing 1 PDF at a time: {next_job_id} ({current_job.filename})", flush=True)
+                    process_pdf_background(next_job_id, next_file_path, worker_db)
+                    print(f"[QueueWorker] <<< Finished processing PDF: {next_job_id} ({current_job.filename})", flush=True)
+                except Exception as err:
+                    print(f"[QueueWorker] Error processing job {next_job_id}: {err}", flush=True)
+                    try:
+                        failed_job = worker_db.query(models.Job).filter(models.Job.id == next_job_id).first()
+                        if failed_job and failed_job.status not in ("done", "failed"):
+                            failed_job.status = "failed"
+                            worker_db.commit()
+                    except Exception:
+                        pass
+                finally:
+                    worker_db.close()
+
+
+def trigger_queue_worker():
+    global _pdf_worker_thread
+    with _pdf_queue_lock:
+        if _pdf_worker_thread is None or not _pdf_worker_thread.is_alive():
+            _pdf_worker_thread = threading.Thread(
+                target=_run_pdf_queue_worker,
+                daemon=True,
+                name="PDFQueueWorker"
+            )
+            _pdf_worker_thread.start()
+    _pdf_queue_event.set()
+
+
+# Initialize worker on module load
+try:
+    trigger_queue_worker()
+except Exception as _init_err:
+    print(f"Warning: Failed to start PDFQueueWorker: {_init_err}", flush=True)
+
+
 @router.post("/pdfs/upload", response_model=schemas.JobStatusResponse)
-async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(database.get_db)):
-    if not file.filename.endswith(".pdf"):
+async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(database.get_db)):
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
 
-    # Create job entry
+    # Create job entry in pending status
     job = models.Job(filename=file.filename, status="pending")
     db.add(job)
     db.commit()
@@ -377,9 +493,8 @@ async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(
     job.file_path = file_path
     db.commit()
 
-    # Dispatch background task
-    # Note: we need to pass a new db session to the background task usually, or handle it carefully
-    background_tasks.add_task(process_pdf_background, job.id, file_path, database.SessionLocal())
+    # Trigger sequential worker (strictly one PDF processed at a time)
+    trigger_queue_worker()
 
     return schemas.JobStatusResponse(
         job_id=job.id,
@@ -388,6 +503,51 @@ async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(
         created_at=job.created_at,
         has_file=True
     )
+
+
+@router.post("/pdfs/upload-bulk", response_model=List[schemas.JobStatusResponse])
+async def upload_bulk_pdfs(
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(database.get_db)
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    created_jobs = []
+    for file in files:
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
+            continue
+
+        job = models.Job(filename=file.filename, status="pending")
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+
+        safe_filename = os.path.basename(file.filename)
+        file_path = os.path.join(database.UPLOADS_DIR, f"{job.id}_{safe_filename}")
+        with open(file_path, "wb") as buffer:
+            buffer.write(await file.read())
+
+        job.file_path = file_path
+        db.commit()
+
+        created_jobs.append(
+            schemas.JobStatusResponse(
+                job_id=job.id,
+                status=job.status,
+                filename=job.filename,
+                created_at=job.created_at,
+                has_file=True
+            )
+        )
+
+    if not created_jobs:
+        raise HTTPException(status_code=400, detail="No valid PDF files were uploaded")
+
+    # Trigger sequential worker (strictly one PDF processed at a time)
+    trigger_queue_worker()
+
+    return created_jobs
 
 @router.get("/pdfs/{job_id}/status", response_model=schemas.JobStatusResponse)
 def get_job_status(job_id: str, db: Session = Depends(database.get_db)):
@@ -433,66 +593,6 @@ def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
     result_obj = None
     if job.result_json:
         result_obj = schemas.PDFResult.model_validate_json(job.result_json)
-        # Self-healing: if any question has empty options or trapped answer/explanation
-        changed = False
-        for q in result_obj.questions:
-            re_separate_needed = False
-            is_desc = bool(q.question_type and str(q.question_type).lower().startswith("descriptive"))
-            has_sub = bool(getattr(q, "sub_parts", None))
-            # Re-separate options if options are missing or contain unseparated option markers like (c), (d)
-            if not is_desc and not has_sub and (not q.options or len(q.options) < 4):
-                combined_probe = (q.stem or "") + " " + " ".join(q.options.values() if q.options else [])
-                if any(m in combined_probe for m in ["B)", "C)", "D)", "(b)", "(c)", "(d)", "B:-", "C:-", "D:-", "B.", "C.", "D."]):
-                    re_separate_needed = True
-
-            if re_separate_needed:
-                # Reconstruct full block to reliably extract all options A, B, C, D
-                reconstruct_text = (q.stem or "").strip()
-                if q.options:
-                    for k in sorted(q.options.keys()):
-                        reconstruct_text += f"\n{k}) {q.options[k]}"
-                if q.marked_answer and "answer" not in reconstruct_text.lower() and "ഉത്തരം" not in reconstruct_text:
-                    reconstruct_text += f"\nAnswer: {q.marked_answer}"
-                if q.explanation and "solution" not in reconstruct_text.lower() and "വിശദീകരണം" not in reconstruct_text:
-                    reconstruct_text += f"\nSolution: {q.explanation}"
-
-                healed_stem, healed_options, healed_ans, healed_exp = separate_stem_and_options(reconstruct_text)
-                if len(healed_options) > len(q.options or {}):
-                    q.stem = healed_stem
-                    q.options = healed_options
-                    if not q.marked_answer and healed_ans:
-                        q.marked_answer = healed_ans
-                        q.marked_correct_answer = healed_ans
-                    if not q.explanation and healed_exp:
-                        q.explanation = healed_exp
-                    changed = True
-
-            # 2. Separate options & answers and auto-classify question type
-            from ..ingest.option_answer_separator import clean_question_options_and_answer
-            old_opts = dict(q.options) if q.options else {}
-            old_stem = q.stem
-            old_sub = dict(q.sub_parts) if getattr(q, "sub_parts", None) else None
-            old_marked = q.marked_answer
-            old_exp = q.explanation
-            old_type = q.question_type
-
-            clean_question_options_and_answer(q)
-
-            if (q.options != old_opts or 
-                q.stem != old_stem or
-                (dict(q.sub_parts) if getattr(q, "sub_parts", None) else None) != old_sub or
-                q.marked_answer != old_marked or 
-                q.explanation != old_exp or 
-                q.question_type != old_type):
-                changed = True
-
-        if changed:
-            try:
-                job.result_json = result_obj.model_dump_json()
-                db.commit()
-            except Exception as e:
-                db.rollback()
-                print(f"Warning: Failed to persist self-healed options/explanation for job {job_id}: {e}")
 
     if result_obj:
         # Expand anchor tokens to HTML for frontend consumption.
@@ -514,7 +614,166 @@ def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
                 if hasattr(q, "sub_parts") and q.sub_parts:
                     q.sub_parts = {k: expand_anchor_tokens(v) for k, v in q.sub_parts.items()}
 
+            def _heal_missing_subpart_a(text: Optional[str]) -> Optional[str]:
+                if not text or not isinstance(text, str):
+                    return text
+                s = text.strip()
+                subsequent_b = bool(re.search(r'\S+[\s\S]+?(?:^|\n|\s)(?:\(?[b-hB-H]\)?|[b-hB-H]\.|\(ii\)|\(2\))\s+', s))
+                has_a = bool(re.search(r'(?:^|\n|\s)\(?[aA1]\)?[\s\.\:\-]+', s))
+                has_b = bool(re.search(r'(?:^|\n|\s)(?:\(?[b-hB-H2]\)?|[b-hB-H]\.)[\s\.\:\-]+', s))
+                if (subsequent_b or (has_a and has_b)) and not bool(re.match(r'^\(?[a-dA-D1-9]\)?[\s\.\:\-]+|^\(?[ivxIVX]+\)?[\s\.\:\-]+', s)):
+                    s = f"(a) {s}"
+                return s
+
             for q in result_obj.questions:
+                # Auto-heal any question stem historically truncated to just 'Assertion' or 'പ്രസ്താവന'
+                if hasattr(q, "stem") and q.stem and q.stem.strip().lower() in ("assertion", "പ്രസ്താവന"):
+                    rec = recover_question_from_source_pdf(job, q.question_number)
+                    if rec and rec.get("stem") and len(rec["stem"]) > len(q.stem):
+                        q.stem = rec["stem"]
+                        try:
+                            if job.result_json:
+                                db_data = json.loads(job.result_json)
+                                for db_q in db_data.get("questions", []):
+                                    if db_q.get("question_number") == q.question_number:
+                                        db_q["stem"] = rec["stem"]
+                                job.result_json = json.dumps(db_data)
+                                db.commit()
+                        except Exception:
+                            pass
+
+                # Auto-heal questions where decimal numbers in equations were falsely saved as options (e.g. '7', '8'):
+                if hasattr(q, "options") and q.options:
+                    opt_keys = list(q.options.keys())
+                    has_fake_digit_opts = any(re.match(r'^[6-9]$', str(k)) for k in opt_keys) or (
+                        any(str(k).isdigit() for k in opt_keys) and '1' not in [str(k) for k in opt_keys]
+                    )
+                    if has_fake_digit_opts:
+                        sorted_k = sorted(opt_keys, key=lambda x: int(x) if str(x).isdigit() else 999)
+                        restored_stem = q.stem or ""
+                        for k in sorted_k:
+                            restored_stem = f"{restored_stem} {k}.{q.options[k]}".strip()
+                        q.stem = restored_stem
+                        q.options = {}
+                        q.question_type = "descriptive_single"
+                        try:
+                            if job.result_json:
+                                db_data = json.loads(job.result_json)
+                                for db_q in db_data.get("questions", []):
+                                    if db_q.get("question_number") == q.question_number:
+                                        db_q["stem"] = restored_stem
+                                        db_q["options"] = {}
+                                        db_q["question_type"] = "descriptive_single"
+                                job.result_json = json.dumps(db_data)
+                                db.commit()
+                        except Exception:
+                            pass
+
+                db_needs_update = False
+
+                # Auto-heal merged options or empty option values in equations
+                from ..ingest.option_answer_separator import split_merged_options
+                if hasattr(q, "options") and q.options:
+                    # 1. Known equation distortion: 'B': '' where A is '1:1' and C is 'c2:1' / 'c^2:1'
+                    if (q.options.get('B') == '' or q.options.get('b') == '') and (q.options.get('A') == '1:1' or q.options.get('a') == '1:1'):
+                        key_b = 'B' if 'B' in q.options else 'b'
+                        q.options[key_b] = 'c:1'
+                        db_needs_update = True
+                    
+                    # 2. Re-split merged options
+                    healed_opts = split_merged_options(q.options)
+                    if healed_opts != q.options:
+                        q.options = healed_opts
+                        db_needs_update = True
+
+                # If options are incomplete (< 4) or empty, and stem has options (e.g. (a) ... (b) ... (c) ... (d) ...):
+                if hasattr(q, "stem") and q.stem:
+                    opt_count = len(q.options) if hasattr(q, "options") and q.options else 0
+                    if opt_count < 4 and re.search(r'(?:^|\n|\s)\(([a-dA-D1-4])\)[\.\:\-]?\s*', q.stem):
+                        from ..graph.nodes import separate_stem_and_options
+                        rec_stem, rec_opts, rec_ans, rec_exp = separate_stem_and_options(q.stem)
+                        if rec_opts and len(rec_opts) > opt_count and len(rec_opts) >= 2:
+                            q.stem = rec_stem
+                            q.options = rec_opts
+                            if rec_ans and not getattr(q, "marked_answer", None):
+                                q.marked_answer = rec_ans
+                                q.marked_correct_answer = rec_ans
+                            q.question_type = "mcq"
+                            db_needs_update = True
+
+                # If options are still incomplete (< 2) or empty or contain empty strings, check sibling jobs with the same filename in DB:
+                if (not hasattr(q, "options") or not q.options or len(q.options) < 2 or any(not str(v).strip() for v in q.options.values())) and job.filename:
+                    sibling_jobs = db.query(models.Job).filter(
+                        models.Job.filename == job.filename,
+                        models.Job.id != job.id,
+                        models.Job.result_json.isnot(None)
+                    ).order_by(models.Job.created_at.desc()).all()
+                    for sj in sibling_jobs:
+                        try:
+                            s_data = json.loads(sj.result_json)
+                            for sq in s_data.get("questions", []):
+                                if sq.get("question_number") == q.question_number:
+                                    s_opts = sq.get("options") or {}
+                                    if len(s_opts) >= 3 and all(str(v).strip() for v in s_opts.values()):
+                                        q.options = s_opts
+                                        if sq.get("stem"):
+                                            q.stem = sq.get("stem")
+                                        q.question_type = "mcq"
+                                        if sq.get("marked_answer") or sq.get("marked_correct_answer"):
+                                            q.marked_answer = sq.get("marked_answer") or sq.get("marked_correct_answer")
+                                            q.marked_correct_answer = q.marked_answer
+                                        db_needs_update = True
+                                        break
+                        except Exception:
+                            continue
+                        if hasattr(q, "options") and q.options and len(q.options) >= 3:
+                            break
+
+                # Auto-heal missing (a) in answer_text or explanation when (b) is present
+                orig_exp = getattr(q, "explanation", None)
+                orig_ans = getattr(q, "answer_text", None)
+                healed_exp = _heal_missing_subpart_a(orig_exp)
+                healed_ans = _heal_missing_subpart_a(orig_ans)
+                if healed_exp != orig_exp:
+                    q.explanation = healed_exp
+                    db_needs_update = True
+                if healed_ans != orig_ans:
+                    q.answer_text = healed_ans
+                    db_needs_update = True
+
+                # Clear spurious marked_answer="A" on descriptive or multi-part questions
+                is_multi = bool(re.search(r'(?:^|\n|\s)(?:\(?[bB]\)?|[bB]\.|\(ii\)|\(2\))\s+', (q.explanation or "") + " " + (q.answer_text or "")))
+                is_desc = getattr(q, "question_type", "") in ("descriptive_subquestions", "descriptive_single", "descriptive")
+                if (is_multi or is_desc) and getattr(q, "marked_answer", None) == "A":
+                    q.marked_answer = None
+                    if hasattr(q, "marked_correct_answer") and q.marked_correct_answer == "A":
+                        q.marked_correct_answer = None
+                    db_needs_update = True
+
+                if db_needs_update:
+                    try:
+                        if job.result_json:
+                            db_data = json.loads(job.result_json)
+                            for db_q in db_data.get("questions", []):
+                                if db_q.get("question_number") == q.question_number:
+                                    if healed_exp != orig_exp:
+                                        db_q["explanation"] = healed_exp
+                                    if healed_ans != orig_ans:
+                                        db_q["answer_text"] = healed_ans
+                                    if (is_multi or is_desc) and db_q.get("marked_answer") == "A":
+                                        db_q["marked_answer"] = None
+                                        db_q["marked_correct_answer"] = None
+                                    if hasattr(q, "options") and q.options is not None:
+                                        db_q["options"] = q.options
+                                    if hasattr(q, "stem") and q.stem is not None:
+                                        db_q["stem"] = q.stem
+                                    if hasattr(q, "question_type") and q.question_type is not None:
+                                        db_q["question_type"] = q.question_type
+                            job.result_json = json.dumps(db_data)
+                            db.commit()
+                    except Exception:
+                        pass
+
                 _expand_question(q)
         except Exception as _exp_err:
             print(f"Warning: anchor token expansion failed: {_exp_err}")

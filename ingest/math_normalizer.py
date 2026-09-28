@@ -116,6 +116,71 @@ VECTOR_HAT_MAP = {
     'r\u0302': r'\hat{r}',
 }
 
+MATH_UNICODE_MAP = {
+    # Math Italic Latin -> Standard Latin
+    **{chr(0x1D434 + i): chr(ord("A") + i) for i in range(26)},
+    **{chr(0x1D44E + i): chr(ord("a") + i) for i in range(26) if chr(0x1D44E + i) != "\u210e"},
+    # Math Bold Latin -> Standard Latin
+    **{chr(0x1D400 + i): chr(ord("A") + i) for i in range(26)},
+    **{chr(0x1D41A + i): chr(ord("a") + i) for i in range(26)},
+    # Math Greek letters
+    "𝛿": r"\delta ", "δ": r"\delta ", "Δ": r"\Delta ", "𝛥": r"\Delta ",
+    "𝜃": r"\theta ", "θ": r"\theta ", "𝛩": r"\Theta ", "Θ": r"\Theta ",
+    "𝜇": r"\mu ", "μ": r"\mu ", "µ": r"\mu ",
+    "𝜋": r"\pi ", "π": r"\pi ", "Π": r"\Pi ",
+    "𝛼": r"\alpha ", "α": r"\alpha ", "𝛽": r"\beta ", "β": r"\beta ",
+    "𝛾": r"\gamma ", "γ": r"\gamma ", "Γ": r"\Gamma ",
+    "𝜆": r"\lambda ", "λ": r"\lambda ", "𝛬": r"\Lambda ",
+    "𝜔": r"\omega ", "ω": r"\omega ", "Ω": r"\Omega ",
+    "𝜀": r"\epsilon ", "ε": r"\epsilon ", "ϵ": r"\epsilon ",
+    "𝜙": r"\phi ", "ϕ": r"\phi ", "φ": r"\phi ", "Φ": r"\Phi ",
+    "𝜏": r"\tau ", "τ": r"\tau ",
+    "𝜎": r"\sigma ", "σ": r"\sigma ", "Σ": r"\Sigma ",
+    "𝜌": r"\rho ", "ρ": r"\rho ",
+}
+
+
+def normalize_vectors_and_accents(text: str) -> str:
+    """
+    Universal normalizer for combining accents and vector symbols.
+    Converts multi-glyph vector arrows (e.g. 𝛿𝐵⃗⃗⃗⃗⃗ -> \delta \vec{B}, 𝑑𝑙⃗⃗⃗ -> d\vec{l})
+    and unit vector hats (e.g. 𝑟̂ -> \hat{r}) into canonical LaTeX notation.
+    """
+    if not text:
+        return text
+
+    # 1. Differential vector combos: e.g. 𝛿𝐵⃗⃗⃗⃗⃗ -> \delta \vec{B}, 𝑑𝑙⃗⃗⃗ -> d\vec{l}, 𝑑𝑟⃗ -> d\vec{r}
+    def _repl_diff_vec(m):
+        diff = m.group(1)
+        base = m.group(2)
+        diff_norm = MATH_UNICODE_MAP.get(diff, diff).strip()
+        base_norm = MATH_UNICODE_MAP.get(base, base).strip()
+        return f"{diff_norm} \\vec{{{base_norm}}}"
+
+    text = re.sub(r"([d𝛿δ∂𝜕Δ𝛥]|\\delta\s*)([A-Za-z\u0370-\u03FF\U0001D400-\U0001D7FF])[\u20D7\u20D6\u2192]+", _repl_diff_vec, text)
+
+    # 2. Single vector symbols: e.g. 𝐵⃗⃗⃗⃗⃗ -> \vec{B}, 𝑣⃗ -> \vec{v}
+    def _repl_single_vec(m):
+        base = m.group(1)
+        base_norm = MATH_UNICODE_MAP.get(base, base).strip()
+        return f"\\vec{{{base_norm}}}"
+
+    text = re.sub(r"([A-Za-z\u0370-\u03FF\U0001D400-\U0001D7FF])[\u20D7\u20D6\u2192]+", _repl_single_vec, text)
+
+    # 3. Unit vector hats: e.g. 𝑟̂ -> \hat{r}
+    def _repl_hat(m):
+        base = m.group(1)
+        base_norm = MATH_UNICODE_MAP.get(base, base).strip()
+        return f"\\hat{{{base_norm}}}"
+
+    text = re.sub(r"([A-Za-z\u0370-\u03FF\U0001D400-\U0001D7FF])[\u0302\u0302\u0302]+", _repl_hat, text)
+
+    # 4. Map remaining mathematical italic unicode symbols
+    for uni, tex in MATH_UNICODE_MAP.items():
+        text = text.replace(uni, tex)
+
+    return text
+
 
 def auto_balance_braces(s: str) -> str:
     """Balances unescaped curly braces in a LaTeX math snippet in both directions."""
@@ -146,7 +211,7 @@ def sanitize_math_expression(math_str: str) -> str:
     if not math_str:
         return ""
 
-    m = math_str.strip()
+    m = normalize_vectors_and_accents(math_str.strip())
 
     # 1. Replace internal newlines so formulas never render as vertically stacked columns
     m = re.sub(r'[\r\n]+', ' ', m)
@@ -187,9 +252,9 @@ def sanitize_math_expression(math_str: str) -> str:
     for hat_char, hat_tex in VECTOR_HAT_MAP.items():
         m = m.replace(hat_char, hat_tex)
 
-    # 2.7 Fix superscript minus sequences: ^{- followed by digit(s) should close the brace
-    # e.g. ^{-7 → ^{-7}, ^{-12 → ^{-12}
-    m = re.sub(r'\^\{([+-]?\d+)(?!\})', r'^{\1}', m)
+    # 2.7 Fix unclosed superscript minus sequences: e.g. ^{-7 followed by whitespace or delimiter
+    # Only match if there is no closing brace for the digits
+    m = re.sub(r'\^\{([+-]?\d+)(?![0-9]*\})', r'^{\1}', m)
 
     # 3. Clean trailing backslashes (e.g. $10^{-5} \$ -> $10^{-5}$)
     m = re.sub(r'\\+$', '', m)
@@ -478,6 +543,15 @@ def wrap_bare_math(text: str) -> str:
     s = re.sub(r'(?<!\$)\\(?:vec|hat)\{[A-Za-z0-9]+\}(?!\$)', _wrap_symbol_inline, s)
     s = re.sub(r'\$[^\$]+?\$', _mask_delimited, s)
 
+    # Restore exponents flattened by PDF text extraction (e.g. '4.0 × 1016').
+    # Restrict this to scientific notation so ordinary prose numbers remain unchanged.
+    s = re.sub(
+        r'(\b\d+(?:\.\d+)?)\s*(?:×|x|\\times)\s*10\s*(\d{2,3})(?!\d)',
+        r'\1 \\times 10^{\2}',
+        s,
+        flags=re.IGNORECASE
+    )
+
     # Wrap bare scientific notation powers (e.g. 26.4 \times 10^{-12} or 1.5 \times 10^{-16} or 10^{-12})
     def _wrap_sci_inline(m_sci):
         matched = re.sub(r'[\r\n]+', ' ', m_sci.group(0)).strip()
@@ -656,7 +730,7 @@ def heal_student_readability(text: str) -> str:
         return text
 
     # Strip unwanted HTML tags while preserving images/diagrams
-    text = re.sub(r'<(?!img\b|\/?div\b)[^>]+>', '', text)
+    text = re.sub(r'<\/?(?!img\b|div\b)[a-zA-Z][^>]*>', '', text)
 
     # Pre-heal: Clean where\text{ h}$... and and\text{ e}$... and collapse runaway dollar signs
     text = re.sub(r'where\\text\{\s*([a-zA-Z])\s*\}[$]*', r'where $\1$ ', text, flags=re.IGNORECASE)
@@ -810,6 +884,9 @@ def normalize_math_in_text(text: str) -> str:
         return f"\uE000HTMLTAG{idx}\uE001"
 
     s = re.sub(r'<div[^>]*>[\s\S]*?</div>|<img[^>]*\/?>', _mask_html, text, flags=re.IGNORECASE)
+
+    # Step 1.4: Normalize vector symbols and combining accents (𝛿𝐵⃗⃗⃗⃗⃗ -> \delta \vec{B}, 𝑑𝑙⃗⃗⃗ -> d\vec{l}, 𝑟̂ -> \hat{r})
+    s = normalize_vectors_and_accents(s)
 
     # Step 1.5: Normalize Unicode subscript digits in running text
     # e.g. q₀ → q$_0$, ε₀ → ε$_0$, r₁ → r$_1$ (wrap in $ for rendering)

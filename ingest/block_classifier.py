@@ -42,9 +42,11 @@ FALSE POSITIVE AWARENESS & RELABELING:
 - Stem text often contains letters, abbreviations (A.C., D.C., Dr., Fig., i.e., e.g.), units (0.5 A), labels (Assertion (A), Reason (R), Point A), or numbered premises that look like options or subquestions.
 - Do NOT split these into options or sub-parts. Keep / relabel them as part of "stem".
 - "options" (A, B, C, D) are ONLY for true multiple-choice choices (separate lines/higher indent). If not an MCQ, set options to {}.
+- CRITICAL: Never drop or merge MCQ options just because they consist entirely of math, equations, or scientific notation (e.g. 8 × 10^{-5}).
 - "sub_parts" are ONLY for explicit sub-questions (e.g. (a) Define..., (b) Derive...). Solution steps belong in "explanation".
 - "marked_answer": Explicitly printed answer key letter only (e.g. "Ans: B"), else null. Never guess.
-- Preserve all LaTeX math ($...$) and tokens ({{IMG:...}}, {{EQ:...}}) verbatim in their respective fields.
+- CRITICAL: If a line explicitly contains [BOLD] and the word 'Answer', 'Ans', or 'Solution', you MUST extract all text following it into "explanation" (and/or "marked_answer"), and NOT leave it merged inside the "stem".
+- Preserve all LaTeX math ($...$) and tokens ({{IMG:...}}, {{IMG_BLOCK:...}}, {{EQ:...}}) verbatim in their respective fields.
 
 Return ONLY valid JSON:
 {
@@ -52,7 +54,8 @@ Return ONLY valid JSON:
   "sub_parts": {"a": "..."} | null,
   "options": {"A": "...", "B": "..."} | {},
   "marked_answer": "A" | null,
-  "explanation": "solution text" | null
+  "explanation": "solution text" | null,
+  "answer_latex": "pure latex math for the final answer/solution, if any" | null
 }
 
 Block:
@@ -69,33 +72,53 @@ Block:
 def classify_block_with_llm(segment: "QuestionSegment", llm) -> Optional[dict]:
     """
     Classify a single QuestionSegment using a schema-constrained LLM call.
-
-    Parameters
-    ----------
-    segment : QuestionSegment
-        The question segment with layout elements.
-    llm : LangChain chat model
-        An initialised LLM (Groq or Gemini) from get_extract_llm().
-
-    Returns
-    -------
-    dict or None
-        A question dict with keys: question_number, stem, sub_parts, options,
-        marked_answer, explanation, question_type, page_number, section.
-        Returns None only if the segment is empty.
-        Falls back to regex extraction on any LLM or parsing error.
+    Enforces strict layout rules (e.g. bold "Answer:" markers) before parsing.
     """
     if not segment or not segment.elements:
         return None
 
+    # Strict rule: If an element is BOLD and starts with Answer/Solution, split it out
+    # to guarantee it becomes the explanation and never contaminates the stem.
+    stem_elements = []
+    explanation_elements = []
+    found_strict_answer = False
+
+    import re
+    for e in segment.elements:
+        if not found_strict_answer and e.is_bold and re.match(r"^(?:Answer|Ans|Solution|Sol|Explanation)\b", e.text.strip(), re.IGNORECASE):
+            found_strict_answer = True
+        
+        if found_strict_answer:
+            explanation_elements.append(e)
+        else:
+            stem_elements.append(e)
+
+    # Temporarily hide the explanation from the segment for the classifier
+    original_elements = segment.elements
+    segment.elements = stem_elements
+
     # Try LLM classification first
     result = _try_llm_classify(segment, llm)
+
+    if result is None:
+        # LLM failed — fall back to regex path on flat text
+        result = _fallback_regex(segment)
+
+    # Restore elements and forcibly inject the strict explanation if found
+    segment.elements = original_elements
+    if result is not None and explanation_elements:
+        strict_exp_text = " ".join(e.text for e in explanation_elements)
+        # Strip the prefix since it's redundant
+        strict_exp_text = re.sub(r"^(?:Answer|Ans|Solution|Sol|Explanation)\s*[:.\-]*\s*", "", strict_exp_text, flags=re.IGNORECASE).strip()
+        
+        if strict_exp_text:
+            existing_exp = result.get("explanation")
+            result["explanation"] = f"{existing_exp}\n{strict_exp_text}".strip() if existing_exp else strict_exp_text
 
     if result is not None:
         return _finalise(result, segment)
 
-    # LLM failed — fall back to regex path on flat text
-    return _fallback_regex(segment)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +149,12 @@ def _try_llm_classify(segment: "QuestionSegment", llm) -> Optional[dict]:
 
         # Validate that the schema has the expected top-level keys
         if "stem" not in parsed:
+            return None
+
+        # Reject severe hallucinations: an MCQ can never have exactly 1 option.
+        # If the LLM output exactly 1 option, it dropped the rest. Force regex fallback.
+        if "options" in parsed and isinstance(parsed["options"], dict) and len(parsed["options"]) == 1:
+            print(f"[block_classifier] LLM dropped options (found exactly 1) on Q{segment.q_num}. Forcing regex fallback.", flush=True)
             return None
 
         return parsed
@@ -215,12 +244,31 @@ def _finalise(llm_result: dict, segment: "QuestionSegment") -> dict:
     # Normalise option keys to uppercase
     options = {k.strip().upper(): v for k, v in options_raw.items() if k and v}
 
-    # If LLM returned only 1 option (false positive like "A.C. current"), relabel it back into stem
-    if options and len(options) < 2:
-        for opt_k, opt_v in options.items():
-            if opt_v and opt_v not in stem:
-                stem = f"{stem} ({opt_k}) {opt_v}".strip()
-        options = {}
+    # If LLM returned fewer than 2 options, attempt regex extraction on stem/flat_text
+    if not options or len(options) < 2:
+        try:
+            from ..graph.nodes import separate_stem_and_options
+            raw_target = stem if stem else getattr(segment, "flat_text", "")
+            rec_stem, rec_opts, rec_ans, rec_exp = separate_stem_and_options(raw_target)
+            if rec_opts and len(rec_opts) >= 2:
+                stem = rec_stem
+                options = {k.strip().upper(): v for k, v in rec_opts.items()}
+                if not marked_answer and rec_ans:
+                    marked_answer = rec_ans
+                if not explanation and rec_exp:
+                    explanation = rec_exp
+                sub_parts = None
+            elif options and len(options) < 2:
+                # Keep a partial recovery visible for read-time repair.
+                for opt_k, opt_v in options.items():
+                    if opt_v and opt_v not in stem:
+                        stem = f"{stem} ({opt_k}) {opt_v}".strip()
+        except Exception:
+            if options and len(options) < 2:
+                for opt_k, opt_v in options.items():
+                    if opt_v and opt_v not in stem:
+                        stem = f"{stem} ({opt_k}) {opt_v}".strip()
+                options = {}
 
     # Determine question type
     if options and len(options) >= 2:
@@ -240,6 +288,8 @@ def _finalise(llm_result: dict, segment: "QuestionSegment") -> dict:
     except Exception:
         pass
 
+    answer_latex = (llm_result.get("answer_latex") or "").strip() or None
+
     return {
         "stem": stem,
         "sub_parts": sub_parts,
@@ -249,6 +299,8 @@ def _finalise(llm_result: dict, segment: "QuestionSegment") -> dict:
         "marked_correct_answer": marked_answer if question_type == "mcq" else None,
         "explanation": explanation,
         "answer_text": explanation,
+        "answer_latex": answer_latex,
+        "ocr_source": "gemini-2.5-flash" if segment.elements and any(getattr(e, "needs_structural_ocr", False) for e in segment.elements) else None
     }
 
 

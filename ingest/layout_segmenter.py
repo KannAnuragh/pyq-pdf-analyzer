@@ -43,6 +43,8 @@ class LayoutElement:
     font_size: float
     is_bold: bool
     x_indent: float     # x0 / page_width, normalised to [0,1]
+    needs_structural_ocr: bool = False
+    region_type: str = ""
 
 
 @dataclass
@@ -128,6 +130,189 @@ def _body_font_size(elements: list[dict]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Reading Order & Structural Math Detection
+# ---------------------------------------------------------------------------
+
+def sort_blocks_in_reading_order(blocks: list[dict]) -> list[dict]:
+    """
+    Sort blocks into true visual reading order by grouping horizontally
+    overlapping spans into visual lines, sorting lines top-to-bottom,
+    and sorting spans within each line left-to-right (by x0).
+    """
+    if not blocks:
+        return []
+    
+    pages = {}
+    for b in blocks:
+        pages.setdefault(b.get("page", 0), []).append(b)
+        
+    sorted_all = []
+    for p in sorted(pages.keys()):
+        p_blocks = pages[p]
+        p_blocks = sorted(p_blocks, key=lambda b: (b.get("bbox", [0, 0, 0, 0])[1], b.get("bbox", [0, 0, 0, 0])[0]))
+        
+        lines = []
+        for b in p_blocks:
+            bbox = b.get("bbox", [0, 0, 0, 0])
+            b_y0, b_y1 = bbox[1], bbox[3]
+            b_yc = (b_y0 + b_y1) / 2.0
+            b_h = max(1.0, b_y1 - b_y0)
+            
+            matched_line = None
+            for line in lines:
+                line_y0 = min(x.get("bbox", [0, 0, 0, 0])[1] for x in line)
+                line_y1 = max(x.get("bbox", [0, 0, 0, 0])[3] for x in line)
+                line_yc = (line_y0 + line_y1) / 2.0
+                line_h = max(1.0, line_y1 - line_y0)
+                
+                overlap = min(b_y1, line_y1) - max(b_y0, line_y0)
+                if overlap > 0.4 * min(b_h, line_h) or abs(b_yc - line_yc) < min(b_h, line_h) * 0.5:
+                    matched_line = line
+                    break
+            if matched_line is not None:
+                matched_line.append(b)
+            else:
+                lines.append([b])
+                
+        lines = sorted(lines, key=lambda l: (min(x.get("bbox", [0, 0, 0, 0])[1] for x in l), min(x.get("bbox", [0, 0, 0, 0])[0] for x in l)))
+        for line in lines:
+            line_sorted = sorted(line, key=lambda x: x.get("bbox", [0, 0, 0, 0])[0])
+            sorted_all.extend(line_sorted)
+            
+    return sorted_all
+
+
+def _flag_structural_regions(span_blocks: list[dict]) -> list[dict]:
+    """
+    Detect fractions and subscripts geometrically and flag them for structural OCR.
+    All thresholds are dynamically scaled according to local font size and geometry.
+    """
+    processed = []
+    used_ids = set()
+    
+    # Simple ID assignment
+    for i, sb in enumerate(span_blocks):
+        sb["_id"] = i
+        
+    lines = [sb for sb in span_blocks if sb.get("type") == "line"]
+    texts = [sb for sb in span_blocks if sb.get("type") == "text"]
+    body_size = _body_font_size(span_blocks)
+    
+    # 1. Universal Fraction Detection
+    for line in lines:
+        if line["_id"] in used_ids: continue
+        lx0, ly0, lx1, ly1 = line["bbox"]
+        ly_center = (ly0 + ly1) / 2
+        l_w = lx1 - lx0
+        if l_w <= 0 or l_w > 15 * body_size: continue
+        
+        above = []
+        below = []
+        for t in texts:
+            if t["_id"] in used_ids: continue
+            if t.get("page") != line.get("page"): continue
+            tx0, ty0, tx1, ty1 = t.get("bbox", [0, 0, 0, 0])
+            t_sz = t.get("font_size", body_size)
+            
+            # Text span must align horizontally with the fraction bar
+            if tx0 >= lx0 - 0.4 * t_sz and tx1 <= lx1 + 0.4 * t_sz:
+                # Text above fraction bar
+                if ly_center - 1.3 * t_sz <= ty0 and ty1 <= ly_center + 0.15 * t_sz:
+                    above.append(t)
+                # Text below fraction bar
+                elif ly_center - 0.15 * t_sz <= ty0 and ty1 <= ly_center + 1.5 * t_sz:
+                    below.append(t)
+                    
+        if above and below:
+            # Fraction components must not contain option markers or marks brackets
+            if any(re.search(r'\([a-dA-D1-4]\)|\[\s*\d+\s*marks?\s*\]', p.get("text", ""), re.IGNORECASE) for p in above + below):
+                continue
+            all_parts = [line] + above + below
+            for p in all_parts:
+                used_ids.add(p["_id"])
+            
+            min_x = min(p["bbox"][0] for p in all_parts)
+            min_y = min(p["bbox"][1] for p in all_parts)
+            max_x = max(p["bbox"][2] for p in all_parts)
+            max_y = max(p["bbox"][3] for p in all_parts)
+            
+            above_text = "".join(p.get("text", "") for p in sorted(above, key=lambda x: x["bbox"][0]))
+            below_text = "".join(p.get("text", "") for p in sorted(below, key=lambda x: x["bbox"][0]))
+            
+            processed.append({
+                "type": "equation",
+                "text": f"\\frac{{{above_text}}}{{{below_text}}}",
+                "bbox": [min_x, min_y, max_x, max_y],
+                "page": line["page"],
+                "font_size": above[0].get("font_size", body_size),
+                "is_bold": False,
+                "x_indent": min_x / max(1, min_x + 100),
+                "needs_structural_ocr": True,
+                "region_type": "fraction"
+            })
+            
+    # 2. Universal Subscript / Superscript Detection
+    for t in texts:
+        if t["_id"] in used_ids:
+            continue
+        tx0, ty0, tx1, ty1 = t.get("bbox", [0, 0, 0, 0])
+        ty_center = (ty0 + ty1) / 2
+        t_sz = t.get("font_size", body_size)
+        
+        neighbors = []
+        for other in texts:
+            if other["_id"] in used_ids or other["_id"] == t["_id"]: continue
+            if other.get("page") != t.get("page"): continue
+            
+            ox0, oy0, ox1, oy1 = other.get("bbox", [0, 0, 0, 0])
+            oy_center = (oy0 + oy1) / 2
+            o_sz = other.get("font_size", body_size)
+            
+            # Horizontally adjacent within font-proportional distance
+            if tx1 - 0.2 * t_sz <= ox0 <= tx1 + 0.8 * t_sz or ox1 - 0.2 * t_sz <= tx0 <= ox1 + 0.8 * t_sz:
+                # Smaller font size and vertically offset baseline
+                if o_sz < t_sz * 0.95 and 0.15 * t_sz <= abs(oy_center - ty_center) <= 1.2 * t_sz:
+                    neighbors.append(other)
+                    
+        if neighbors:
+            all_parts = [t] + neighbors
+            for p in all_parts:
+                used_ids.add(p["_id"])
+                
+            min_x = min(p["bbox"][0] for p in all_parts)
+            min_y = min(p["bbox"][1] for p in all_parts)
+            max_x = max(p["bbox"][2] for p in all_parts)
+            max_y = max(p["bbox"][3] for p in all_parts)
+            
+            combined_text = t.get("text", "")
+            for other in sorted(neighbors, key=lambda x: x["bbox"][0]):
+                o_yc = (other["bbox"][1] + other["bbox"][3]) / 2
+                if o_yc < ty_center:
+                    combined_text += f"$^{{{other.get('text', '')}}}$"
+                else:
+                    combined_text += f"$_{{{other.get('text', '')}}}$"
+                    
+            processed.append({
+                "type": "text",
+                "text": combined_text,
+                "bbox": [min_x, min_y, max_x, max_y],
+                "page": t["page"],
+                "font_size": t_sz,
+                "is_bold": t.get("is_bold", False),
+                "x_indent": t.get("x_indent", 0.0),
+                "needs_structural_ocr": False,
+                "region_type": "sub_sup"
+            })
+            
+    # Add remaining blocks
+    for sb in span_blocks:
+        if sb.get("_id") not in used_ids and sb.get("type") != "line":
+            processed.append(sb)
+            
+    # Re-sort blocks in proper reading order
+    return sort_blocks_in_reading_order(processed)
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -152,6 +337,9 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
     if not span_blocks:
         return []
 
+    # 1. Structural Math Detection Pre-pass
+    span_blocks = _flag_structural_regions(span_blocks)
+
     body_size = _body_font_size(span_blocks)
 
     segments: list[QuestionSegment] = []
@@ -161,7 +349,7 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
 
     for raw in span_blocks:
         text = (raw.get("text") or "").strip()
-        if not text:
+        if not text and not raw.get("needs_structural_ocr"):
             continue
 
         elem = LayoutElement(
@@ -172,6 +360,8 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
             font_size=raw.get("font_size", body_size),
             is_bold=raw.get("is_bold", False) or _is_bold(raw.get("flags", 0)),
             x_indent=raw.get("x_indent", 0.0),
+            needs_structural_ocr=raw.get("needs_structural_ocr", False),
+            region_type=raw.get("region_type", "")
         )
 
         # -----------------------------------------------------------------

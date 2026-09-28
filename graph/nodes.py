@@ -289,6 +289,10 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
     if not content:
         return "", {}, None, None
 
+    # Formatting wrappers must not hide structural option markers from parsing.
+    content = re.sub(r'<(?:strong|b|em|i|mark)\b[^>]*>([\s\S]*?)</(?:strong|b|em|i|mark)>', r'\1', content, flags=re.IGNORECASE)
+    content = re.sub(r'(?<!\w)(?:\*{1,3}|_{1,3})([^\n]*?)(?:\*{1,3}|_{1,3})(?!\w)', r'\1', content)
+
     # Heal any accidental math conversions of option markers (e.g. 1\nB:- turned into \frac{1}{B}:-)
     content = re.sub(
         r'(?:\$?\{\\frac\{1\}\{([A-Ha-h])\}\}?|\$?\\\s*frac\s*\{\s*1\s*\}\s*\{\s*([A-Ha-h])\s*\}\$?|1\s*/\s*([A-Ha-h]))(\s*[:-]+|\s*\.|\s*\))',
@@ -300,8 +304,8 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
     # 1. Parenthesized markers: (A), (a), (1) - can be preceded by start of line, newline, or whitespace
     # 2. Bare letter markers: A., B., A:- - must be at line start, newline, or after 2+ spaces / sentence punctuation
     opt_pattern = re.compile(
-        r'(?:(?:^|\n|\s+)\(([A-Ha-h1-8])\)[\.\:\-]?\s*)|'
-        r'(?:(?:^|\n|[ \t]+|\.\s+)([A-Ha-h1-8])[\.\)\:-]\s*)'
+        r'(?:(?:^|\n|\s+)\(([A-Ea-e1-4])\)[\.\:\-]?\s*)|'
+        r'(?:(?:^|\n|[ \t]+|\.\s+)([A-Ea-e])[\.\)\:-]\s+)'
     )
     matches = []
     for m in opt_pattern.finditer(content):
@@ -311,11 +315,20 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
         full_match = m.group(0).strip()
         has_paren = full_match.startswith("(")
 
+        # 0. Reject if followed by equation operator or equal sign (e.g. A = 240, A = 120, A + B)
+        # CRITICAL: ONLY reject bare letters without parentheses (e.g. 'A = 240', 'A + B').
+        # Parenthesized markers like '(B)' or '(D)' can validly have values starting with '+5 V', '-10 J', '\sqrt{c}', etc.!
+        post_match = content[m.end():m.end() + 10].strip()
+        if not has_paren and re.match(r'^[\=\+\-\*\/\^\_\±\×\÷\√]', post_match):
+            continue
+        elif has_paren and post_match.startswith('='):
+            continue
+
         # 1. Reject candidate matches preceded by Assertion/Reason/Statement labels:
         if re.search(r'(?:assertion|reason|statement|പ്രസ്താവന|കാരണം)[\s\:\-\*\_\(]*$', prefix, re.IGNORECASE):
             continue
-        # 2. Reject candidate matches preceded by prepositions / linkers / points:
-        #    ONLY reject bare letters (e.g. 'between points A and B', '0.2 A.').
+        # 2. Reject candidate matches preceded by prepositions / linkers / points / math variable contexts:
+        #    ONLY reject bare letters (e.g. 'between points A and B', '0.2 A.', 'each of A = 120').
         #    Parenthesized markers like '(B)' should NEVER be rejected by words like 'to', 'of', 'or'.
         prev_word_match = re.search(r'([a-zA-Z]+)\s*(?:and\s*)?$', prefix)
         if prev_word_match:
@@ -324,11 +337,12 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
                 reject_words = {'both', 'between', 'from', 'and', 'or', 'is', 'are', 'was', 'were',
                                'if', 'whether', 'that', 'when', 'where', 'of', 'in', 'for', 'with',
                                'junction', 'terminal', 'point', 'points', 'cell', 'cells',
-                               'charge', 'charges', 'plate', 'plates', 'to'}
+                               'charge', 'charges', 'plate', 'plates', 'to', 'number', 'mass',
+                               'each', 'fragment', 'fragments', 'side', 'radius', 'amplitude'}
                 if len(prev_word) >= 2 and prev_word in reject_words:
                     continue
             else:
-                structural_reject = {'point', 'points', 'junction', 'terminal', 'cell', 'cells'}
+                structural_reject = {'point', 'points', 'junction', 'terminal', 'cell', 'cells', 'number', 'mass'}
                 if prev_word in structural_reject:
                     continue
         # 3. If bare letter (no parens), ensure it is not preceded by a number (scientific unit like '0.2 A.' or '5 V.')
@@ -374,7 +388,7 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
                     curr_seq.append(next_m)
                     curr_letter = next_letter
         
-        if len(curr_seq) > len(best_sequence):
+        if len(curr_seq) >= 2 and len(curr_seq) > len(best_sequence):
             best_sequence = curr_seq
 
     stem = content.strip()
@@ -539,12 +553,12 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
     return stem, options, marked_answer, explanation
 
 
-def classify_question_type(options: dict, answer_text: str = None, marked_answer: str = None) -> tuple[str, Optional[dict]]:
+def classify_question_type(options: dict, answer_text: str = None, marked_answer: str = None, stem: str = None) -> tuple[str, Optional[dict]]:
     """
     Determines if a question is MCQ or descriptive.
     """
     from ..ingest.option_answer_separator import classify_question_type as _classify_question_type
-    return _classify_question_type(options, answer_text, marked_answer=marked_answer)
+    return _classify_question_type(options, answer_text, marked_answer=marked_answer, stem=stem)
 
 
 def is_instruction_or_header(text: str) -> bool:
@@ -781,6 +795,9 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
             preceding_raw = raw_text[max(0, start - 150):start]
             preceding_clean = re.sub(r'<!--.*?-->', '', preceding_raw, flags=re.DOTALL)
             preceding_clean = re.sub(r'<[^>]+>', '', preceding_clean)
+            # Inline equation/diagram anchors are pipeline markup, not prose
+            # continuation. Remove them before checking the previous text.
+            preceding_clean = re.sub(r'\{\{(?:IMG|EQ):.*?\}\}', '', preceding_clean, flags=re.DOTALL)
 
             # Check if match begins on a new line (starts with \n, or start is at 0, or preceding char was \n)
             matched_str = m.group(0)
@@ -852,7 +869,7 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
         section_name = block_data.get("section_name")
 
         stem, options, marked_answer, explanation = separate_stem_and_options(content)
-        question_type, sub_parts = classify_question_type(options, explanation, marked_answer=marked_answer)
+        question_type, sub_parts = classify_question_type(options, explanation, marked_answer=marked_answer, stem=stem)
 
         # If sub_parts not found from options, try extracting from stem (for descriptive questions)
         if not sub_parts and stem and question_type != "mcq":
@@ -1007,12 +1024,62 @@ def extract_node(state: GraphState) -> GraphState:
             print(f"[extract_node] Segmenter found {len(segments)} question segments.", flush=True)
 
             if segments:
+                import pymupdf
+                from ..ingest.structural_ocr import perform_structural_ocr
+                
+                doc_path = state.get("document_id") or state.get("file_path")
+                doc = pymupdf.open(doc_path) if doc_path else None
+                open_pages = {}
+                
                 llm = get_extract_llm()
                 extracted = []
+                
+                # Step 10 constraint: Max N calls per doc
+                structural_ocr_calls = 0
+                max_ocr_calls = int(os.getenv("MAX_STRUCTURAL_OCR_CALLS", "100"))
+                
                 for seg in segments:
+                    # Perform Structural OCR on flagged elements
+                    if doc:
+                        for elem in seg.elements:
+                            if getattr(elem, "needs_structural_ocr", False):
+                                if structural_ocr_calls < max_ocr_calls:
+                                    p_num = elem.page
+                                    if p_num not in open_pages:
+                                        open_pages[p_num] = doc[p_num]
+                                        
+                                    # Apply padding
+                                    b = elem.bbox
+                                    padded_bbox = [max(0, b[0] - 5), max(0, b[1] - 5), b[2] + 5, b[3] + 5]
+                                    try:
+                                        pix = open_pages[p_num].get_pixmap(clip=padded_bbox, dpi=200)
+                                        img_bytes = pix.tobytes("png")
+                                        latex_out, ambiguous, needs_review, p_tok, c_tok = perform_structural_ocr(
+                                            img_bytes, elem.region_type
+                                        )
+                                        state["token_usage"]["prompt_tokens"] += p_tok
+                                        state["token_usage"]["completion_tokens"] += c_tok
+                                        state["token_usage"]["total_tokens"] += (p_tok + c_tok)
+                                        structural_ocr_calls += 2 # since it makes 2 calls
+                                        
+                                        elem.text = f"{{{{EQ:{latex_out}}}}}"
+                                        if needs_review:
+                                            elem.ocr_uncertain = True
+                                            
+                                    except Exception as e:
+                                        print(f"Structural OCR failed: {e}")
+                                        elem.ocr_uncertain = True
+                                else:
+                                    # Cap exceeded: DO NOT silently skip; flag for admin review queue
+                                    elem.ocr_uncertain = True
+                                    elem.ocr_limit_exceeded = True
+                                    print(f"[extract_node] OCR cap ({max_ocr_calls}) reached. Flagging element for review queue.")
+                                    
                     q = classify_block_with_llm(seg, llm)
                     if q:
                         q["question_number"] = seg.q_num
+                        if "stem" in q and q["stem"]:
+                            q["stem"] = re.sub(rf'^(?:Question\s*(?:No\.?)?\s*|Q\.?\s*(?:No\.?)?\s*|Sl\.?\s*No\.?\s*|Problem\s*|Prob\.?\s*)?{seg.q_num}\s*(?:[\.\)\:-]|--)\s*', '', q["stem"], flags=re.IGNORECASE)
                         q.setdefault("page_number", seg.page)
                         q.setdefault("section", seg.section)
                         # Ensure required keys are present for downstream nodes
@@ -1023,7 +1090,45 @@ def extract_node(state: GraphState) -> GraphState:
                         q.setdefault("marked_correct_answer", None)
                         q.setdefault("explanation", None)
                         q.setdefault("answer_text", q.get("explanation"))
+                        
+                        # Pass review flag to the parsed question if any element triggered it
+                        has_uncertain = any(getattr(e, "ocr_uncertain", False) for e in seg.elements)
+                        has_cap_exceeded = any(getattr(e, "ocr_limit_exceeded", False) for e in seg.elements)
+                        
+                        if has_uncertain or has_cap_exceeded:
+                            q["ocr_ambiguous"] = True
+                            flag_type = "ocr_limit_exceeded" if has_cap_exceeded else "equation_ocr_uncertain"
+                            explanation = (
+                                f"Structural OCR budget exceeded ({max_ocr_calls} calls). Equation was not processed via Vision OCR."
+                                if has_cap_exceeded else
+                                "Structural OCR detected ambiguity or low confidence"
+                            )
+                            
+                            # Log to ReviewFlag
+                            try:
+                                from ..storage.database import SessionLocal
+                                from ..storage.models import ReviewFlag
+                                
+                                db = SessionLocal()
+                                db_flag = ReviewFlag(
+                                    job_id=doc_path, # doc_path acts as job_id here
+                                    question_number=q["question_number"],
+                                    flag_type=flag_type,
+                                    original_text="",
+                                    proposed_text="",
+                                    llm_explanation=explanation,
+                                    confidence=0.5
+                                )
+                                db.add(db_flag)
+                                db.commit()
+                                db.close()
+                            except Exception as e:
+                                print(f"Failed to save ReviewFlag: {e}")
+                            
                         extracted.append(q)
+
+                if doc:
+                    doc.close()
 
                 # De-duplicate and re-number if section restarts caused duplicates
                 seen_qnums: set = set()
@@ -1832,7 +1937,9 @@ def _solve_single_block(b: dict, total: int = 1) -> dict:
 
     prompt = (
         SOLVE_PROMPT
+        .replace("{question_type}", b.get("question_type", ""))
         .replace("{stem}", stem)
+        .replace("{sub_parts}", json.dumps(b.get("sub_parts") or {}))
         .replace("{options}", json.dumps(options))
         .replace("{explanation}", explanation)
     )
