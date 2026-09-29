@@ -1541,6 +1541,7 @@ def extract_text_from_pdf(file_path: str) -> dict:
                         sp_size = sp.get("size", 0.0)
                         sp_flags = sp.get("flags", 0)
                         sp_x0 = sp_bbox[0] if sp_bbox else 0.0
+                        sp_font = sp.get("font", "")
                         all_span_blocks.append({
                             "type": "text",
                             "text": sp_text,
@@ -1549,6 +1550,7 @@ def extract_text_from_pdf(file_path: str) -> dict:
                             "font_size": sp_size,
                             "is_bold": bool(sp_flags & 16),
                             "flags": sp_flags,
+                            "font": sp_font,
                             "x_indent": sp_x0 / page_width,
                         })
         except Exception as _span_err:

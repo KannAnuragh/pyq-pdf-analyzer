@@ -198,6 +198,25 @@ def _flag_structural_regions(span_blocks: list[dict]) -> list[dict]:
     texts = [sb for sb in span_blocks if sb.get("type") == "text"]
     body_size = _body_font_size(span_blocks)
     
+    # 0. Detect Math/Symbol fonts and Garbled Text
+    for t in texts:
+        font_name = str(t.get("font", "")).lower()
+        t_text = str(t.get("text", ""))
+        
+        is_math_font = any(f in font_name for f in ["math", "symbol", "cmsy", "cmmi", "cmex", "cmr", "euclid", "std", "symb", "greek", "mt", "asana", "lucida", "fira"])
+        
+        # Heuristic: PyMuPDF often mis-maps CID math fonts to Malayalam Unicode block (U+0D00 - U+0D7F).
+        # If we see Malayalam digits (0D66-0D6F) or if Malayalam chars are mixed heavily with Latin/math, it's garbled math.
+        has_malayalam = bool(re.search(r'[\u0D00-\u0D7F]', t_text))
+        has_malayalam_digits = bool(re.search(r'[\u0D66-\u0D6F]', t_text))
+        has_math_operators = bool(re.search(r'[\=\+\-\*\/\^\_\±\×\÷\√]', t_text))
+        
+        is_garbled_math = has_malayalam_digits or (has_malayalam and (has_math_operators or bool(re.search(r'[a-zA-Z]{1,2}', t_text))))
+        
+        if is_math_font or is_garbled_math:
+            t["needs_structural_ocr"] = True
+            t["region_type"] = "inline_math"
+
     # 1. Universal Fraction Detection
     for line in lines:
         if line["_id"] in used_ids: continue
@@ -442,7 +461,9 @@ def _is_question_boundary(elem: LayoutElement, body_size: float, gap_size: int, 
     has_answer = False
     if current_segment:
         for e in current_segment.elements:
-            if re.search(r'^(?:Answer|Ans|ഉത്തരം)[\s:]', e.text, re.IGNORECASE):
+            has_keyword = bool(re.search(r'^(?:Answer|Ans|ഉത്തരം|Solution|Explanation)(?:[\s:\.\-]*)$', e.text.strip(), re.IGNORECASE))
+            has_prefix = bool(re.search(r'^(?:Answer|Ans|ഉത്തരം|Solution|Explanation)[\s:\.\-]+', e.text.strip(), re.IGNORECASE))
+            if has_keyword or has_prefix or (e.is_bold and e.text.strip().lower() in ('answer', 'ans', 'solution', 'explanation', 'ഉത്തരം')):
                 has_answer = True
                 break
 

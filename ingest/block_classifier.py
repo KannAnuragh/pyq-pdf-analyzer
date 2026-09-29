@@ -248,7 +248,9 @@ def _finalise(llm_result: dict, segment: "QuestionSegment") -> dict:
     if not options or len(options) < 2:
         try:
             from ..graph.nodes import separate_stem_and_options
-            raw_target = stem if stem else getattr(segment, "flat_text", "")
+            # ALWAYS use segment.flat_text for regex recovery because if the LLM dropped
+            # options, it almost certainly omitted them from its 'stem' output as well!
+            raw_target = getattr(segment, "flat_text", "")
             rec_stem, rec_opts, rec_ans, rec_exp = separate_stem_and_options(raw_target)
             if rec_opts and len(rec_opts) >= 2:
                 stem = rec_stem

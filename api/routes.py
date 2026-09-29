@@ -943,6 +943,55 @@ def get_question_crop_rect(page, question_number: int):
     return None
 
 
+from fastapi.responses import Response
+
+@router.get("/pdfs/{job_id}/questions/{question_number}/image")
+def get_question_image(
+    job_id: str,
+    question_number: int,
+    db: Session = Depends(database.get_db)
+):
+    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not job or not job.result_json:
+        raise HTTPException(status_code=404, detail="Job or result not found")
+
+    file_path = get_job_file_path(job)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="PDF file not found")
+
+    result_obj = schemas.PDFResult.model_validate_json(job.result_json)
+    target_q_idx = -1
+    for i, q in enumerate(result_obj.questions):
+        if q.question_number == question_number:
+            target_q_idx = i
+            break
+
+    if target_q_idx == -1:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    try:
+        doc = pymupdf.open(file_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to open PDF: {e}")
+        
+    hint_page = getattr(result_obj.questions[target_q_idx], "page_number", None)
+    target_page_idx = find_question_page(doc, question_number, hint_page)
+                
+    if target_page_idx is None:
+        raise HTTPException(status_code=404, detail="Could not find Question in PDF pages")
+
+    try:
+        page = doc[target_page_idx]
+        crop_rect = get_question_crop_rect(page, question_number)
+        if crop_rect:
+            pix = page.get_pixmap(clip=crop_rect, dpi=200)
+        else:
+            pix = page.get_pixmap(dpi=200)
+        image_bytes = pix.tobytes("png")
+        return Response(content=image_bytes, media_type="image/png")
+    finally:
+        doc.close()
+
 @router.post("/pdfs/{job_id}/rescan/{question_number}", response_model=schemas.QuestionResult)
 def rescan_question(
     job_id: str,
@@ -1010,6 +1059,33 @@ def rescan_question(
         
         extracted_data, p_tok, c_tok = rescan_question_vision(image_bytes, question_number, engine=engine)
         extracted_data["page_number"] = target_page_idx
+        
+        # Preserve original Image tokens (Diagrams) that Gemini Vision OCR cannot output natively
+        old_q = result_obj.questions[target_q_idx]
+        old_stem = getattr(old_q, "stem", "") or ""
+        img_tokens = re.findall(r'\{\{IMG(?:_BLOCK)?:[^\}]+\}\}', old_stem)
+        if img_tokens and "stem" in extracted_data:
+            extracted_data["stem"] += "\n" + "\n".join(img_tokens)
+            
+        old_opts = getattr(old_q, "options", {}) or {}
+        if isinstance(old_opts, dict):
+            for opt_key, opt_val in old_opts.items():
+                if not isinstance(opt_val, str): continue
+                opt_img_tokens = re.findall(r'\{\{IMG(?:_BLOCK)?:[^\}]+\}\}', opt_val)
+                if opt_img_tokens and "options" in extracted_data and isinstance(extracted_data["options"], dict):
+                    for new_k in extracted_data["options"].keys():
+                        if str(new_k).upper() == str(opt_key).upper():
+                            extracted_data["options"][new_k] += "\n" + "\n".join(opt_img_tokens)
+
+        old_ans = getattr(old_q, "answer_text", "") or ""
+        ans_img_tokens = re.findall(r'\{\{IMG(?:_BLOCK)?:[^\}]+\}\}', old_ans)
+        if ans_img_tokens:
+            extracted_data["answer_text"] = extracted_data.get("answer_text", "") + "\n" + "\n".join(ans_img_tokens)
+
+        old_exp = getattr(old_q, "explanation", "") or ""
+        exp_img_tokens = re.findall(r'\{\{IMG(?:_BLOCK)?:[^\}]+\}\}', old_exp)
+        if exp_img_tokens:
+            extracted_data["explanation"] = extracted_data.get("explanation", "") + "\n" + "\n".join(exp_img_tokens)
         
         # Merge with existing marked answer if missing
         if not extracted_data.get("marked_answer"):

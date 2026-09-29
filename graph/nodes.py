@@ -1958,6 +1958,12 @@ def _solve_single_block(b: dict, total: int = 1) -> dict:
         confidence = solve_result.get("confidence", "medium")
         reasoning = solve_result.get("reasoning", "")
         corrected_explanation = solve_result.get("corrected_explanation") or explanation
+        
+        # New parsing for auto-fix and garble flagging
+        is_garbled = solve_result.get("is_garbled", False)
+        corrected_stem = solve_result.get("corrected_stem", b.get("stem", ""))
+        corrected_options = solve_result.get("corrected_options", b.get("options", {}))
+
         try:
             from ..ingest.option_answer_separator import strip_subquestion_labels_from_answer
             corrected_explanation = strip_subquestion_labels_from_answer(corrected_explanation)
@@ -1973,12 +1979,17 @@ def _solve_single_block(b: dict, total: int = 1) -> dict:
             if reasoning:
                 reasoning = re.sub(r'<(?!img\b|\/?div\b)[^>]+>', '', reasoning)
                 reasoning = normalize_math_in_text(reasoning)
+            if corrected_stem:
+                corrected_stem = normalize_math_in_text(corrected_stem)
         except Exception:
             pass
         
         is_valid = (str(validated_answer).strip().upper() == str(marked).strip().upper()) if marked and validated_answer else False
         return {
             **b,
+            "stem": corrected_stem,
+            "options": corrected_options,
+            "is_garbled": is_garbled,
             "marked_correct_answer": marked,
             "marked_answer": marked,
             "validated_answer": validated_answer,

@@ -817,8 +817,18 @@ def classify_question_type(
         ["I", "II", "III"]
     )
 
-    is_valid_digit_mcq = all(k in ('1', '2', '3', '4', '5') for k in keys_upper) and '1' in keys_upper and len(keys_upper) >= 2
-    is_valid_letter_mcq = all(k in ('A', 'B', 'C', 'D', 'E') for k in keys_upper) and ('A' in keys_upper or 'B' in keys_upper) and len(keys_upper) >= 2
+    is_valid_digit_mcq = all(k in ('1', '2', '3', '4', '5', '6') for k in keys_upper) and '1' in keys_upper and len(keys_upper) >= 2
+    if is_valid_digit_mcq:
+        sorted_digits = sorted([int(k) for k in keys_upper])
+        if sorted_digits != list(range(1, len(sorted_digits) + 1)):
+            is_valid_digit_mcq = False
+
+    is_valid_letter_mcq = all(k in ('A', 'B', 'C', 'D', 'E', 'F') for k in keys_upper) and 'A' in keys_upper and len(keys_upper) >= 2
+    if is_valid_letter_mcq:
+        sorted_letters = sorted(keys_upper)
+        expected = [chr(ord('A') + i) for i in range(len(sorted_letters))]
+        if sorted_letters != expected:
+            is_valid_letter_mcq = False
     is_valid_roman_mcq = all(k in ('I', 'II', 'III', 'IV', 'V') for k in keys_upper) and 'I' in keys_upper and len(keys_upper) >= 2
 
     is_valid_mcq = (keys_upper in valid_mcq_sets) or is_valid_digit_mcq or is_valid_letter_mcq or is_valid_roman_mcq

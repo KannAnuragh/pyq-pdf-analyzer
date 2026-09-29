@@ -2789,6 +2789,54 @@ export default function Home() {
               );
             })()}
 
+            {/* Garbled Text Warning & OCR Fallback */}
+            {selectedQuestion?.is_garbled && (
+              <div className="detail-box" style={{ marginBottom: '1.25rem', borderLeft: '4px solid #f59e0b', background: 'rgba(245, 158, 11, 0.05)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <AlertTriangle size={18} color="#f59e0b" />
+                    <div>
+                      <h4 style={{ margin: 0, color: '#f59e0b', fontSize: '0.95rem' }}>Text Garbled (Offline OCR Failed)</h4>
+                      <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                        The offline OCR couldn't read the custom fonts or complex math correctly.
+                      </p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => handleRescan(selectedQuestion.question_number, 'gemini')}
+                    style={{
+                      background: 'linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%)',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '6px',
+                      padding: '6px 12px',
+                      fontSize: '0.8rem',
+                      fontWeight: 600,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      cursor: 'pointer',
+                      boxShadow: '0 2px 4px rgba(99, 102, 241, 0.25)',
+                      transition: 'transform 0.1s, filter 0.2s',
+                    }}
+                    onMouseOver={e => e.currentTarget.style.filter = 'brightness(1.1)'}
+                    onMouseOut={e => e.currentTarget.style.filter = 'brightness(1)'}
+                    onMouseDown={e => e.currentTarget.style.transform = 'scale(0.96)'}
+                    onMouseUp={e => e.currentTarget.style.transform = 'scale(1)'}
+                  >
+                    <Sparkles size={14} /> Fix with Gemini OCR
+                  </button>
+                </div>
+                <div style={{ background: '#111827', borderRadius: '6px', padding: '1rem', border: '1px solid #374151', display: 'flex', justifyContent: 'center' }}>
+                  <img 
+                    src={`${API_BASE}/pdfs/${selectedJobId}/questions/${selectedQuestion.question_number}/image`} 
+                    alt={`Question ${selectedQuestion.question_number}`}
+                    style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain', filter: 'invert(1) hue-rotate(180deg)' }}
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Question Stem Box (Hidden if question only has sub-questions, to avoid showing 2 times) */}
             {(() => {
               const healed = healAssertionReasonQuestion(selectedQuestion);
