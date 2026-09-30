@@ -1563,6 +1563,7 @@ export default function Home() {
   const [isRescanning, setIsRescanning] = useState(false);
   const [isRewriting, setIsRewriting] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [showCropPreview, setShowCropPreview] = useState(false);
 
   const handleRescan = async (questionNumber: number, engineOverride?: string) => {
     if (!selectedJobId) return;
@@ -1640,6 +1641,7 @@ export default function Home() {
         reasoning: result.reasoning || correctedExp,
         explanation: correctedExp,
         answer_text: correctedExp,
+        needs_gemini_ocr: result.needs_gemini_ocr !== undefined ? result.needs_gemini_ocr : qData.needs_gemini_ocr,
         token_usage: result.token_usage,
         pipeline_steps: {
           ...(qData.pipeline_steps || {}),
@@ -2436,6 +2438,27 @@ export default function Home() {
                               <Cloud size={10} /> CDN
                             </span>
                           )}
+                          {q.needs_gemini_ocr && (
+                            <span 
+                              style={{ 
+                                marginLeft: '8px', 
+                                background: 'rgba(239, 68, 68, 0.14)', 
+                                color: '#ef4444', 
+                                border: '1px solid rgba(239, 68, 68, 0.35)', 
+                                padding: '1px 6px', 
+                                borderRadius: '4px', 
+                                fontSize: '0.68rem',
+                                fontWeight: 700,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                                verticalAlign: 'middle'
+                              }}
+                              title="Flagged by AI: Garbled Text Needs Gemini OCR"
+                            >
+                              <AlertTriangle size={10} /> Garbled
+                            </span>
+                          )}
                         </td>
                         <td>
                           {isMcq(q) ? (
@@ -2687,6 +2710,26 @@ export default function Home() {
                     <span>OCR Disabled (Settings)</span>
                   </button>
                 )}
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => setShowCropPreview(!showCropPreview)}
+                  style={{
+                    padding: '0.35rem 0.75rem',
+                    borderRadius: '9999px',
+                    fontSize: '0.78rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    background: 'rgba(255,255,255,0.04)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    color: '#e2e8f0',
+                    cursor: 'pointer'
+                  }}
+                  title="Show the cropped image of this question and answer from the PDF"
+                >
+                  <Eye size={12} color="#94a3b8" />
+                  <span>{showCropPreview ? 'Hide PDF Crop' : 'Show PDF Crop'}</span>
+                </button>
                 <button 
                   className="btn btn-ghost" 
                   onClick={() => setSelectedQuestion(null)}
@@ -2697,6 +2740,64 @@ export default function Home() {
               </div>
             </div>
             
+            {/* PDF Image Crop Preview */}
+            {showCropPreview && !selectedQuestion.needs_gemini_ocr && (
+              <div className="detail-box" style={{ marginBottom: '1.25rem', border: '1px solid #3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.05)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#60a5fa', fontWeight: 600, marginBottom: '0.75rem' }}>
+                  <Eye size={18} />
+                  PDF Image Crop Preview
+                </div>
+                <div style={{ background: '#0f172a', padding: '0.5rem', borderRadius: '8px', textAlign: 'center' }}>
+                  <img 
+                    src={`${API_BASE}/jobs/${selectedJobId}/questions/${selectedQuestion.question_number}/image`} 
+                    alt="Cropped Question" 
+                    style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain', borderRadius: '4px' }}
+                    onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                  />
+                </div>
+              </div>
+            )}
+            
+            {/* Garbled Text Warning */}
+            {selectedQuestion.needs_gemini_ocr && (
+              <div className="detail-box" style={{ marginBottom: '1.25rem', border: '1px solid #ef4444', backgroundColor: 'rgba(239, 68, 68, 0.05)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#ef4444', fontWeight: 600, marginBottom: '0.75rem' }}>
+                  <AlertTriangle size={18} />
+                  Garbled Text Detected
+                </div>
+                <p style={{ fontSize: '0.85rem', color: '#fca5a5', margin: '0 0 1rem 0' }}>
+                  The AI verification step has flagged this question as containing severely garbled or unreadable text that cannot be fixed automatically.
+                </p>
+                <div style={{ background: '#0f172a', padding: '0.5rem', borderRadius: '8px', marginBottom: '1rem', textAlign: 'center' }}>
+                  <img 
+                    src={`${API_BASE}/jobs/${selectedJobId}/questions/${selectedQuestion.question_number}/image`} 
+                    alt="Cropped Question" 
+                    style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain', borderRadius: '4px' }}
+                    onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                  />
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => handleRescan(selectedQuestion.question_number, 'gemini')}
+                    disabled={isRescanning}
+                    style={{
+                      background: 'linear-gradient(135deg, #8b5cf6, #d946ef)',
+                      border: 'none',
+                      color: 'white',
+                      padding: '0.5rem 1rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <Sparkles size={14} />
+                    {isRescanning ? 'Scanning...' : 'Solve with Gemini OCR'}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Pipeline Execution Steps */}
             {(() => {
               const steps = getQuestionPipelineSteps(selectedQuestion);
@@ -2788,54 +2889,6 @@ export default function Home() {
                 </div>
               );
             })()}
-
-            {/* Garbled Text Warning & OCR Fallback */}
-            {selectedQuestion?.is_garbled && (
-              <div className="detail-box" style={{ marginBottom: '1.25rem', borderLeft: '4px solid #f59e0b', background: 'rgba(245, 158, 11, 0.05)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <AlertTriangle size={18} color="#f59e0b" />
-                    <div>
-                      <h4 style={{ margin: 0, color: '#f59e0b', fontSize: '0.95rem' }}>Text Garbled (Offline OCR Failed)</h4>
-                      <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                        The offline OCR couldn't read the custom fonts or complex math correctly.
-                      </p>
-                    </div>
-                  </div>
-                  <button 
-                    onClick={() => handleRescan(selectedQuestion.question_number, 'gemini')}
-                    style={{
-                      background: 'linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%)',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '6px',
-                      padding: '6px 12px',
-                      fontSize: '0.8rem',
-                      fontWeight: 600,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                      cursor: 'pointer',
-                      boxShadow: '0 2px 4px rgba(99, 102, 241, 0.25)',
-                      transition: 'transform 0.1s, filter 0.2s',
-                    }}
-                    onMouseOver={e => e.currentTarget.style.filter = 'brightness(1.1)'}
-                    onMouseOut={e => e.currentTarget.style.filter = 'brightness(1)'}
-                    onMouseDown={e => e.currentTarget.style.transform = 'scale(0.96)'}
-                    onMouseUp={e => e.currentTarget.style.transform = 'scale(1)'}
-                  >
-                    <Sparkles size={14} /> Fix with Gemini OCR
-                  </button>
-                </div>
-                <div style={{ background: '#111827', borderRadius: '6px', padding: '1rem', border: '1px solid #374151', display: 'flex', justifyContent: 'center' }}>
-                  <img 
-                    src={`${API_BASE}/pdfs/${selectedJobId}/questions/${selectedQuestion.question_number}/image`} 
-                    alt={`Question ${selectedQuestion.question_number}`}
-                    style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain', filter: 'invert(1) hue-rotate(180deg)' }}
-                  />
-                </div>
-              </div>
-            )}
 
             {/* Question Stem Box (Hidden if question only has sub-questions, to avoid showing 2 times) */}
             {(() => {

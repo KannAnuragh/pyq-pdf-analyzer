@@ -24,10 +24,7 @@ class QuestionResult(BaseModel):
     page_number: Optional[int] = None
     pipeline_steps: Optional[Dict[str, Any]] = None
     token_usage: Optional["TokenUsage"] = None
-    
-    # New fields for garbled OCR handling
-    is_garbled: bool = False
-    question_image_path: Optional[str] = None
+    needs_gemini_ocr: bool = False
 
 class TokenUsage(BaseModel):
     model_config = ConfigDict(extra="allow")

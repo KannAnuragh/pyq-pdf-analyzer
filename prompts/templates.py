@@ -35,8 +35,8 @@ SOLVE_PROMPT = """\
 You are an expert bilingual (English & Malayalam) educator and math tutor reviewing an exam question for students.
 
 TASKS & RULES:
-1. LANGUAGE & TYPOS (AUTO-FIX): If the question stem or options contain minor OCR typos (like `n2/u` instead of `n2/v`) or Malayalam ligature errors, fix them silently and output the `corrected_stem` and `corrected_options`.
-2. GARBLED TEXT (FLAGGING): If the text is completely incomprehensible or heavily garbled (e.g. `Ny പൂ u _ v` instead of math) making it impossible to solve safely, set `is_garbled` to true. You may leave the answer fields null.
+1. LANGUAGE & TYPOS: Fix all spelling, OCR typos, and Malayalam ligature/font errors in the stem, options, and explanation without translating.
+2. GARBLED TEXT: Check the Question Stem, Options, and Explanation. If the text has minor OCR typos, correct them and return the cleaned text in `corrected_stem`, `corrected_options`, and `corrected_explanation`. BUT if ANY part of the text contains severely broken math equations (e.g. random floating numbers, "1 11", missing fraction bars), nonsensical characters, or is corrupted by bad fonts to the point you cannot confidently fix it, set `needs_gemini_ocr` to true.
 3. QUESTION TYPE: Verify if question is MCQ with choices (A/B/C/D) or descriptive (single or with subquestions).
 4. LATEX EQUATIONS: Format all math, fractions, and units with valid inline LaTeX ($...$). Fix broken braces ($V_{proton}$), fractions ($\\frac{a}{b}$), and units ($5 \\times 10^5\\text{ V/m}$, $20\\,\\Omega$). Never put ordinary prose or sentences inside $...$.
 5. READABILITY & PARAGRAPHS: Format explanations with clean paragraph breaks (\\n\\n) and numbered steps (1., 2.). Un-mash joined words ("where $h$ is", not "whereh").
@@ -59,12 +59,12 @@ Explanation:
 
 Output valid JSON matching:
 {{
-  "is_garbled": false,
-  "corrected_stem": "Cleaned stem with typos fixed",
-  "corrected_options": {{"A": "Cleaned option A"}},
   "reasoning": "Step-by-step reasoning",
+  "corrected_stem": "Cleaned stem or original if no fixes needed",
+  "corrected_options": {{"A": "Cleaned option A", ...}},
   "corrected_explanation": "Cleaned, readable explanation with proper paragraphs and LaTeX, or empty string if none provided",
   "validated_answer": "A" | "B" | "C" | "D" | null,
-  "confidence": "high" | "medium" | "low"
+  "confidence": "high" | "medium" | "low",
+  "needs_gemini_ocr": true | false
 }}
 """

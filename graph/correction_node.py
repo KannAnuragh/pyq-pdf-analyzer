@@ -170,6 +170,10 @@ class QuestionCorrection(BaseModel):
         default=False,
         description="Set to true if the Malayalam text is completely garbled and unreadable, requiring a full OCR rescan."
     )
+    needs_gemini_ocr: bool = Field(
+        default=False,
+        description="Set to true if ANY part of the text contains severely broken math equations or is garbled beyond repair."
+    )
     validated_answer: str | None = Field(
         default=None,
         description="The option letter (A, B, C, D) determined by the AI to be correct. MUST be null for a question with no listed options (descriptive) — never guess a letter for those."
@@ -215,6 +219,10 @@ class DirectQuestionCorrection(BaseModel):
         default=None,
         description="The completely rewritten and corrected explanation text. Return null if no explanation is provided."
     )
+    needs_gemini_ocr: bool = Field(
+        default=False,
+        description="Set to true if ANY part of the text contains severely broken math equations or is garbled beyond repair."
+    )
 
 
 class DirectPageCorrectionResponse(BaseModel):
@@ -246,10 +254,10 @@ TASKS & RULES:
    - NEVER enclose normal English/Malayalam sentences in $...$ (avoids mashed text like `isPlanck'sconstantande`). Keep prose outside math delimiters.
 
 4. PARAGRAPH FORMATTING & READABILITY:
-   - Structure dense explanations and multi-point stems with clean paragraph breaks (\n\n) or numbered steps (1., 2.).
+   - Structure dense explanations and multi-point stems with clean paragraph breaks (\n\n) or numbered steps (1., 2.). Ensure text is formatted for maximum readability.
    - Un-mash concatenated words/variables (e.g. "where $h$ is", not "whereh").
    - Immutable image markers (e.g. [[QAI_IMAGE:...]]) must remain in exact positions.
-   - If no explanation was in input, return null for `corrected_explanation`. Do not invent new solutions."""
+   - If no explanation was in input, you must return null for `corrected_explanation`, UNLESS you are absolutely confident of the correct answer, in which case you may provide a concise ONE LINE solution/explanation. Do NOT invent long or hallucinated solutions."""
 
 JSON_CORRECTION_SYSTEM_PROMPT = f"""{CORRECTION_SYSTEM_PROMPT}
 
@@ -291,10 +299,17 @@ TASKS & RULES:
    - NEVER enclose ordinary English/Malayalam sentences inside $...$ (avoids mashed text like `isPlanck'sconstantande`). Keep prose outside math delimiters.
 
 4. PARAGRAPH FORMATTING & READABILITY:
-   - Format dense text and multi-step explanations with clean paragraph breaks (\n\n) or numbered steps (1., 2.).
+   - Format dense text and multi-step explanations with clean paragraph breaks (\n\n) or numbered steps (1., 2.). Make the text highly readable and well-structured.
    - Un-mash concatenated words/variables (write "where $h$ is", not "whereh").
    - Immutable image markers ([[QAI_IMAGE:...]]) must remain in exact positions.
-   - If no explanation was in input, return null for `corrected_explanation`.
+   - If no explanation was in input, you must return null for `corrected_explanation`, UNLESS you are absolutely confident of the correct answer, in which case you may provide a concise ONE LINE solution/explanation. Do NOT invent long or hallucinated solutions.
+
+5. GARBLED MATH & TEXT (CRITICAL):
+   - You MUST set `needs_gemini_ocr` to `true` IF you see ANY of the following in the text:
+     * Disconnected numbers or random floating values like "1 11", "v -60 30", "1 1 1 3", "1.21"
+     * Nonsensical letter clusters masquerading as math (e.g. "vou f", "sinQ", "cosA")
+     * Missing fraction bars or structurally broken equations.
+   - If `needs_gemini_ocr` is true, DO NOT attempt to rewrite the broken text. Leave the garbled text exactly as it is. It is CRITICAL that you flag these errors by setting the boolean to true so the user can rescan it.
 
 Output valid JSON matching:
 {
@@ -306,7 +321,8 @@ Output valid JSON matching:
       "corrected_options": {"A": "<string>"} or {},
       "corrected_explanation": "<string or null>",
       "validated_answer": "A" | "B" | "C" | "D" | null,
-      "answer_status": "agrees" | "disagrees" | "none"
+      "answer_status": "agrees" | "disagrees" | "none",
+      "needs_gemini_ocr": true | false
     }
   ]
 }"""
@@ -1212,50 +1228,55 @@ def correction_and_validation_node(state: dict) -> dict:
             try:
                 doc = pymupdf.open(job_id)
                 
-                def _get_crop(page, qn: int):
-                    blocks = page.get_text("blocks")
-                    start_y = None; end_y = None
-                    q_start = re.compile(fr'(?:^|\n)\s*{qn}\s*[\.\):-]\s+')
-                    next_q = re.compile(fr'(?:^|\n)\s*{qn + 1}\s*[\.\):-]\s+')
-                    for b in blocks:
-                        txt = b[4]
-                        if start_y is None and q_start.search(txt):
-                            start_y = max(0, b[1] - 12)
-                        elif start_y is not None and next_q.search(txt):
-                            end_y = b[1] - 5; break
-                    if start_y is not None:
-                        if end_y is None: end_y = max(start_y + 100, page.rect.height - 30)
-                        return pymupdf.Rect(0, start_y, page.rect.width, end_y)
-                    return None
-
                 for q in corrected_blocks:
                     q_num = q.get("question_number")
                     if q_num in ocr_fallbacks:
                         page_idx = q.get("page_number") or 0
                         if page_idx < len(doc):
-                            page = doc[page_idx]
-                            crop = _get_crop(page, q_num)
-                            pix = page.get_pixmap(clip=crop, dpi=200) if crop else page.get_pixmap(dpi=200)
-                            image_bytes = pix.tobytes("png")
+                            from ..api.routes import get_stitched_question_image
+                            image_bytes = get_stitched_question_image(doc, page_idx, q_num)
                             
                             try:
-                                ext_data, p_tok, c_tok = rescan_question_vision(image_bytes, q_num)
-                                fallback_p_tokens += p_tok
-                                fallback_c_tokens += c_tok
-                                
-                                # Replace content
-                                q["stem"] = ext_data.get("stem", q["stem"])
-                                q["options"] = ext_data.get("options", q.get("options", {}))
-                                
-                                # Retain marking if not extracted
-                                if not ext_data.get("marked_answer"):
-                                    ext_data["marked_answer"] = q.get("marked_answer")
+                                crop_mode = False
+                                try:
+                                    crop_mode = get_setting("crop_garbled_text_as_image", False)
+                                except Exception:
+                                    pass
+                                if not crop_mode:
+                                    crop_mode = os.getenv("CROP_GARBLED_TEXT_AS_IMAGE", "false").lower() in ("true", "1", "yes")
+
+                                if crop_mode:
+                                    from ..storage.cloudflare import upload_image_to_cloudflare
+                                    url = upload_image_to_cloudflare(image_bytes, os.path.basename(job_id))
+                                    img_tag = f"{{{{IMG_BLOCK:{url}}}}}"
+                                    q["stem"] = img_tag
+                                    q["options"] = {}
+                                    q["_ocr_solved_result"] = {
+                                        "question_type": "mcq",
+                                        "stem": img_tag,
+                                        "options": {},
+                                        "answer_text": None,
+                                        "explanation": None,
+                                        "confidence": "none"
+                                    }
+                                else:
+                                    ext_data, p_tok, c_tok = rescan_question_vision(image_bytes, q_num)
+                                    fallback_p_tokens += p_tok
+                                    fallback_c_tokens += c_tok
                                     
-                                # solve again with new text
-                                solved = _solve_single_block(ext_data, 1)
-                                
-                                # Store solved result for Step 6
-                                q["_ocr_solved_result"] = solved
+                                    # Replace content
+                                    q["stem"] = ext_data.get("stem", q["stem"])
+                                    q["options"] = ext_data.get("options", q.get("options", {}))
+                                    
+                                    # Retain marking if not extracted
+                                    if not ext_data.get("marked_answer"):
+                                        ext_data["marked_answer"] = q.get("marked_answer")
+                                        
+                                    # solve again with new text
+                                    solved = _solve_single_block(ext_data, 1)
+                                    
+                                    # Store solved result for Step 6
+                                    q["_ocr_solved_result"] = solved
                             except Exception as e:
                                 logger.error("[CorrectionNode] OCR fallback failed for Q%d: %s", q_num, e)
                 doc.close()
@@ -1836,6 +1857,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
             "explanation": reasoning,
             "answer_text": reasoning,
             "corrected_explanation": reasoning,
+            "needs_gemini_ocr": getattr(c, "needs_gemini_ocr", False),
             "token_usage": {
                 "prompt_tokens": p_tok,
                 "completion_tokens": c_tok,
