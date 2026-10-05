@@ -340,3 +340,54 @@ def validate_equation_crop(crop_png_bytes: bytes, bbox: tuple) -> bool:
 
     except Exception:
         return False
+
+
+def is_question_unreadable(stem: str, options: dict = None) -> bool:
+    """
+    Checks if an extracted question block is unreadable, garbled, or empty,
+    which triggers Gemini Vision OCR correction.
+    """
+    if not stem or not stem.strip():
+        return True
+
+    has_eq_token = "{{EQ:" in stem
+
+    # Strip media and equation tokens for measuring textual readability
+    cleaned = re.sub(r'\{\{[A-Z_]+:[^\}]+\}\}', '', stem).strip()
+
+    # If stem was an equation and options exist, that's readable math
+    if has_eq_token and (len(cleaned) >= 2 or (options and bool(options))):
+        return False
+
+    # Check for empty stem with no options
+    if not cleaned and not (options and any(str(v).strip() for v in options.values())):
+        return True
+
+    # Check if stem has zero alphanumeric or Malayalam characters and no options
+    if not re.search(r'[\u0D00-\u0D7Fa-zA-Z0-9]', cleaned) and not (options and any(str(v).strip() for v in options.values())):
+        return True
+
+    # Check if stem is extremely short (< 6 chars) and no options
+    if len(cleaned) < 6 and not options:
+        return True
+
+    # Replacement character flood (\ufffd)
+    if cleaned.count('\ufffd') >= 3 or (len(cleaned) > 10 and cleaned.count('\ufffd') / len(cleaned) > 0.05):
+        return True
+
+    # Check alphanumeric/Malayalam characters vs total non-whitespace
+    non_ws = re.sub(r'\s+', '', cleaned)
+    if len(non_ws) > 10:
+        readable_chars = len(re.findall(r'[\u0D00-\u0D7Fa-zA-Z0-9]', non_ws))
+        if readable_chars / len(non_ws) < 0.25:
+            # Over 75% symbols/OCR noise/punctuation
+            return True
+
+    # Check if there are virtually no words in a non-trivial length stem
+    if len(non_ws) > 25:
+        words = re.findall(r'[\u0D00-\u0D7Fa-zA-Z]{2,}', cleaned)
+        if len(words) < 2:
+            return True
+
+    return False
+

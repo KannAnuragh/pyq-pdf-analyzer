@@ -309,7 +309,7 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
                         summary=schemas.Summary(**summary_data)
                     )
                     
-                    job.status = "validating"
+                    job.status = "processing"
                     job.result_json = result.model_dump_json()
                     db.commit()
 
@@ -625,7 +625,10 @@ def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
                     s = f"(a) {s}"
                 return s
 
+            from ..ingest.option_answer_separator import clean_question_options_and_answer
             for q in result_obj.questions:
+                q = clean_question_options_and_answer(q)
+                
                 # Auto-heal any question stem historically truncated to just 'Assertion' or 'പ്രസ്താവന'
                 if hasattr(q, "stem") and q.stem and q.stem.strip().lower() in ("assertion", "പ്രസ്താവന"):
                     rec = recover_question_from_source_pdf(job, q.question_number)
@@ -827,13 +830,15 @@ def delete_pdf(job_id: str, db: Session = Depends(database.get_db)):
 
 @router.get("/config")
 def get_app_config():
-    from ..graph.correction_node import get_correction_provider, GROQ_CORRECTION_MODEL, GEMINI_CORRECTION_MODEL
+    from ..graph.correction_node import get_correction_provider, get_on_demand_llm_provider, GROQ_CORRECTION_MODEL, GEMINI_CORRECTION_MODEL
     from ..storage.config_manager import get_all_settings
     settings = get_all_settings()
     gemini_st = get_gemini_status()
     groq_st = get_groq_status()
     llm_st = get_llm_status()
     correction_provider = get_correction_provider()
+    on_demand_provider = get_on_demand_llm_provider()
+    ai_available = on_demand_provider != "none"
     return {
         **settings,
         "gemini_enabled": gemini_st["enabled"],
@@ -842,19 +847,21 @@ def get_app_config():
         "groq_status": groq_st,
         "llm_enabled": llm_st["enabled"],
         "active_provider": llm_st.get("provider", "none"),
-        "answer_validation_enabled": settings.get("validation_enabled", True),
-        "validation_enabled": settings.get("validation_enabled", True),
+        "ai_available": ai_available,
+        "on_demand_provider": on_demand_provider,
+        "answer_validation_enabled": settings.get("validation_enabled", False),
+        "validation_enabled": settings.get("validation_enabled", False),
         "validation_provider": settings.get("validation_provider", "groq"),
-        "correction_enabled": settings.get("correction_enabled", True),
-        "word_correction_enabled": settings.get("word_correction_enabled", settings.get("correction_enabled", True)),
+        "correction_enabled": settings.get("correction_enabled", False),
+        "word_correction_enabled": settings.get("word_correction_enabled", False),
         "correction_provider": correction_provider,
         "repair_enabled": settings.get("repair_enabled", True),
-        "math_ocr_enabled": settings.get("math_ocr_enabled", True),
-        "math_ocr_engine": settings.get("math_ocr_engine", "auto"),
-        "question_ocr_enabled": settings.get("question_ocr_enabled", True),
+        "math_ocr_enabled": settings.get("math_ocr_enabled", False),
+        "math_ocr_engine": settings.get("math_ocr_engine", "off"),
+        "question_ocr_enabled": settings.get("question_ocr_enabled", False),
         "question_ocr_engine": settings.get("question_ocr_engine", "groq"),
         "auto_convert_math": settings.get("auto_convert_math", False),
-        "correction_model": GROQ_CORRECTION_MODEL if correction_provider == "groq" else GEMINI_CORRECTION_MODEL,
+        "correction_model": GROQ_CORRECTION_MODEL if on_demand_provider == "groq" else GEMINI_CORRECTION_MODEL,
         "available_math_engines": ["auto", "groq", "gemini", "tesseract", "mathpix", "off"],
         "available_question_engines": ["groq", "gemini", "tesseract", "off"],
         "available_providers": ["groq", "gemini"]
@@ -919,20 +926,24 @@ def find_question_page(doc, question_number: int, hint_page: int = None) -> int:
     return None
 
 
-def get_question_crop_rect(page, question_number: int):
+def get_question_crop_rect(page, question_number: int, next_question_number: int = None):
     """Calculates tight bounding box Rect for the specified question on page."""
     blocks = page.get_text("blocks")
     start_y = None
     end_y = None
     
-    q_start_pat = re.compile(fr'(?:^|\n)\s*{question_number}\s*[\.\):-]\s+')
-    next_q_pat = re.compile(fr'(?:^|\n)\s*{question_number + 1}\s*[\.\):-]\s+')
+    # Robust regex to match '1.', '1)', '(1)', 'Question 1:', 'Q. 1', etc.
+    pat_prefix = r'(?i)(?:^|\n)\s*[\*\_]*(?:Question\s*(?:No\.?)?|Q\.?\s*(?:No\.?)?|Sl\.?\s*No\.?|Problem\s*|Prob\.?\s*|ചോദ്യം\s*|പ്രശ്നം\s*)?[\(\[]?\s*'
+    pat_suffix = r'\s*[\)\]]?\s*[\*\_]*(?::\-?|[\.\):-])\s+'
+    
+    q_start_pat = re.compile(f"{pat_prefix}{question_number}{pat_suffix}")
+    next_q_pat = re.compile(f"{pat_prefix}{next_question_number}{pat_suffix}") if next_question_number else None
     
     for b in blocks:
         txt = b[4]
         if start_y is None and q_start_pat.search(txt):
             start_y = max(0, b[1] - 12)
-        elif start_y is not None and next_q_pat.search(txt):
+        elif start_y is not None and next_q_pat and next_q_pat.search(txt):
             end_y = b[1] - 5
             break
             
@@ -980,9 +991,17 @@ def get_question_image(
     if target_page_idx is None:
         raise HTTPException(status_code=404, detail="Could not find Question in PDF pages")
 
+    next_question_number = None
+    if target_q_idx + 1 < len(result_obj.questions):
+        next_q = result_obj.questions[target_q_idx + 1]
+        next_hint = getattr(next_q, "page_number", None)
+        next_page_idx = find_question_page(doc, next_q.question_number, next_hint)
+        if next_page_idx == target_page_idx:
+            next_question_number = next_q.question_number
+
     try:
         page = doc[target_page_idx]
-        crop_rect = get_question_crop_rect(page, question_number)
+        crop_rect = get_question_crop_rect(page, question_number, next_question_number)
         if crop_rect:
             pix = page.get_pixmap(clip=crop_rect, dpi=200)
         else:
@@ -1050,7 +1069,17 @@ def rescan_question(
     # 3. Crop question region (or full page if crop rect not found) and send to Vision/Tesseract
     try:
         page = doc[target_page_idx]
-        crop_rect = get_question_crop_rect(page, question_number)
+        
+        # Determine next question number on same page to avoid cutting off early
+        next_question_number = None
+        if target_q_idx + 1 < len(result_obj.questions):
+            next_q = result_obj.questions[target_q_idx + 1]
+            next_hint = getattr(next_q, "page_number", None)
+            next_page_idx = find_question_page(doc, next_q.question_number, next_hint)
+            if next_page_idx == target_page_idx:
+                next_question_number = next_q.question_number
+                
+        crop_rect = get_question_crop_rect(page, question_number, next_question_number)
         if crop_rect:
             pix = page.get_pixmap(clip=crop_rect, dpi=200)
         else:
@@ -1247,6 +1276,92 @@ async def fix_question_with_ai_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/verify_question_with_ai")
+async def verify_question_with_ai_endpoint(
+    request: Request,
+    db: Session = Depends(database.get_db)
+):
+    """
+    On-demand single question answer verification using LLM.
+    Solves question and verifies marked answer without altering stem or options text.
+    """
+    try:
+        data = await request.json()
+        if "stem" not in data or "question_number" not in data:
+            raise HTTPException(status_code=400, detail="Missing required question data")
+
+        from ..graph.correction_node import fix_single_question_with_llm
+        result = await fix_single_question_with_llm(data)
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=result.get("error", "AI verification failed"))
+
+        job_id = data.get("job_id")
+        if job_id:
+            try:
+                job = db.query(models.Job).filter(models.Job.id == job_id).first()
+                if job and job.result_json:
+                    result_data = json.loads(job.result_json)
+                    tu = result.get("token_usage", {})
+
+                    if "summary" not in result_data:
+                        result_data["summary"] = {}
+                    if "token_usage" not in result_data["summary"] or not result_data["summary"]["token_usage"]:
+                        result_data["summary"]["token_usage"] = {
+                            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated_cost_usd": 0.0
+                        }
+
+                    st_tu = result_data["summary"]["token_usage"]
+                    st_tu["prompt_tokens"] = st_tu.get("prompt_tokens", 0) + tu.get("prompt_tokens", 0)
+                    st_tu["completion_tokens"] = st_tu.get("completion_tokens", 0) + tu.get("completion_tokens", 0)
+                    st_tu["total_tokens"] = st_tu.get("total_tokens", 0) + tu.get("total_tokens", 0)
+                    st_tu["estimated_cost_usd"] = round(st_tu.get("estimated_cost_usd", 0.0) + tu.get("estimated_cost_usd", 0.0), 6)
+
+                    qn = data.get("question_number")
+                    val_ans = result.get("validated_answer")
+                    is_valid = result.get("is_valid", False)
+                    reasoning = result.get("reasoning") or result.get("corrected_explanation")
+
+                    for q in result_data.get("questions", []):
+                        if q.get("question_number") == qn:
+                            q["validated_answer"] = val_ans
+                            q["is_valid"] = is_valid
+                            if reasoning:
+                                q["reasoning"] = reasoning
+                                if not q.get("explanation"):
+                                    q["explanation"] = reasoning
+                                    q["answer_text"] = reasoning
+                            q["token_usage"] = tu
+                            marked = q.get("marked_correct_answer") or q.get("marked_answer") or val_ans
+                            q["pipeline_steps"] = {
+                                **(q.get("pipeline_steps") or {}),
+                                "send_errors_to_llms": {
+                                    "name": "send_errors_to_llms",
+                                    "label": "Send Errors to LLMs",
+                                    "status": "completed",
+                                    "details": f"AI verified answer (Agreed: Option {val_ans})" if is_valid else f"AI disagreed: verified Option {val_ans or 'different'} vs marked {marked or '—'}."
+                                }
+                            }
+                            break
+
+                    if "summary" in result_data and isinstance(result_data["summary"], dict):
+                        result_data["summary"]["validated"] = sum(1 for qx in result_data.get("questions", []) if qx.get("is_valid"))
+                        result_data["summary"]["flagged"] = sum(1 for qx in result_data.get("questions", []) if (qx.get("validated_answer") and not qx.get("is_valid")))
+                        result_data["summary"]["unvalidated"] = sum(1 for qx in result_data.get("questions", []) if not qx.get("validated_answer"))
+
+                    job.result_json = json.dumps(result_data)
+                    db.commit()
+            except Exception as db_err:
+                logger.warning("[Routes] Failed to persist single-q verify to DB: %s", db_err)
+
+        return result
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/pdfs/{job_id}/convert-equations")
 def convert_equations_endpoint(
     job_id: str,
@@ -1322,12 +1437,15 @@ def revalidate_job_endpoint(job_id: str, db: Session = Depends(database.get_db))
                     opts[k] = cleaned_opt
             clean_question_options_and_answer(q)
 
-        # Step 2: Run correction and validation node
+        # Step 2: Run correction and validation node with force_validation=True (user clicked the button)
+        pdf_file_path = job.filepath if hasattr(job, "filepath") and job.filepath else job_id
         state = {
             "extracted_blocks": questions,
             "job_id": job_id,
-            "pdf_path": job_id,
+            "pdf_path": pdf_file_path,
+            "file_path": pdf_file_path,
             "pages": [],
+            "force_validation": True,
         }
         res_state = correction_and_validation_node(state)
         processed = res_state.get("processed_questions") or questions

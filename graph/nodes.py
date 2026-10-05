@@ -3,6 +3,7 @@ import os
 import re
 import traceback
 from typing import Optional, Dict, List, Tuple, Any
+import time
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from duckduckgo_search import DDGS
@@ -305,7 +306,7 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
     # 2. Bare letter markers: A., B., A:- - must be at line start, newline, or after 2+ spaces / sentence punctuation
     opt_pattern = re.compile(
         r'(?:(?:^|\n|\s+)\(([A-Ea-e1-4])\)[\.\:\-]?\s*)|'
-        r'(?:(?:^|\n|[ \t]+|\.\s+)([A-Ea-e])[\.\)\:-]\s+)'
+        r'(?:(?:^|\n|[ \t]+|\.\s+)([A-Ea-e1-4])[\.\)\:-]\s+)'
     )
     matches = []
     for m in opt_pattern.finditer(content):
@@ -600,7 +601,8 @@ def is_equation_or_calculation(text: str) -> bool:
         return True
     clean = text.strip()
     # Remove math tags / LaTeX / markdown / numbers / symbols
-    stripped = re.sub(r'\$[^$]*\$', '', clean)
+    stripped = re.sub(r'\{\{EQ:.*?\}\}', 'EQUATION', clean)
+    stripped = re.sub(r'\$[^$]*\$', '', stripped)
     stripped = re.sub(r'<[^>]+>', '', stripped)
     stripped = re.sub(r'[\d\s\=\+\-\*\/\^\_\(\)\[\]\{\}\\\.\,\:\;\%\>\<\~\|\#\±\×\÷\√\∮\∴\⇒\σ\ε\ϕ\π\μ\τ]', '', stripped)
     # If fewer than 4 alphabetic / Indic characters remain, it's not a real question
@@ -628,7 +630,7 @@ def looks_like_question(stem: str, options: dict = None, marked_answer: str = No
         return True
     if marked_answer:
         return True
-    if '{{IMG' in check_text or '<svg' in check_text or 'diagram' in s:
+    if '{{IMG' in check_text or '{{EQ:' in check_text or '<svg' in check_text or 'diagram' in s:
         return True
     if '?' in check_text or '؟' in check_text:
         return True
@@ -690,7 +692,7 @@ def find_sequential_question_boundaries(candidates: list[dict], gap_tolerance: i
     accepted = [candidates[start_idx]]
     expected = candidates[start_idx]['q_num'] + 1
 
-    for c in candidates[start_idx + 1:]:
+    for idx, c in enumerate(candidates[start_idx + 1:], start=start_idx + 1):
         q = c['q_num']
         is_explicit = c.get('is_explicit', False)
         is_sec_restart = c.get('is_section_restart', False)
@@ -698,11 +700,17 @@ def find_sequential_question_boundaries(candidates: list[dict], gap_tolerance: i
         if q == expected:
             accepted.append(c)
             expected = q + 1
-        elif q > expected and q <= expected + gap_tolerance:
-            accepted.append(c)
-            expected = q + 1
         elif (is_explicit or is_sec_restart) and q <= expected - 1:
             # Deliberate section restart (e.g. Part B restarting at 1, or explicit 'Question 1:')
+            accepted.append(c)
+            expected = q + 1
+        elif q > expected:
+            # Check lookahead to prevent false positives (like numbers in formulas) from 
+            # swallowing actual sequential questions. Only jump if expected doesn't appear soon.
+            lookahead_qnums = [cand['q_num'] for cand in candidates[idx+1:idx+20]]
+            if expected in lookahead_qnums or (expected + 1) in lookahead_qnums or (expected + 2) in lookahead_qnums:
+                continue
+                
             accepted.append(c)
             expected = q + 1
 
@@ -789,6 +797,12 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
         sec_match = re.search(r'(?i)\b(?:section|part|group|വിഭാഗം|ഖണ്ഡിക)\s*[-:]?\s*([A-Za-z0-9]+)', intervening)
         is_sec_restart = bool(sec_match)
         sec_name = sec_match.group(0).strip() if sec_match else None
+        
+        if not is_sec_restart:
+            ans_key_match = re.search(r'(?i)\b(?:answer\s*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ)', intervening)
+            if ans_key_match:
+                is_sec_restart = True
+                sec_name = "Answer Key"
 
         if not is_exp:
             # Clean preceding text of all HTML comments (<!--...-->) and tags (<...>)
@@ -847,8 +861,12 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
         valid_candidates = candidates
 
     blocks = []
+    current_section = None
     if valid_candidates:
         for i, c in enumerate(valid_candidates):
+            if c.get("section_name"):
+                current_section = c["section_name"]
+            
             start_idx = c['end']
             end_idx = valid_candidates[i+1]['start'] if i + 1 < len(valid_candidates) else len(raw_text)
             block_content = raw_text[start_idx:end_idx].strip()
@@ -858,7 +876,7 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
                     "q_num": c["q_num"],
                     "content": block_content,
                     "page_number": int(page_markers[-1].group(1)) if page_markers else None,
-                    "section_name": c.get("section_name"),
+                    "section_name": current_section,
                 })
 
     extracted = []
@@ -906,6 +924,25 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
             looks_ok = True
 
         if looks_ok:
+            if section_name and re.search(r'(?i)answer\s*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ', section_name):
+                target_q = next((q for q in extracted if q["question_number"] == q_num and q.get("section") != section_name), None)
+                if target_q:
+                    if marked_answer:
+                        target_q["marked_answer"] = marked_answer
+                        target_q["marked_correct_answer"] = marked_answer
+                    
+                    ans_text = stem if stem else explanation
+                    if ans_text:
+                        clean_ans = ans_text.strip()
+                        if len(clean_ans) == 1 and clean_ans.upper() in "ABCDE1234":
+                            target_q["marked_answer"] = clean_ans.upper()
+                            target_q["marked_correct_answer"] = clean_ans.upper()
+                        elif not target_q.get("answer_text"):
+                            target_q["answer_text"] = ans_text
+                        else:
+                            target_q["answer_text"] += "\n" + ans_text
+                    continue
+            
             extracted.append({
                 "question_number": q_num,
                 "stem": stem,
@@ -929,67 +966,6 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
             q["original_question_number"] = q["question_number"]
             q["question_number"] = idx
     print(f"Regex parser extracted {len(extracted)} questions.", flush=True)
-
-    avg_length = sum(len(re.sub(r'<[^>]+>', '', b["stem"])) for b in extracted) / max(1, len(extracted))
-
-    # Fallback to LLM if regex fails (extracts very few questions or creates huge malformed blocks)
-    if len(extracted) == 0 or (len(raw_text) > 1000 and len(extracted) < 2) or avg_length > 1500:
-        llm = get_extract_llm()
-        if llm:
-            print("Regex parser extracted too few questions or malformed blocks. Falling back to Gemini extraction...", flush=True)
-            prompt = EXTRACT_PROMPT.replace("{text}", raw_text)
-            try:
-                response = llm.invoke([HumanMessage(content=prompt)])
-
-                # Track fallback tokens
-                p_tokens = response.usage_metadata.get("input_tokens", 0) if hasattr(response, "usage_metadata") and response.usage_metadata else 0
-                c_tokens = response.usage_metadata.get("output_tokens", 0) if hasattr(response, "usage_metadata") and response.usage_metadata else 0
-
-                if token_tracker is not None:
-                    token_tracker["prompt_tokens"] = token_tracker.get("prompt_tokens", 0) + p_tokens
-                    token_tracker["completion_tokens"] = token_tracker.get("completion_tokens", 0) + c_tokens
-                    token_tracker["total_tokens"] = token_tracker.get("total_tokens", 0) + (p_tokens + c_tokens)
-
-                cleaned = _clean_json_output(response.content)
-                fallback_extracted = json.loads(cleaned)
-                if isinstance(fallback_extracted, dict) and "questions" in fallback_extracted:
-                    fallback_extracted = fallback_extracted["questions"]
-                elif not isinstance(fallback_extracted, list):
-                    fallback_extracted = [fallback_extracted]
-
-                # IMPORTANT: the regex-first path above always routes options/stem through
-                # separate_stem_and_options() -> separate_options_dict() before a question
-                # is ever appended. This Gemini-fallback branch used to skip that entirely —
-                # it took the LLM's JSON as final, structured truth. In practice the LLM
-                # regularly fails to draw the stem/answer boundary on descriptive questions
-                # (dumping the whole "Answer:"/solution block into `stem`) and can emit
-                # structurally broken LaTeX in option text. Route every fallback question
-                # through the SAME deterministic cleaning pass the regex path gets, so no
-                # extraction path can ship an unvalidated record.
-                from ..ingest.option_answer_separator import clean_question_options_and_answer
-
-                valid_fallback = []
-                for q in fallback_extracted:
-                    if not isinstance(q, dict):
-                        continue
-                    clean_question_options_and_answer(q)
-                    qn = q.get("question_number", 0)
-                    qst = q.get("stem", "")
-                    qopt = q.get("options", {})
-                    qsub = q.get("sub_parts")
-                    qans = q.get("marked_answer") or q.get("marked_correct_answer")
-                    if qn >= 1 and looks_like_question(qst, qopt, qans, sub_parts=qsub):
-                        valid_fallback.append(q)
-
-                if valid_fallback:
-                    extracted = valid_fallback
-                print(f"Successfully extracted {len(extracted)} questions using Gemini fallback.", flush=True)
-            except Exception as e:
-                print(f"Extraction fallback failed with Gemini: {e}", flush=True)
-                traceback.print_exc()
-        else:
-            print("Gemini extraction is disabled or API key not set. Using regex extracted questions.", flush=True)
-
     return extracted or []
 
 
@@ -1026,21 +1002,26 @@ def extract_node(state: GraphState) -> GraphState:
             if segments:
                 import pymupdf
                 from ..ingest.structural_ocr import perform_structural_ocr
+                from ..ingest.quality_check import is_question_unreadable
                 
                 doc_path = state.get("document_id") or state.get("file_path")
                 doc = pymupdf.open(doc_path) if doc_path else None
                 open_pages = {}
                 
-                llm = get_extract_llm()
                 extracted = []
                 
                 # Step 10 constraint: Max N calls per doc
                 structural_ocr_calls = 0
                 max_ocr_calls = int(os.getenv("MAX_STRUCTURAL_OCR_CALLS", "100"))
                 
+                enable_structural_ocr = (
+                    is_gemini_enabled()
+                    and os.getenv("ENABLE_MATH_OCR", "false").lower() in ("true", "1")
+                )
                 for seg in segments:
-                    # Perform Structural OCR on flagged elements
-                    if doc:
+                    had_gemini_ocr_call = False
+                    # Perform Structural OCR on flagged elements if enabled (Math OCR in equations)
+                    if doc and enable_structural_ocr:
                         for elem in seg.elements:
                             if getattr(elem, "needs_structural_ocr", False):
                                 if structural_ocr_calls < max_ocr_calls:
@@ -1061,6 +1042,7 @@ def extract_node(state: GraphState) -> GraphState:
                                         state["token_usage"]["completion_tokens"] += c_tok
                                         state["token_usage"]["total_tokens"] += (p_tok + c_tok)
                                         structural_ocr_calls += 2 # since it makes 2 calls
+                                        had_gemini_ocr_call = True
                                         
                                         elem.text = f"{{{{EQ:{latex_out}}}}}"
                                         if needs_review:
@@ -1075,8 +1057,26 @@ def extract_node(state: GraphState) -> GraphState:
                                     elem.ocr_limit_exceeded = True
                                     print(f"[extract_node] OCR cap ({max_ocr_calls}) reached. Flagging element for review queue.")
                                     
-                    q = classify_block_with_llm(seg, llm)
+                    llm = _init_llm(state)
+                    q = classify_block_with_llm(seg, llm=llm)
                     if q:
+                        if seg.section and re.search(r'(?i)answer\s*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints', seg.section):
+                            target_q = next((t for t in extracted if t["question_number"] == seg.q_num and t.get("section") != seg.section), None)
+                            if target_q:
+                                ans_text = q.get("stem", "")
+                                if not ans_text:
+                                    ans_text = q.get("explanation", "")
+                                if ans_text:
+                                    clean_ans = ans_text.strip()
+                                    if len(clean_ans) == 1 and clean_ans.upper() in "ABCDE1234":
+                                        target_q["marked_answer"] = clean_ans.upper()
+                                        target_q["marked_correct_answer"] = clean_ans.upper()
+                                    elif not target_q.get("answer_text"):
+                                        target_q["answer_text"] = ans_text
+                                    else:
+                                        target_q["answer_text"] += "\n" + ans_text
+                                continue
+
                         q["question_number"] = seg.q_num
                         if "stem" in q and q["stem"]:
                             q["stem"] = re.sub(rf'^(?:Question\s*(?:No\.?)?\s*|Q\.?\s*(?:No\.?)?\s*|Sl\.?\s*No\.?\s*|Problem\s*|Prob\.?\s*)?{seg.q_num}\s*(?:[\.\)\:-]|--)\s*', '', q["stem"], flags=re.IGNORECASE)
@@ -1090,6 +1090,11 @@ def extract_node(state: GraphState) -> GraphState:
                         q.setdefault("marked_correct_answer", None)
                         q.setdefault("explanation", None)
                         q.setdefault("answer_text", q.get("explanation"))
+
+                        # Flag unreadable/garbled questions without making automatic AI Vision calls
+                        if is_question_unreadable(q.get("stem", ""), q.get("options", {})):
+                            q["ocr_ambiguous"] = True
+                            q["is_garbled"] = True
                         
                         # Pass review flag to the parsed question if any element triggered it
                         has_uncertain = any(getattr(e, "ocr_uncertain", False) for e in seg.elements)
@@ -1126,6 +1131,10 @@ def extract_node(state: GraphState) -> GraphState:
                                 print(f"Failed to save ReviewFlag: {e}")
                             
                         extracted.append(q)
+
+                    # Only throttle briefly if a Gemini OCR call was made
+                    if had_gemini_ocr_call:
+                        time.sleep(1.0)
 
                 if doc:
                     doc.close()
@@ -1738,11 +1747,11 @@ def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Opt
         if not ocr_enabled and engine is None:
             raise ValueError("Whole Question OCR is disabled in Pipeline Settings.")
         if engine is None:
-            engine = get_setting("question_ocr_engine", "groq")
+            engine = get_setting("question_ocr_engine", "gemini")
     except Exception as err:
         if "disabled in Pipeline Settings" in str(err):
             raise
-    engine = str(engine or "groq").strip().lower()
+    engine = str(engine or "gemini").strip().lower()
     if engine in ("off", "disabled"):
         raise ValueError("Whole Question OCR is disabled.")
 

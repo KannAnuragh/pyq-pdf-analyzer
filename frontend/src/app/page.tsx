@@ -1054,6 +1054,15 @@ export function renderLatex(text: string): string {
     '$1 \\times 10^{$2}'
   );
 
+  // Restore flattened exponents with minus/dash, e.g. 10—15 or 10-15 -> 10^{-15}
+  s = s.replace(/(?<=(?:×|x|\\times|\b)\s*10\s*)[—–-]\s*(\d{1,3})(?!\d)/gi, '^{-$1}');
+
+  // Merge base and scientific notation with trailing superscript/subscript into cohesive math blocks:
+  // e.g. "14.4 × 10$^{−15}$" -> "$14.4 \times 10^{-15}$", "10$^{−7}$" -> "$10^{-7}$", "q$_{1}$" -> "$q_{1}$"
+  s = s.replace(/(\b\d+(?:\.\d+)?)\s*(?:×|x|\\times)\s*10\s*\$\^\{([^}]+)\}\$/gi, (_, p1, p2) => `$${p1} \\times 10^{${p2.replace(/\u2212/g, '-')}}$`);
+  s = s.replace(/(\b[a-zA-Z0-9]+)\s*\$\^\{([^}]+)\}\$/g, (_, p1, p2) => `$${p1}^{${p2.replace(/\u2212/g, '-')}}$`);
+  s = s.replace(/(\b[a-zA-Z0-9]+)\s*\$_\{([^}]+)\}\$/g, (_, p1, p2) => `$${p1}_{${p2}}$`);
+
   // 0a. Normalize vector hat characters in running text
   s = s.replace(/î/g, '$\\hat{i}$').replace(/ĵ/g, '$\\hat{j}$');
   s = s.replace(/k\u0302/g, '$\\hat{k}$').replace(/x\u0302/g, '$\\hat{x}$');
@@ -1067,7 +1076,10 @@ export function renderLatex(text: string): string {
   s = s.replace(/([a-zA-Z\u03B1-\u03C9\u03A1-\u03A9])([\u2080-\u2089]+)/g, (_, base, subs) => {
     const subStr = Array.from(subs).map((c: any) => subscriptMap[c] || c).join('');
     try {
-      return katex.renderToString(`${base}_{${subStr}}`, { displayMode: false, throwOnError: false, strict: false });
+      const rendered = katex.renderToString(`${base}_{${subStr}}`, { displayMode: false, throwOnError: false, strict: false });
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered.includes('katex-error') ? `<span class="inline-math">${base}_{${subStr}}</span>` : rendered);
+      return id;
     } catch {
       return `${base}_{${subStr}}`;
     }
@@ -1177,7 +1189,10 @@ export function renderLatex(text: string): string {
     try {
       const sanitized = sanitizeMathForKatex(match);
       const rendered = katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
-      return rendered.includes('katex-error') ? match : rendered;
+      if (rendered.includes('katex-error')) return match;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered);
+      return id;
     } catch {
       return match;
     }
@@ -1186,7 +1201,11 @@ export function renderLatex(text: string): string {
   // 5. Process raw square roots: \sqrt{...}, \sqrt[n]{...}
   s = s.replace(/\\sqrt(?:\[[^\]]+\])?(\{(?:[^{}]|\{[^{}]*\})*\})/g, (match) => {
     try {
-      return katex.renderToString(match, { displayMode: false, throwOnError: false, strict: false });
+      const rendered = katex.renderToString(match, { displayMode: false, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) return match;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered);
+      return id;
     } catch {
       return match;
     }
@@ -1197,7 +1216,11 @@ export function renderLatex(text: string): string {
   s = s.replace(/(?<=^|[\s\(\[\{=+\-*/,~])(?:\d+(?:\.\d+)?\s*(?:\\times|×)\s*)?([a-zA-Z0-9]+|\))\^([0-9a-zA-Z\-]+|\{[^}]+\})(?=$|[\s\)\]},.;:!?=+\-*/~])/g, (match) => {
     try {
       const sanitized = sanitizeMathForKatex(match);
-      return katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
+      const rendered = katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) return match;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered);
+      return id;
     } catch {
       return match;
     }
@@ -1206,7 +1229,11 @@ export function renderLatex(text: string): string {
   // 6. Process raw Greek letters & math symbols: \alpha, \beta, \times, \pm, \chi^2, etc.
   s = s.replace(/\\(alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|varrho|sigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|times|div|pm|mp|neq|ne|approx|leq|geq|le|ge|infty|cdot|circ|degree|sum|prod|int|log|ln|sin|cos|tan)(?:\^([0-9a-zA-Z]+|\{[^\}]+\})|_([0-9a-zA-Z]+|\{[^\}]+\}))?/g, (match) => {
     try {
-      return katex.renderToString(match, { displayMode: false, throwOnError: false, strict: false });
+      const rendered = katex.renderToString(match, { displayMode: false, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) return match;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered);
+      return id;
     } catch {
       return match;
     }
@@ -1215,7 +1242,11 @@ export function renderLatex(text: string): string {
   // 7. Degree symbol: 45° -> 45^\circ
   s = s.replace(/([0-9]+(?:\.[0-9]+)?)\s*°/g, (_, num) => {
     try {
-      return katex.renderToString(`${num}^\\circ`, { displayMode: false, throwOnError: false, strict: false });
+      const rendered = katex.renderToString(`${num}^\\circ`, { displayMode: false, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) return `${num}°`;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered);
+      return id;
     } catch {
       return `${num}°`;
     }
@@ -1229,7 +1260,11 @@ export function renderLatex(text: string): string {
     };
     const supStr = Array.from(sup).map((c: any) => map[c] || c).join('');
     try {
-      return katex.renderToString(`${base}^{${supStr}}`, { displayMode: false, throwOnError: false, strict: false });
+      const rendered = katex.renderToString(`${base}^{${supStr}}`, { displayMode: false, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) return `${base}^{${supStr}}`;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered);
+      return id;
     } catch {
       return `${base}^{${supStr}}`;
     }
@@ -1239,7 +1274,11 @@ export function renderLatex(text: string): string {
   s = s.replace(/(?<=^|[\s\(\[\{=+\-*/,~])([a-zA-Z0-9]+|\))\^([0-9a-zA-Z\-]+|\{[^}]+\})(?=$|[\s\)\]},.;:!?=+\-*/~])/g, (match) => {
     try {
       const sanitized = sanitizeMathForKatex(match);
-      return katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
+      const rendered = katex.renderToString(sanitized, { displayMode: false, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) return match;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered);
+      return id;
     } catch {
       return match;
     }
@@ -1248,7 +1287,11 @@ export function renderLatex(text: string): string {
   // 9b. Inline subscripts without $...$ e.g. q_0, q_{0}, a_1, x_i
   s = s.replace(/(?<=^|[\s\(\[\{=+\-*/,~])([a-zA-Z\u03B1-\u03C9\u0391-\u03A9]{1,2})_([0-9a-zA-Z\u03B1-\u03C9]{1,3}|\{[^}]+\})(?=$|[\s\)\]},.;:!?=+\-*/~])/g, (match) => {
     try {
-      return katex.renderToString(match, { displayMode: false, throwOnError: false, strict: false });
+      const rendered = katex.renderToString(match, { displayMode: false, throwOnError: false, strict: false });
+      if (rendered.includes('katex-error')) return match;
+      const id = `${MATH_PREFIX}${renderedMath.length}${MATH_SUFFIX}`;
+      renderedMath.push(rendered);
+      return id;
     } catch {
       return match;
     }
@@ -1368,6 +1411,8 @@ interface AppConfig {
   };
   llm_enabled?: boolean;
   active_provider?: string;
+  ai_available?: boolean;
+  on_demand_provider?: string;
   answer_validation_enabled?: boolean;
   validation_enabled?: boolean;
   validation_provider?: string;
@@ -1689,6 +1734,94 @@ export default function Home() {
     }
   };
 
+  const [isVerifyingSingle, setIsVerifyingSingle] = useState(false);
+
+  const handleAiVerifySingle = async (qData: any) => {
+    setIsVerifyingSingle(true);
+    try {
+      const res = await fetch(`${API_BASE}/verify_question_with_ai`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: selectedJobId,
+          question_number: qData.question_number,
+          stem: qData.stem,
+          options: qData.options,
+          marked_answer: qData.marked_answer || qData.marked_correct_answer,
+          explanation: qData.explanation || qData.answer_text || qData.reasoning
+        })
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to verify question with AI');
+      }
+
+      const result = await res.json();
+      if (!result.success) {
+        throw new Error(result.error || 'AI verification failed');
+      }
+
+      const valAns = result.validated_answer || (result.is_valid ? (qData.marked_answer || qData.marked_correct_answer) : null);
+      const markedAns = qData.marked_answer || qData.marked_correct_answer || valAns;
+      const isValid = result.is_valid !== undefined ? result.is_valid : Boolean(valAns && markedAns && valAns.toUpperCase() === markedAns.toUpperCase());
+      const reasoning = result.reasoning || result.corrected_explanation || qData.reasoning || qData.explanation;
+
+      const updatedQuestion = {
+        ...qData,
+        is_valid: isValid,
+        validated_answer: valAns,
+        reasoning: reasoning,
+        token_usage: result.token_usage,
+        pipeline_steps: {
+          ...(qData.pipeline_steps || {}),
+          send_errors_to_llms: {
+            name: "send_errors_to_llms",
+            label: "Send Errors to LLMs",
+            status: "completed",
+            details: isValid
+              ? `AI verified answer (Agreed: Option ${valAns || 'Match'}).`
+              : `AI disagreed: verified Option ${valAns || 'different'} vs marked ${markedAns || '—'}.`
+          }
+        }
+      };
+
+      setSelectedQuestion(updatedQuestion);
+      setJobResult((prev: any) => {
+        if (!prev) return prev;
+        const newQuestions = prev.questions.map((q: any, index: number) =>
+          index === qData.__uiQuestionIndex ? updatedQuestion : q
+        );
+        const prevUsage = prev.summary?.token_usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
+        const addedUsage = result.token_usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 };
+        const newUsage = {
+          prompt_tokens: (prevUsage.prompt_tokens || 0) + (addedUsage.prompt_tokens || 0),
+          completion_tokens: (prevUsage.completion_tokens || 0) + (addedUsage.completion_tokens || 0),
+          total_tokens: (prevUsage.total_tokens || 0) + (addedUsage.total_tokens || 0),
+          estimated_cost_usd: Math.round(((prevUsage.estimated_cost_usd || 0) + (addedUsage.estimated_cost_usd || 0)) * 1000000) / 1000000,
+        };
+        const validatedCount = newQuestions.filter((q: any) => q.is_valid).length;
+        const flaggedCount = newQuestions.filter((q: any) => q.validated_answer && !q.is_valid).length;
+        const unvalidatedCount = newQuestions.filter((q: any) => !q.validated_answer).length;
+        return {
+          ...prev,
+          questions: newQuestions,
+          summary: {
+            ...prev.summary,
+            validated: validatedCount,
+            flagged: flaggedCount,
+            unvalidated: unvalidatedCount,
+            token_usage: newUsage
+          }
+        };
+      });
+    } catch (err: any) {
+      console.error('Failed to verify with AI', err);
+      alert(err.message || 'Failed to verify question. Please check server logs.');
+    } finally {
+      setIsVerifyingSingle(false);
+    }
+  };
+
   const [isConvertingMath, setIsConvertingMath] = useState(false);
   const [mathStatusText, setMathStatusText] = useState<string>('');
   const [isRevalidating, setIsRevalidating] = useState(false);
@@ -1978,6 +2111,11 @@ export default function Home() {
               <span className="pill-dot" />
               Gemini AI Active
             </div>
+          ) : config?.ai_available ? (
+            <div className="pill-badge" style={{ background: 'rgba(168, 85, 247, 0.12)', borderColor: 'rgba(168, 85, 247, 0.35)', color: '#c084fc' }} title="AI is ready on demand. Automatic validation on upload is turned off. Click 'Verify with AI' to run.">
+              <span className="pill-dot" style={{ background: '#a855f7', boxShadow: '0 0 8px #a855f7' }} />
+              AI On-Demand ({config?.on_demand_provider === 'groq' ? 'Groq' : 'Gemini'})
+            </div>
           ) : (
             <div className="pill-badge muted" title={config?.groq_status?.reason || config?.gemini_status?.reason || 'AI is disabled in .env (Offline Extraction Mode)'}>
               <span className="pill-dot" style={{ background: '#94a3b8' }} />
@@ -2261,20 +2399,44 @@ export default function Home() {
                       <button
                         onClick={() => revalidateJob(selectedJobId)}
                         disabled={isRevalidating}
-                        className="btn btn-secondary"
+                        className={jobResult?.summary?.validated > 0 || jobResult?.summary?.flagged > 0 ? "btn btn-secondary" : "btn btn-primary"}
                         style={{
-                          padding: '0.45rem 0.95rem',
+                          padding: '0.45rem 1rem',
                           borderRadius: '9999px',
                           fontSize: '0.82rem',
-                          borderColor: 'rgba(168, 85, 247, 0.4)',
-                          background: isRevalidating ? 'rgba(168, 85, 247, 0.2)' : 'rgba(168, 85, 247, 0.08)',
-                          color: '#c084fc',
-                          cursor: isRevalidating ? 'wait' : 'pointer'
+                          background: isRevalidating
+                            ? 'rgba(168, 85, 247, 0.2)'
+                            : (jobResult?.summary?.validated > 0 || jobResult?.summary?.flagged > 0
+                                ? 'rgba(168, 85, 247, 0.1)'
+                                : 'linear-gradient(135deg, #a855f7 0%, #6366f1 100%)'),
+                          borderColor: 'rgba(168, 85, 247, 0.5)',
+                          color: (jobResult?.summary?.validated > 0 || jobResult?.summary?.flagged > 0 ? '#c084fc' : '#ffffff'),
+                          cursor: isRevalidating ? 'wait' : 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '0.45rem',
+                          boxShadow: !(jobResult?.summary?.validated > 0 || jobResult?.summary?.flagged > 0)
+                            ? '0 2px 10px rgba(168, 85, 247, 0.35)'
+                            : 'none'
                         }}
-                        title="Re-run dictionary cleaning, font artifact removal, and AI validation on all questions"
+                        title={jobResult?.summary?.validated > 0 || jobResult?.summary?.flagged > 0
+                          ? "Re-run AI answer verification & text checking on all questions"
+                          : "Run AI answer solving and validation on all questions in this paper"}
                       >
-                        <RefreshCw size={14} className={isRevalidating ? "spin" : ""} color="#c084fc" />
-                        <span>{isRevalidating ? 'Verifying with AI...' : 'Re-verify with AI'}</span>
+                        {isRevalidating ? (
+                          <RefreshCw size={14} className="spin" color={jobResult?.summary?.validated > 0 || jobResult?.summary?.flagged > 0 ? "#c084fc" : "#ffffff"} />
+                        ) : (jobResult?.summary?.validated > 0 || jobResult?.summary?.flagged > 0 ? (
+                          <RefreshCw size={14} color="#c084fc" />
+                        ) : (
+                          <Sparkles size={14} color="#ffffff" />
+                        ))}
+                        <span>
+                          {isRevalidating
+                            ? 'Verifying with AI...'
+                            : (jobResult?.summary?.validated > 0 || jobResult?.summary?.flagged > 0
+                                ? 'Re-verify with AI'
+                                : 'Verify with AI')}
+                        </span>
                       </button>
                     )}
                   </div>
@@ -2597,9 +2759,41 @@ export default function Home() {
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
                 <button
+                  className="btn btn-secondary"
+                  onClick={() => handleAiVerifySingle(selectedQuestion)}
+                  disabled={isVerifyingSingle || isRewriting}
+                  style={{
+                    padding: '0.35rem 0.75rem',
+                    borderRadius: '9999px',
+                    fontSize: '0.78rem',
+                    background: isVerifyingSingle ? 'rgba(168, 85, 247, 0.2)' : 'rgba(168, 85, 247, 0.1)',
+                    borderColor: 'rgba(168, 85, 247, 0.4)',
+                    color: '#c084fc',
+                    border: '1px solid rgba(168, 85, 247, 0.4)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    opacity: (isVerifyingSingle || isRewriting) ? 0.7 : 1,
+                    cursor: (isVerifyingSingle || isRewriting) ? 'not-allowed' : 'pointer'
+                  }}
+                  title="Solves this question with AI and verifies if the marked answer is correct"
+                >
+                  {isVerifyingSingle ? (
+                    <>
+                      <RefreshCw size={12} className="spin" color="#c084fc" />
+                      <span>Verifying...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 size={12} color="#c084fc" />
+                      <span>Verify with AI</span>
+                    </>
+                  )}
+                </button>
+                <button
                   className="btn btn-primary"
                   onClick={() => handleAiRewrite(selectedQuestion)}
-                  disabled={isRewriting}
+                  disabled={isRewriting || isVerifyingSingle}
                   style={{
                     padding: '0.35rem 0.75rem',
                     borderRadius: '9999px',
@@ -2827,15 +3021,20 @@ export default function Home() {
                     <Sparkles size={14} /> Fix with Gemini OCR
                   </button>
                 </div>
-                <div style={{ background: '#111827', borderRadius: '6px', padding: '1rem', border: '1px solid #374151', display: 'flex', justifyContent: 'center' }}>
-                  <img 
-                    src={`${API_BASE}/pdfs/${selectedJobId}/questions/${selectedQuestion.question_number}/image`} 
-                    alt={`Question ${selectedQuestion.question_number}`}
-                    style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain', filter: 'invert(1) hue-rotate(180deg)' }}
-                  />
-                </div>
               </div>
             )}
+
+            {/* Original Question Image Crop */}
+            <div className="detail-box" style={{ marginBottom: '1.25rem' }}>
+              <h4 style={{ margin: '0 0 1rem 0', fontSize: '0.95rem', color: '#f1f5f9' }}>Original Question Crop</h4>
+              <div style={{ background: '#111827', borderRadius: '6px', padding: '1rem', border: '1px solid #374151', display: 'flex', justifyContent: 'center' }}>
+                <img 
+                  src={`${API_BASE}/pdfs/${selectedJobId}/questions/${selectedQuestion.question_number}/image`} 
+                  alt={`Question ${selectedQuestion.question_number}`}
+                  style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain' }}
+                />
+              </div>
+            </div>
 
             {/* Question Stem Box (Hidden if question only has sub-questions, to avoid showing 2 times) */}
             {(() => {
@@ -3013,9 +3212,35 @@ export default function Home() {
                       <span className="detail-box-title" style={{ margin: 0 }}>Marked Exam Key</span>
                       <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.06)', padding: '2px 6px', borderRadius: '4px' }}>Ground Truth</span>
                     </div>
-                    <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#f8fafc', marginTop: '0.35rem' }}>
-                      {selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer || '—'}
-                    </div>
+                    {(() => {
+                      const healedOpts = healAssertionReasonQuestion(selectedQuestion).options || {};
+                      let mKey = (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer || '').trim();
+                      const expText = selectedQuestion.answer_text || selectedQuestion.explanation;
+                      if (expText && typeof expText === 'string') {
+                        const m = expText.match(/^\s*[\(\[]\s*([A-Da-d1-4])\s*[\)\]]/);
+                        if (m && (!mKey || (healedOpts && !healedOpts[mKey.toUpperCase()] && !healedOpts[mKey.toLowerCase()]))) {
+                          mKey = m[1].toUpperCase();
+                        }
+                      }
+                      const optText = healedOpts[mKey.toUpperCase()] || healedOpts[mKey.toLowerCase()] || (expText ? expText.replace(/^\s*[\(\[]\s*[A-Da-d1-4]\s*[\)\]][\s\:\.\-]*/, '') : '');
+                      const cleanAns = cleanOptionDisplay(optText, mKey);
+
+                      return (
+                        <div style={{ marginTop: '0.35rem' }}>
+                          <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.75rem', flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: '1.75rem', fontWeight: 800, color: '#f8fafc' }}>
+                              {mKey || '—'}
+                            </span>
+                            {cleanAns && (
+                              <span
+                                style={{ fontSize: '1.05rem', color: '#e2e8f0', lineHeight: '1.5' }}
+                                dangerouslySetInnerHTML={{ __html: renderLatex(cleanAns) }}
+                              />
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div className="detail-box" style={{ margin: 0 }}>
@@ -3035,18 +3260,32 @@ export default function Home() {
                         );
                       })()}
                     </div>
-                    <div style={{ 
-                      fontSize: '1.75rem', 
-                      fontWeight: 800, 
-                      color: (() => {
-                        const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
-                        if (!valAns) return 'var(--text-muted)';
-                        return selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)';
-                      })(),
-                      marginTop: '0.35rem'
-                    }}>
-                      {selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null) || '—'}
-                    </div>
+                    {(() => {
+                      const valAns = selectedQuestion.validated_answer || (selectedQuestion.is_valid ? (selectedQuestion.marked_correct_answer || selectedQuestion.marked_answer) : null);
+                      const healedOpts = healAssertionReasonQuestion(selectedQuestion).options || {};
+                      const optText = valAns ? (healedOpts[valAns.toUpperCase()] || healedOpts[valAns.toLowerCase()] || '') : '';
+                      const cleanAns = optText ? cleanOptionDisplay(optText, valAns) : '';
+
+                      return (
+                        <div style={{ marginTop: '0.35rem' }}>
+                          <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.75rem', flexWrap: 'wrap' }}>
+                            <span style={{ 
+                              fontSize: '1.75rem', 
+                              fontWeight: 800, 
+                              color: !valAns ? 'var(--text-muted)' : (selectedQuestion.is_valid ? 'var(--success)' : 'var(--warning)')
+                            }}>
+                              {valAns || '—'}
+                            </span>
+                            {cleanAns && (
+                              <span
+                                style={{ fontSize: '1.05rem', color: '#e2e8f0', lineHeight: '1.5' }}
+                                dangerouslySetInnerHTML={{ __html: renderLatex(cleanAns) }}
+                              />
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
 

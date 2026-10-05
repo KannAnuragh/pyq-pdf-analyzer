@@ -17,8 +17,8 @@ def call_gemini_ocr(img_bytes: bytes, prompt_extra: str = "") -> tuple[dict, int
         return {"latex": "", "confidence": "low"}, 0, 0
     client = genai.Client(api_key=google_key)
     
-    # Use Gemini 2.5 Flash as requested
-    model_name = "gemini-2.5-flash"
+    # Use configured extract model or default to gemini-3.8-flash
+    model_name = os.getenv("GEMINI_EXTRACT_MODEL", "gemini-3.8-flash")
     
     prompt = (
         "Extract the mathematical formula or expression from this image snippet into LaTeX.\n"
@@ -42,27 +42,33 @@ def call_gemini_ocr(img_bytes: bytes, prompt_extra: str = "") -> tuple[dict, int
         required=["latex", "confidence"]
     )
     
-    res = client.models.generate_content(
-        model=model_name,
-        contents=[
-            types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
-            prompt
-        ],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=schema,
-            temperature=0.4
-        )
-    )
-    
-    p_tok = res.usage_metadata.prompt_token_count if res.usage_metadata else 0
-    c_tok = res.usage_metadata.candidates_token_count if res.usage_metadata else 0
-    
-    try:
-        data = json.loads(res.text)
-        return data, p_tok, c_tok
-    except Exception:
-        return {"latex": "", "confidence": "low"}, p_tok, c_tok
+    for attempt in range(3):
+        try:
+            res = client.models.generate_content(
+                model=model_name,
+                contents=[
+                    types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+                    prompt
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=0.4
+                )
+            )
+            
+            p_tok = res.usage_metadata.prompt_token_count if res.usage_metadata else 0
+            c_tok = res.usage_metadata.candidates_token_count if res.usage_metadata else 0
+            
+            data = json.loads(res.text)
+            return data, p_tok, c_tok
+        except Exception as e:
+            if "429" in str(e) or "quota" in str(e).lower() or "too many" in str(e).lower():
+                time.sleep(2 ** attempt + 1)
+            else:
+                break
+            
+    return {"latex": "", "confidence": "low"}, 0, 0
 
 def perform_structural_ocr(img_bytes: bytes, region_type: str, max_retries: int = 1) -> tuple[str, bool, bool, int, int]:
     """

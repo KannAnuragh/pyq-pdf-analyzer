@@ -1,13 +1,15 @@
 import sys
-import json
 import os
-
-# Add to sys.path so we can import from pdf_qa_agent
-sys.path.append(os.path.abspath("."))
+sys.path.append("/app/pdf_qa_agent")
 from graph.nodes import parse_questions_from_text
+import fitz
 
-with open("scratch/pdf_text.txt") as f:
-    text = f.read()
+doc = fitz.open("/app/12CB CH-3 Current Electricity (DPP).pdf")
+text = ""
+for page in doc:
+    text += page.get_text() + "\n"
 
 questions = parse_questions_from_text(text)
-print(json.dumps(questions, indent=2))
+print(f"Extracted {len(questions)} questions")
+for q in questions:
+    print(f"Q{q['question_number']}: {q['stem'][:50]}...")

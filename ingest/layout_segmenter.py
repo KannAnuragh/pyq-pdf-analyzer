@@ -89,11 +89,15 @@ class QuestionSegment:
 
 # Matches question-number tokens at the start of a text string:
 #   "3."   "3)"   "3:-"   "Q3"   "Q.3"   "Q3."
-#   "Question 3:"   "Q.No. 3"
+#   "Question 3:"   "Q.No. 3"   "ചോദ്യം 3"
 _Q_HEADER_RE = re.compile(
     r"""^
     (?:
-        (?:Question\s*(?:No\.?)?\s*|Q\.?\s*(?:No\.?)?\s*|Sl\.?\s*No\.?\s*|Problem\s*|Prob\.?\s*)?
+        (?:Question\s*(?:No\.?)?\s*|Ques\.?\s*(?:No\.?)?\s*|Q\.?\s*(?:No\.?)?\s*|Sl\.?\s*No\.?\s*|Problem\s*|Prob\.?\s*|ചോദ്യം\s*(?:നമ്പർ)?\s*)
+        (\d{1,3})
+        \s*
+        (?:[.):\-]|--)?
+        |
         (\d{1,3})
         \s*
         (?:[.):\-]|--)
@@ -165,8 +169,18 @@ def sort_blocks_in_reading_order(blocks: list[dict]) -> list[dict]:
                 line_yc = (line_y0 + line_y1) / 2.0
                 line_h = max(1.0, line_y1 - line_y0)
                 
+                # Check for significant horizontal collision with existing line elements.
+                # If block b starts at the same horizontal position as an element in line, they are vertically stacked separate lines!
+                has_horizontal_collision = any(
+                    max(bbox[0], x.get("bbox", [0, 0, 0, 0])[0]) <
+                    min(bbox[2], x.get("bbox", [0, 0, 0, 0])[2]) - 3.0
+                    for x in line
+                )
+                if has_horizontal_collision:
+                    continue
+
                 overlap = min(b_y1, line_y1) - max(b_y0, line_y0)
-                if overlap > 0.4 * min(b_h, line_h) or abs(b_yc - line_yc) < min(b_h, line_h) * 0.5:
+                if overlap > 0.4 * min(b_h, line_h) or abs(b_yc - line_yc) < min(b_h, line_h) * 0.45:
                     matched_line = line
                     break
             if matched_line is not None:
@@ -287,11 +301,16 @@ def _flag_structural_regions(span_blocks: list[dict]) -> list[dict]:
             oy_center = (oy0 + oy1) / 2
             o_sz = other.get("font_size", body_size)
             
-            # Horizontally adjacent within font-proportional distance
-            if tx1 - 0.2 * t_sz <= ox0 <= tx1 + 0.8 * t_sz or ox1 - 0.2 * t_sz <= tx0 <= ox1 + 0.8 * t_sz:
+            # Horizontally adjacent within font-proportional distance:
+            # Sub/sup must be strictly to the RIGHT of base text
+            if tx1 - 0.2 * t_sz <= ox0 <= tx1 + 0.8 * t_sz:
                 # Smaller font size and vertically offset baseline
-                if o_sz < t_sz * 0.95 and 0.15 * t_sz <= abs(oy_center - ty_center) <= 1.2 * t_sz:
-                    neighbors.append(other)
+                if o_sz < t_sz * 0.95 and 0.12 * t_sz <= abs(oy_center - ty_center) <= 0.65 * t_sz:
+                    # Must overlap vertically with the base text line (not line above or line below)
+                    if oy0 < ty1 and oy1 > ty0:
+                        # Do not absorb option markers or brackets
+                        if not re.search(r'^\([a-dA-D1-4]\)$', other.get("text", "").strip()):
+                            neighbors.append(other)
                     
         if neighbors:
             all_parts = [t] + neighbors
@@ -306,15 +325,16 @@ def _flag_structural_regions(span_blocks: list[dict]) -> list[dict]:
             combined_text = t.get("text", "")
             for other in sorted(neighbors, key=lambda x: x["bbox"][0]):
                 o_yc = (other["bbox"][1] + other["bbox"][3]) / 2
+                o_txt = other.get("text", "").strip()
                 if o_yc < ty_center:
-                    combined_text += f"$^{{{other.get('text', '')}}}$"
+                    combined_text += f"$^{{{o_txt}}}$"
                 else:
-                    combined_text += f"$_{{{other.get('text', '')}}}$"
+                    combined_text += f"$_{{{o_txt}}}$"
                     
             processed.append({
                 "type": "text",
                 "text": combined_text,
-                "bbox": [min_x, min_y, max_x, max_y],
+                "bbox": [min_x, max(min_y, ty0 - 0.3 * t_sz), max_x, min(max_y, ty1 + 0.3 * t_sz)],
                 "page": t["page"],
                 "font_size": t_sz,
                 "is_bold": t.get("is_bold", False),
@@ -393,12 +413,19 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
                 current_segment.elements.append(elem)
             continue
 
+        ans_m = re.search(r'(?i)^(?:answer\s*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints)\s*$', text)
+        if ans_m and elem.font_size >= body_size * 1.05:
+            current_section = "Answer Key"
+            if current_segment is not None:
+                current_segment.elements.append(elem)
+            continue
+
         # -----------------------------------------------------------------
         # Test whether this element is a question-boundary marker
         # -----------------------------------------------------------------
         q_m = _Q_HEADER_RE.match(text)
         if q_m:
-            q_num = int(q_m.group(1))
+            q_num = int(q_m.group(1) or q_m.group(2))
             remainder = text[q_m.end():]
             gap_size = len(remainder) - len(remainder.lstrip())
             
@@ -455,9 +482,8 @@ def _is_question_boundary(elem: LayoutElement, body_size: float, gap_size: int, 
 
     # We do NOT return yet. We must first evaluate if it's a continuation of the previous line.
 
-    # Check if the current segment already contains an 'Answer:' or 'Ans:' block.
-    # If it does, the next numbered item is extremely likely to be the start of a new question,
-    # regardless of horizontal gap sizes.
+    # Check if the current segment already contains an 'Answer:' or 'Ans:' block,
+    # or if prev_elem is an answer line.
     has_answer = False
     if current_segment:
         for e in current_segment.elements:
@@ -466,6 +492,14 @@ def _is_question_boundary(elem: LayoutElement, body_size: float, gap_size: int, 
             if has_keyword or has_prefix or (e.is_bold and e.text.strip().lower() in ('answer', 'ans', 'solution', 'explanation', 'ഉത്തരം')):
                 has_answer = True
                 break
+
+    if prev_elem and re.search(r'^(?:Answer|Ans|ഉത്തരം|Solution|Explanation)[\s:\.\-]+', prev_elem.text.strip(), re.IGNORECASE):
+        has_answer = True
+
+    # If the current question already has an answer, the next numbered item is likely the start of a new question!
+    # We shouldn't penalize it for being indented, but we still subject it to basic continuity checks.
+    if has_answer:
+        is_indented_wrap = False
 
     # Vertical Distance Check: If there is a noticeable vertical gap (e.g. 2 lines of space)
     # between the previous block and this block, it signifies a paragraph break.
@@ -482,25 +516,24 @@ def _is_question_boundary(elem: LayoutElement, body_size: float, gap_size: int, 
         # we track it to prevent false positive splits on typos.
         txt = prev_elem.text.strip()
         if txt:
-            last_word = txt.split()[-1].lower()
-            if last_word.endswith((':', ',', '-', 'the', 'a', 'an', 'and', 'or', 'of', 'in', 'to', 'for', 'with', 'is', 'are', 'ratio', '∶', '::')):
+            if txt.endswith((':', ',', '-', '∶', '::')):
                 is_continuation = True
+            else:
+                last_word = txt.split()[-1].lower()
+                if last_word in ('the', 'a', 'an', 'and', 'or', 'of', 'in', 'to', 'for', 'with', 'is', 'are', 'ratio'):
+                    is_continuation = True
                 
     # If this is physically consecutive text AND it follows a continuation marker, it is a wrapped line.
     if is_continuation and y_gap <= (body_size * 0.8) and not is_new_page:
         return False
 
     if not is_indented_wrap:
-        if gap_size >= 2 or gap_size == 0 or elem.x_indent < 0.20:
+        if gap_size >= 1 or gap_size == 0 or elem.x_indent < 0.25 or (0.45 < elem.x_indent < 0.60):
             return True
             
-        if is_new_page or (has_answer and y_gap > body_size * 0.5) or y_gap > (body_size * 0.8):
+        if is_new_page or y_gap > (body_size * 0.8):
             return True
 
-    return False
-    # a 1-space gap (gap_size == 1) is almost certainly just a wrapped line inside the paragraph.
-    # Therefore, we NEVER treat it as a question boundary without a distinct paragraph break.
-    
     return False
 
 
@@ -535,22 +568,46 @@ def _filter_valid_segments(segments: list[QuestionSegment]) -> list[QuestionSegm
     expected = segments[start_idx].q_num + 1
     prev_section = segments[start_idx].section
 
-    for seg in segments[start_idx + 1:]:
+    for i, seg in enumerate(segments[start_idx + 1:], start=start_idx + 1):
         q = seg.q_num
         section_changed = seg.section != prev_section and seg.section is not None
 
+        is_valid = False
         if q == expected:
-            accepted.append(seg)
-            expected = q + 1
-        elif q > expected and q <= expected + 25:
-            # Forward gap — acceptable (some questions may be omitted)
-            accepted.append(seg)
+            is_valid = True
             expected = q + 1
         elif section_changed and q <= expected:
             # Section restart (e.g. "Part B" resets counter to 1)
-            accepted.append(seg)
+            is_valid = True
             expected = q + 1
-        # Else: discard (likely a number inside an explanation or table)
+        elif q == 1 and not section_changed:
+            # Possible exam restart without a section header (e.g. after instructions)
+            # Accept if it's on a new page, OR if it initiates a long sequence (1,2,3,4)
+            is_new_page = accepted and seg.page > accepted[-1].page
+            future_qs = [s.q_num for s in segments[i + 1 : i + 12]]
+            has_long_sequence = 2 in future_qs and 3 in future_qs and 4 in future_qs
+            if is_new_page or has_long_sequence:
+                is_valid = True
+                expected = 2
+        elif q > expected:
+            # Check lookahead: if a future segment (within next 10) matches 'expected' or 'expected+1' or 'expected+2',
+            # then THIS 'q' is a false positive jump (e.g. we see 90, but 6 is coming up).
+            future_qs = [s.q_num for s in segments[i + 1 : i + 12]]
+            if any(fq in (expected, expected + 1, expected + 2) for fq in future_qs):
+                is_valid = False
+            else:
+                is_valid = True
+                expected = q + 1
+        # Else: q < expected and not section_changed -> backward jump (false positive) -> is_valid = False
+
+        if is_valid:
+            accepted.append(seg)
+        else:
+            # DISCARDED as a new question, BUT we must not lose the text!
+            # It's a false positive boundary (e.g. a numbered list inside the previous question).
+            # Merge its elements into the last accepted segment.
+            if accepted:
+                accepted[-1].elements.extend(seg.elements)
 
         prev_section = seg.section
 

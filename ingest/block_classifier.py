@@ -69,9 +69,9 @@ Block:
 # Public interface
 # ---------------------------------------------------------------------------
 
-def classify_block_with_llm(segment: "QuestionSegment", llm) -> Optional[dict]:
+def classify_block_with_llm(segment: "QuestionSegment", llm=None) -> Optional[dict]:
     """
-    Classify a single QuestionSegment using a schema-constrained LLM call.
+    Classify a single QuestionSegment using deterministic regex and layout extraction.
     Enforces strict layout rules (e.g. bold "Answer:" markers) before parsing.
     """
     if not segment or not segment.elements:
@@ -97,11 +97,12 @@ def classify_block_with_llm(segment: "QuestionSegment", llm) -> Optional[dict]:
     original_elements = segment.elements
     segment.elements = stem_elements
 
-    # Try LLM classification first
-    result = _try_llm_classify(segment, llm)
+    result = None
+    if llm is not None:
+        result = _try_llm_classify(segment, llm)
 
     if result is None:
-        # LLM failed — fall back to regex path on flat text
+        print(f"[block_classifier] Falling back to regex for Q{segment.q_num}", flush=True)
         result = _fallback_regex(segment)
 
     # Restore elements and forcibly inject the strict explanation if found
@@ -114,6 +115,14 @@ def classify_block_with_llm(segment: "QuestionSegment", llm) -> Optional[dict]:
         if strict_exp_text:
             existing_exp = result.get("explanation")
             result["explanation"] = f"{existing_exp}\n{strict_exp_text}".strip() if existing_exp else strict_exp_text
+            
+            # If marked_answer was not found, check if strict_exp_text begins with an option key:
+            if not result.get("marked_answer"):
+                ans_key_m = re.match(r"^\s*[\(\[]?\s*([a-eA-E1-4])(?:\s*[\)\]\.\:\-]|(?=\s|$))", strict_exp_text)
+                if ans_key_m:
+                    cand_k = ans_key_m.group(1).upper()
+                    result["marked_answer"] = cand_k
+                    result["marked_correct_answer"] = cand_k
 
     if result is not None:
         return _finalise(result, segment)
@@ -137,8 +146,24 @@ def _try_llm_classify(segment: "QuestionSegment", llm) -> Optional[dict]:
         if not structured.strip():
             return None
 
+        import time
         prompt = BLOCK_CLASSIFY_PROMPT.replace("{structured_text}", structured)
-        response = llm.invoke([HumanMessage(content=prompt)])
+        
+        response = None
+        for attempt in range(4):
+            try:
+                response = llm.invoke([HumanMessage(content=prompt)])
+                break
+            except Exception as e:
+                if "429" in str(e) or "quota" in str(e).lower() or "too many" in str(e).lower():
+                    if attempt == 3:
+                        raise e
+                    time.sleep(2 ** attempt + 1)
+                else:
+                    raise e
+                    
+        if not response:
+            return None
 
         raw = _extract_text_content(response.content)
         cleaned = _clean_json(raw)
@@ -271,6 +296,16 @@ def _finalise(llm_result: dict, segment: "QuestionSegment") -> dict:
                     if opt_v and opt_v not in stem:
                         stem = f"{stem} ({opt_k}) {opt_v}".strip()
                 options = {}
+
+    if not marked_answer:
+        exp_target = explanation or (llm_result.get("answer_text") or "")
+        if exp_target:
+            import re
+            ans_m = re.match(r"^\s*[\(\[]?\s*([a-eA-E1-4])(?:\s*[\)\]\.\:\-]|(?=\s|$))", exp_target)
+            if ans_m:
+                cand_k = ans_m.group(1).upper()
+                if not options or cand_k in options or cand_k.lower() in options:
+                    marked_answer = cand_k
 
     # Determine question type
     if options and len(options) >= 2:

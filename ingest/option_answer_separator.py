@@ -52,7 +52,7 @@ SOLUTION_MARKER_PATTERN = re.compile(
 
 # Pattern for option letter at start of answer tail (supports e.g. (b), [b], b, Option B, etc., followed by math/text)
 ANSWER_LETTER_PATTERN = re.compile(
-    r"^(?:Option\s*[:\-]*\s*)?(?:\(\s*([A-Ha-h])\s*\)|\[\s*([A-Ha-h])\s*\]|([A-Ha-h]))(?=\s|[\.\:\-\$\\\\]|$)",
+    r"^(?:Option\s*[:\-]*\s*)?(?:\(\s*([A-Ha-h1-5])\s*\)|\[\s*([A-Ha-h1-5])\s*\]|([A-Ha-h1-5]))(?=\s|[\.\:\-\$\\\\]|$)",
     re.IGNORECASE
 )
 
@@ -193,14 +193,14 @@ def parse_trailing_meta(text: str) -> Tuple[str, Optional[str], Optional[str]]:
         explanation = clean_text[sol_m.end():].strip()
         clean_text = clean_text[:sol_m.start()].strip()
         ans_in_sol = re.search(
-            r"(?:Option\s*[:\-]*\s*\(?([A-D])\)?\s*is\s*correct|\(?([A-D])\)?\s*is\s*(?:the\s*)?correct\s*(?:option|answer))",
+            r"(?:Option\s*[:\-]*\s*\(?([A-E1-5])\)?\s*is\s*correct|\(?([A-E1-5])\)?\s*is\s*(?:the\s*)?correct\s*(?:option|answer))",
             explanation,
             re.IGNORECASE
         )
         if ans_in_sol:
             marked_answer = (ans_in_sol.group(1) or ans_in_sol.group(2)).upper()
         elif explanation and not _has_subquestion_markers(explanation):
-            leading_ans = re.match(r"^\(?([A-D])\)?(?=[^a-zA-Z0-9]|$)", explanation, re.IGNORECASE)
+            leading_ans = re.match(r"^\(?([A-E1-5])\)?(?=[^a-zA-Z0-9]|$)", explanation, re.IGNORECASE)
             if leading_ans:
                 marked_answer = leading_ans.group(1).upper()
 
@@ -227,7 +227,7 @@ def parse_trailing_meta(text: str) -> Tuple[str, Optional[str], Optional[str]]:
 
     if not marked_answer:
         # Check if text ends with a naked answer like [A] or (C) on its own line
-        naked_pat = re.compile(r'(?:^|\n)\s*[\[\(]([A-D])[\]\)]\s*$', re.IGNORECASE)
+        naked_pat = re.compile(r'(?:^|\n)\s*[\[\(]([A-E1-5])[\]\)]\s*$', re.IGNORECASE)
         m_naked = naked_pat.search(clean_text)
         if m_naked:
             marked_answer = m_naked.group(1).upper()
@@ -378,15 +378,17 @@ def separate_options_dict(
     if extracted_exp:
         has_multi_sub_exp = len(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', extracted_exp, re.IGNORECASE)) >= 2
         if not has_multi_sub_exp:
-            pat1 = r"^\s*(?:Answer|Ans|Solution|Sol|Correct\s*Option|Option|Key)[\s\:\-\.]*[\(\[]?\s*([A-D])\s*[\)\]]?(?:[\s\.\:\-]+|is\s*correct\b)?"
-            pat2 = r"^\s*(?:[\(\[]\s*([A-D])\s*[\)\]]|([A-D])\s*[\.\:\-\)]+)(?=\s|$)"
+            pat1 = r"^\s*(?:Answer|Ans|Solution|Sol|Correct\s*Option|Option|Key)[\s\:\-\.]*[\(\[]?\s*([A-E1-5])\s*[\)\]]?(?:[\s\.\:\-]+|is\s*correct\b)?"
+            pat2 = r"^\s*(?:[\(\[]\s*([A-E1-5])\s*[\)\]]|([A-E1-5])\s*[\.\:\-\)]+)(?=\s|$)"
+            pat3 = r"^\s*([A-E1-5])\s*$"
             
             m1 = re.match(pat1, extracted_exp, re.IGNORECASE)
             m2 = re.match(pat2, extracted_exp, re.IGNORECASE)
+            m3 = re.match(pat3, extracted_exp, re.IGNORECASE)
             
-            explicit_match = m1 or m2
+            explicit_match = m1 or m2 or m3
             if explicit_match:
-                candidate = (explicit_match.group(1) if m1 else (m2.group(1) or m2.group(2))).upper()
+                candidate = (explicit_match.group(1) if m1 else (m2.group(1) or m2.group(2) if m2 else m3.group(1))).upper()
                 # Only override if this candidate actually exists in the options
                 if any(k.upper() == candidate for k in clean_opts.keys()):
                     extracted_ans = candidate
@@ -578,7 +580,7 @@ def strip_and_extract_trailing_options_from_stem(
     # If opts is empty, a descriptive question with math equations must NEVER have pieces sliced off its stem!
     if 0 < len(opts) < 4:
         trailing_opt_pat = re.compile(
-            r'(?:(?:\n|\s+|\.\s+)\(([A-Ea-e1-4])\)[\.\:\-]?\s*|(?:\n|\s{2,}|\.\s+)([A-Ea-e])[\.\)\:-]\s*(?!\d))([^ \n\r\t][^\n\r]*)$',
+            r'(?:(?:\n|\s+|\.\s+)\(([A-Ea-e1-4])\)[\.\:\-]?\s*|(?:\n|\s{2,}|\.\s+)([A-Ea-e1-4])[\.\)\:-]\s*(?!\d))([^ \n\r\t][^\n\r]*)$',
             re.IGNORECASE
         )
 
@@ -627,7 +629,7 @@ def strip_and_extract_trailing_options_from_stem(
     # 3. If explanation has explicit answer like "Answer: (b) 5.0 \times 10^{17}"
     if cur_exp and isinstance(cur_exp, str):
         ans_match = re.search(
-            r'(?:^|\n|\s{2,}|\b)(?:\*\*\s*(?:Answer|Ans(?:wer)?|Correct(?:\s*Option|\s*Answer)?|ഉത്തരം)\s*\*\*|\*?\*?(?:Answer|Ans(?:wer)?|Correct(?:\s*Option|\s*Answer)?|ഉത്തരം)\*?\*?\s*[\:\.\-]+)\s*[\(\[]?\s*([A-Da-d1-4])\s*[\)\]]?[\s\:\.\-]*([^\n]*)',
+            r'(?:^|\n|\s{2,}|\b)(?:\*\*\s*(?:Answer|Ans(?:wer)?|Correct(?:\s*Option|\s*Answer)?|ഉത്തരം)\s*\*\*|\*?\*?(?:Answer|Ans(?:wer)?|Correct(?:\s*Option|\s*Answer)?|ഉത്തരം)\*?\*?\s*[\:\.\-]+)\s*[\(\[]?\s*([A-Ea-e1-5])\s*[\)\]]?[\s\:\.\-]*([^\n]*)',
             cur_exp,
             re.IGNORECASE
         )
@@ -639,7 +641,7 @@ def strip_and_extract_trailing_options_from_stem(
             if ans_text and (ans_letter not in opts or not opts[ans_letter]):
                 opts[ans_letter] = ans_text
         elif not cur_ans:
-            leading_m = re.match(r'^\s*[\(\[]\s*([A-Da-d1-4])\s*[\)\]][\s\:\.\-]*([^\n]*)', cur_exp, re.IGNORECASE)
+            leading_m = re.match(r'^\s*[\(\[]\s*([A-Ea-e1-5])\s*[\)\]][\s\:\.\-]*([^\n]*)', cur_exp, re.IGNORECASE)
             if leading_m:
                 ans_letter = leading_m.group(1).upper()
                 ans_text = leading_m.group(2).strip()
@@ -1220,7 +1222,7 @@ def clean_question_options_and_answer(q: Any) -> Any:
         sub_parts = None
     elif q_type.startswith("descriptive"):
         mcq_keys = set(str(k).upper() for k in clean_opts.keys())
-        if len(clean_opts) >= 2 and mcq_keys.issubset({'A', 'B', 'C', 'D', 'E'}):
+        if len(clean_opts) >= 2 and mcq_keys.issubset({'A', 'B', 'C', 'D', 'E', '1', '2', '3', '4', '5', 'I', 'II', 'III', 'IV', 'V'}):
             q_type = "mcq"
             final_opts = clean_opts
             sub_parts = None

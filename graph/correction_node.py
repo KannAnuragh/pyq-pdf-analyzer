@@ -123,6 +123,43 @@ def get_correction_provider() -> str:
     return "none"
 
 
+def get_on_demand_llm_provider(preferred: str | None = None) -> str:
+    """
+    Determines an active LLM provider for explicit user button clicks
+    (e.g., 'Verify with AI', 'Rewrite with AI'), even when background
+    automatic validation is disabled in the settings.
+    """
+    if preferred and preferred in ("groq", "gemini"):
+        return preferred
+
+    try:
+        from ..storage.config_manager import get_setting
+        cfg_provider = get_setting("validation_provider") or get_setting("correction_provider")
+        if cfg_provider in ("groq", "gemini"):
+            return cfg_provider
+    except Exception:
+        pass
+
+    if CORRECTION_PROVIDER_ENV in ("groq", "gemini"):
+        return CORRECTION_PROVIDER_ENV
+
+    solve_provider = os.getenv("SOLVE_LLM_PROVIDER", "").strip().lower()
+    if solve_provider in ("groq", "gemini"):
+        return solve_provider
+
+    # Priority to Groq if key configured
+    groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+    if groq_key and not groq_key.startswith("your_"):
+        return "groq"
+
+    # Gemini fallback if key configured
+    gemini_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+    if gemini_key and not gemini_key.startswith("your_"):
+        return "gemini"
+
+    return "none"
+
+
 def calculate_token_cost(prompt_tokens: int, completion_tokens: int, provider: str = "groq") -> float:
     """
     Calculates estimated cost in USD based on model pricing:
@@ -725,7 +762,14 @@ def _apply_post_processing_gate(
         q_num = correction.question_number
         q = questions_by_number.get(q_num, {})
 
-        if getattr(correction, 'needs_ocr_fallback', False):
+        stem = q.get("stem", "")
+        from ..ingest.quality_check import is_question_unreadable
+        if (
+            getattr(correction, 'needs_ocr_fallback', False)
+            or q.get("is_garbled", False)
+            or q.get("ocr_uncertain", False)
+            or is_question_unreadable(stem, q.get("options", {}))
+        ):
             ocr_fallbacks.append(q_num)
 
         # --- Text correction gate ---
@@ -926,10 +970,17 @@ def correction_and_validation_node(state: dict) -> dict:
 
     cache = get_correction_cache()
 
-    provider = get_correction_provider()
-    llm_enabled = provider != "none"
-    word_corr_on = is_word_correction_enabled()
-    ans_val_on = is_answer_validation_enabled()
+    force_validation = bool(state.get("force_validation", False))
+    if force_validation:
+        ans_val_on = True
+        word_corr_on = True
+        provider = state.get("provider") or get_on_demand_llm_provider()
+        llm_enabled = provider != "none"
+    else:
+        provider = get_correction_provider()
+        llm_enabled = provider != "none"
+        word_corr_on = is_word_correction_enabled()
+        ans_val_on = is_answer_validation_enabled()
 
     # ---- Step 1: Route words for all questions (if word correction enabled) ----
     all_flagged: dict[int, list[dict]] = {}
@@ -1033,7 +1084,7 @@ def correction_and_validation_node(state: dict) -> dict:
                     "name": "send_errors_to_llms",
                     "label": "Send Errors to LLMs",
                     "status": "skipped",
-                    "details": "LLM validation & correction skipped / offline"
+                    "details": "AI validation skipped (click 'Verify with AI' to validate)"
                 },
                 "ocr_scanned": {
                     "name": "ocr_scanned",
@@ -1044,7 +1095,7 @@ def correction_and_validation_node(state: dict) -> dict:
             }
 
             exp_val = q.get("explanation") or q.get("answer_text") or ""
-            reasoning = exp_val if exp_val.strip() else "LLM validation is disabled."
+            reasoning = exp_val if exp_val.strip() else "Unvalidated (click 'Verify with AI' to validate)"
 
             processed.append({
                 **q,
@@ -1060,9 +1111,26 @@ def correction_and_validation_node(state: dict) -> dict:
                 "pipeline_steps": p_steps
             })
             
+        summary = {
+            "total": len(processed),
+            "validated": 0,
+            "flagged": 0,
+            "unvalidated": len(processed),
+            "gemini_enabled": False,
+            "answer_validation_enabled": False,
+            "token_usage": state.get("token_usage", {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost_usd": 0.0
+            }),
+        }
+
         return {
             "extracted_blocks": corrected_blocks or extracted_blocks,
             "processed_questions": processed,
+            "summary": summary,
+            "token_usage": summary["token_usage"],
             "flagged_words": all_flagged,
             "correction_results": [],
             "review_flags": [],
@@ -1239,7 +1307,7 @@ def correction_and_validation_node(state: dict) -> dict:
                             image_bytes = pix.tobytes("png")
                             
                             try:
-                                ext_data, p_tok, c_tok = rescan_question_vision(image_bytes, q_num)
+                                ext_data, p_tok, c_tok = rescan_question_vision(image_bytes, q_num, engine="gemini")
                                 fallback_p_tokens += p_tok
                                 fallback_c_tokens += c_tok
                                 
@@ -1586,11 +1654,8 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
     Called via API endpoint when a user explicitly clicks "Rewrite with AI".
     Sends the single question directly to the LLM for a full rewrite.
     """
-    if provider is None:
-        provider = get_correction_provider()
-    # Force gemini for on-demand single question verification, even if global verification is off
-    if provider == "none":
-        provider = "gemini"
+    if provider is None or provider == "none":
+        provider = get_on_demand_llm_provider()
 
     from ..ingest.option_answer_separator import clean_question_options_and_answer, separate_options_dict, classify_question_type
     clean_question_options_and_answer(q_data)
