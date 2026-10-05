@@ -765,8 +765,6 @@ def ocr_whole_pdf(file_path: str, engine: Optional[str] = None) -> dict:
         }
     """
     doc = pymupdf.open(file_path)
-    base_filename = os.path.splitext(os.path.basename(file_path))[0]
-    
     full_pages = []
     pages_metadata = []
     total_p_tok = 0
@@ -786,49 +784,6 @@ def ocr_whole_pdf(file_path: str, engine: Optional[str] = None) -> dict:
         from .text_cleaner import clean_indic_text
         cleaned_txt, _ = clean_indic_text(txt) if txt else ("", [])
         final_page_text = cleaned_txt or txt or ""
-
-        # EXTRACT NATIVE IMAGES/DIAGRAMS (since OCR Vision drops them)
-        images = page.get_images()
-        if images:
-            seen_rect_keys = set()
-            image_markdowns = []
-            for img_info in images:
-                xref = img_info[0]
-                rects = page.get_image_rects(xref)
-                if not rects:
-                    continue
-                for r in rects:
-                    r_key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
-                    if r_key in seen_rect_keys:
-                        continue
-                    seen_rect_keys.add(r_key)
-
-                    # Skip full-page background images
-                    if r.width > page.rect.width * 0.85 and r.height > page.rect.height * 0.5:
-                        continue
-                    # Skip tiny speckles
-                    if r.width < 3 or r.height < 3:
-                        continue
-
-                    h = r.height
-                    w = r.width
-                    # Distinguish block diagrams/figures from inline mathematical expressions
-                    is_block = (h > 75 or (h > 55 and w > 280))
-                    
-                    if is_block:
-                        strip_pix = page.get_pixmap(clip=r, dpi=200)
-                        crop_bytes = strip_pix.tobytes("png")
-                        try:
-                            img_url = upload_image_to_cloudflare(crop_bytes, filename=base_filename)
-                            img_token = _make_img_anchor(img_url, h, w, is_block, page_idx)
-                            image_markdowns.append(img_token)
-                        except Exception as e:
-                            print(f"[Whole PDF OCR] Failed to upload diagram: {e}", flush=True)
-
-            if image_markdowns:
-                # Append the diagrams to the end of the text page. 
-                # (We don't know the exact inline order from plain OCR text)
-                final_page_text += "\n\n" + "\n\n".join(image_markdowns) + "\n\n"
 
         full_pages.append(final_page_text)
         pages_metadata.append({

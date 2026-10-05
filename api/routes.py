@@ -919,187 +919,78 @@ def find_question_page(doc, question_number: int, hint_page: int = None) -> int:
     return None
 
 
-def get_question_crop_rects(doc, page_idx: int, question_number: int):
-    """Calculates tight bounding box Rects for a question, spanning to next page if needed."""
-    page = doc[page_idx]
+def get_question_crop_rect(page, question_number: int):
+    """Calculates tight bounding box Rect for the specified question on page."""
     blocks = page.get_text("blocks")
+    start_y = None
+    end_y = None
     
-    q_start_pat = re.compile(fr'^\s*{question_number}\s*[\.\):-]\s+', re.MULTILINE)
-    next_q_pat = re.compile(fr'^\s*{question_number + 1}\s*[\.\):-]\s+', re.MULTILINE)
-    ans_pat = re.compile(r'^\s*Answer[:\s]', re.MULTILINE | re.IGNORECASE)
+    q_start_pat = re.compile(fr'(?:^|\n)\s*{question_number}\s*[\.\):-]\s+')
+    next_q_pat = re.compile(fr'(?:^|\n)\s*{question_number + 1}\s*[\.\):-]\s+')
     
-    start_idx = -1
-    for i, b in enumerate(blocks):
-        if q_start_pat.search(b[4]):
-            start_idx = i
+    for b in blocks:
+        txt = b[4]
+        if start_y is None and q_start_pat.search(txt):
+            start_y = max(0, b[1] - 12)
+        elif start_y is not None and next_q_pat.search(txt):
+            end_y = b[1] - 5
             break
             
-    if start_idx == -1:
-        return [(page_idx, None)]
-        
-    q_x0 = blocks[start_idx][0]
-    ans_idx = -1
-    potential_next_q = -1
-    
-    for i in range(start_idx + 1, len(blocks)):
-        txt = blocks[i][4]
-        if ans_idx == -1 and ans_pat.search(txt):
-            ans_idx = i
-            potential_next_q = -1 
-            
-        m = next_q_pat.search(txt)
-        if m:
-            if abs(blocks[i][0] - q_x0) < 40:
-                potential_next_q = i
-                if ans_idx != -1:
-                    break
-                
-    next_q_idx = potential_next_q
-    q_blocks = blocks[start_idx : next_q_idx] if next_q_idx != -1 else blocks[start_idx :]
-    
-    valid_blocks = [b for b in q_blocks if b[6] == 1 or (b[6] == 0 and b[4].strip())]
-    if not valid_blocks:
-        return [(page_idx, None)]
-        
-    start_y = max(0, blocks[start_idx][1] - 12)
-    next_q_y0 = blocks[next_q_idx][1] if next_q_idx != -1 else None
-    
-    min_x = min(b[0] for b in valid_blocks)
-    max_x = max(b[2] for b in valid_blocks)
-    max_y = max(b[3] for b in valid_blocks)
-    
-    while True:
-        expanded = False
-        for p in page.get_drawings():
-            r = p["rect"]
-            if r.height < page.rect.height * 0.8:
-                if start_y <= r.y0 <= max_y + 30:
-                    if r.y1 > max_y: max_y = r.y1; expanded = True
-                    if r.x0 < min_x: min_x = r.x0; expanded = True
-                    if r.x1 > max_x: max_x = r.x1; expanded = True
-        if not expanded:
-            break
-            
-    results = []
-    
-    if next_q_y0 is not None:
-        end_y = max(max_y + 10, next_q_y0 - 5)
-        crop_x0 = max(0, min_x - 15)
-        crop_x1 = min(page.rect.width, max_x + 15)
-        if crop_x1 <= crop_x0: crop_x0, crop_x1 = 0, page.rect.width
-        results.append((page_idx, pymupdf.Rect(crop_x0, start_y, crop_x1, end_y)))
-        return results
-    else:
-        # Question likely continues on the next page; tightly crop this page
-        end_y = max_y + 15
-        crop_x0 = max(0, min_x - 15)
-        crop_x1 = min(page.rect.width, max_x + 15)
-        if crop_x1 <= crop_x0: crop_x0, crop_x1 = 0, page.rect.width
-        results.append((page_idx, pymupdf.Rect(crop_x0, start_y, crop_x1, end_y)))
-        
-        # Look for the rest of the question on the next page
-        if page_idx + 1 < len(doc):
-            next_page = doc[page_idx + 1]
-            n_blocks = next_page.get_text("blocks")
-            n_next_q_y0 = None
-            
-            for b in n_blocks:
-                if next_q_pat.search(b[4]) and b[0] < next_page.rect.width * 0.4:
-                    n_next_q_y0 = b[1]
-                    break
-                    
-            n_valid = [b for b in n_blocks if b[6] == 1 or (b[6] == 0 and b[4].strip())]
-            if n_valid:
-                n_end_y = max(0, n_next_q_y0 - 5) if n_next_q_y0 is not None else max(b[3] for b in n_valid) + 15
-                
-                # Check for drawings on next page
-                n_max_y = max(b[3] for b in n_valid if b[1] < n_end_y) if any(b[1] < n_end_y for b in n_valid) else 0
-                for p in next_page.get_drawings():
-                    r = p["rect"]
-                    if r.height < next_page.rect.height * 0.8:
-                        if 0 <= r.y0 <= n_max_y + 30:
-                            if r.y1 > n_max_y: n_max_y = r.y1
-                
-                n_end_y = max(n_end_y, n_max_y + 15)
-                if n_next_q_y0 is not None:
-                    n_end_y = min(n_end_y, n_next_q_y0 - 5)
-                    
-                if n_end_y > 10:
-                    n_min_x = min(b[0] for b in n_valid if b[1] < n_end_y) if any(b[1] < n_end_y for b in n_valid) else min_x
-                    n_max_x = max(b[2] for b in n_valid if b[1] < n_end_y) if any(b[1] < n_end_y for b in n_valid) else max_x
-                    n_crop_x0 = max(0, n_min_x - 15)
-                    n_crop_x1 = min(next_page.rect.width, n_max_x + 15)
-                    if n_crop_x1 <= n_crop_x0: n_crop_x0, n_crop_x1 = 0, next_page.rect.width
-                    results.append((page_idx + 1, pymupdf.Rect(n_crop_x0, 0, n_crop_x1, n_end_y)))
-                    
-        return results
-        
-def get_stitched_question_image(doc, page_idx: int, question_number: int) -> bytes:
-    from PIL import Image
-    import io
-    rects = get_question_crop_rects(doc, page_idx, question_number)
-    images = []
-    
-    for p_idx, rect in rects:
-        page = doc[p_idx]
-        if rect:
-            pix = page.get_pixmap(clip=rect, dpi=200)
-        else:
-            pix = page.get_pixmap(dpi=200)
-        images.append(Image.open(io.BytesIO(pix.tobytes("png"))))
-        
-    if not images:
-        return b""
-        
-    if len(images) == 1:
-        img_byte_arr = io.BytesIO()
-        images[0].save(img_byte_arr, format='PNG')
-        return img_byte_arr.getvalue()
-        
-    total_height = sum(img.height for img in images)
-    max_width = max(img.width for img in images)
-    stitched = Image.new('RGB', (max_width, total_height), (255, 255, 255))
-    
-    y_offset = 0
-    for img in images:
-        stitched.paste(img, (0, y_offset))
-        y_offset += img.height
-        
-    img_byte_arr = io.BytesIO()
-    stitched.save(img_byte_arr, format='PNG')
-    return img_byte_arr.getvalue()
+    if start_y is not None:
+        if end_y is None:
+            end_y = max(start_y + 100, page.rect.height - 30)
+        return pymupdf.Rect(0, start_y, page.rect.width, end_y)
+    return None
+
 
 from fastapi.responses import Response
 
-@router.get("/jobs/{job_id}/questions/{question_number}/image")
+@router.get("/pdfs/{job_id}/questions/{question_number}/image")
 def get_question_image(
     job_id: str,
     question_number: int,
     db: Session = Depends(database.get_db)
 ):
     job = db.query(models.Job).filter(models.Job.id == job_id).first()
-    if not job or not job.file_path:
-        raise HTTPException(status_code=404, detail="Job or PDF not found")
-        
+    if not job or not job.result_json:
+        raise HTTPException(status_code=404, detail="Job or result not found")
+
+    file_path = get_job_file_path(job)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="PDF file not found")
+
+    result_obj = schemas.PDFResult.model_validate_json(job.result_json)
+    target_q_idx = -1
+    for i, q in enumerate(result_obj.questions):
+        if q.question_number == question_number:
+            target_q_idx = i
+            break
+
+    if target_q_idx == -1:
+        raise HTTPException(status_code=404, detail="Question not found")
+
     try:
-        doc = pymupdf.open(job.file_path)
-        hint_page = None
-        if job.result_json:
-            res = schemas.PDFResult.model_validate_json(job.result_json)
-            q_hint = next((q for q in res.questions if q.question_number == question_number), None)
-            if q_hint:
-                hint_page = q_hint.page_number
-                
-        target_page_idx = find_question_page(doc, question_number, hint_page)
-        if target_page_idx is None:
-            raise HTTPException(status_code=404, detail="Could not find question page")
-            
-        image_bytes = get_stitched_question_image(doc, target_page_idx, question_number)
-        return Response(content=image_bytes, media_type="image/png")
-    except HTTPException:
-        raise
+        doc = pymupdf.open(file_path)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to open PDF: {e}")
+        
+    hint_page = getattr(result_obj.questions[target_q_idx], "page_number", None)
+    target_page_idx = find_question_page(doc, question_number, hint_page)
+                
+    if target_page_idx is None:
+        raise HTTPException(status_code=404, detail="Could not find Question in PDF pages")
+
+    try:
+        page = doc[target_page_idx]
+        crop_rect = get_question_crop_rect(page, question_number)
+        if crop_rect:
+            pix = page.get_pixmap(clip=crop_rect, dpi=200)
+        else:
+            pix = page.get_pixmap(dpi=200)
+        image_bytes = pix.tobytes("png")
+        return Response(content=image_bytes, media_type="image/png")
+    finally:
+        doc.close()
 
 @router.post("/pdfs/{job_id}/rescan/{question_number}", response_model=schemas.QuestionResult)
 def rescan_question(
@@ -1158,10 +1049,43 @@ def rescan_question(
 
     # 3. Crop question region (or full page if crop rect not found) and send to Vision/Tesseract
     try:
-        image_bytes = get_stitched_question_image(doc, target_page_idx, question_number)
+        page = doc[target_page_idx]
+        crop_rect = get_question_crop_rect(page, question_number)
+        if crop_rect:
+            pix = page.get_pixmap(clip=crop_rect, dpi=200)
+        else:
+            pix = page.get_pixmap(dpi=200)
+        image_bytes = pix.tobytes("png")
         
         extracted_data, p_tok, c_tok = rescan_question_vision(image_bytes, question_number, engine=engine)
         extracted_data["page_number"] = target_page_idx
+        
+        # Preserve original Image tokens (Diagrams) that Gemini Vision OCR cannot output natively
+        old_q = result_obj.questions[target_q_idx]
+        old_stem = getattr(old_q, "stem", "") or ""
+        img_tokens = re.findall(r'\{\{IMG(?:_BLOCK)?:[^\}]+\}\}', old_stem)
+        if img_tokens and "stem" in extracted_data:
+            extracted_data["stem"] += "\n" + "\n".join(img_tokens)
+            
+        old_opts = getattr(old_q, "options", {}) or {}
+        if isinstance(old_opts, dict):
+            for opt_key, opt_val in old_opts.items():
+                if not isinstance(opt_val, str): continue
+                opt_img_tokens = re.findall(r'\{\{IMG(?:_BLOCK)?:[^\}]+\}\}', opt_val)
+                if opt_img_tokens and "options" in extracted_data and isinstance(extracted_data["options"], dict):
+                    for new_k in extracted_data["options"].keys():
+                        if str(new_k).upper() == str(opt_key).upper():
+                            extracted_data["options"][new_k] += "\n" + "\n".join(opt_img_tokens)
+
+        old_ans = getattr(old_q, "answer_text", "") or ""
+        ans_img_tokens = re.findall(r'\{\{IMG(?:_BLOCK)?:[^\}]+\}\}', old_ans)
+        if ans_img_tokens:
+            extracted_data["answer_text"] = extracted_data.get("answer_text", "") + "\n" + "\n".join(ans_img_tokens)
+
+        old_exp = getattr(old_q, "explanation", "") or ""
+        exp_img_tokens = re.findall(r'\{\{IMG(?:_BLOCK)?:[^\}]+\}\}', old_exp)
+        if exp_img_tokens:
+            extracted_data["explanation"] = extracted_data.get("explanation", "") + "\n" + "\n".join(exp_img_tokens)
         
         # Merge with existing marked answer if missing
         if not extracted_data.get("marked_answer"):
@@ -1291,8 +1215,6 @@ async def fix_question_with_ai_endpoint(
                             )
                             q["explanation"] = corrected_explanation or None
                             q["answer_text"] = corrected_explanation or None
-                            if "needs_gemini_ocr" in result:
-                                q["needs_gemini_ocr"] = result["needs_gemini_ocr"]
                             q["token_usage"] = tu
                             q["pipeline_steps"] = {
                                 **(q.get("pipeline_steps") or {}),
