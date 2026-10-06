@@ -1858,7 +1858,7 @@ Output ONLY a valid JSON object exactly matching this schema, with no markdown c
                         }
                     ],
                     temperature=0.1,
-                    max_tokens=600,
+                    max_tokens=2000,
                     response_format={"type": "json_object"}
                 )
                 resp_text = chat_completion.choices[0].message.content

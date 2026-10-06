@@ -3315,16 +3315,18 @@ export default function Home() {
                 {/* Descriptive: Question Parts Box */}
                 {(() => {
                   let rawSub = selectedQuestion.sub_parts;
+                  const isExplicitSubquestions = String(selectedQuestion.question_type).toLowerCase().trim() === 'descriptive_subquestions';
                   
-                  let parts = isValidSubparts(rawSub, selectedQuestion.stem) ? rawSub : null;
+                  let parts = (isExplicitSubquestions && rawSub) ? rawSub : null;
+                  if (!parts) parts = isValidSubparts(rawSub, selectedQuestion.stem) ? rawSub : null;
                   if (!parts && selectedQuestion.options && !isMcq(selectedQuestion)) {
-                    parts = isValidSubparts(selectedQuestion.options, selectedQuestion.stem) ? selectedQuestion.options : null;
+                    parts = (isExplicitSubquestions) ? selectedQuestion.options : (isValidSubparts(selectedQuestion.options, selectedQuestion.stem) ? selectedQuestion.options : null);
                   }
                   if (!parts && selectedQuestion.stem) {
                     parts = extractSubpartsFromText(selectedQuestion.stem);
                   }
                   
-                  if (parts && isValidSubparts(parts, selectedQuestion.stem)) {
+                  if (parts && (isExplicitSubquestions || isValidSubparts(parts, selectedQuestion.stem))) {
                     return (
                       <div className="detail-box">
                         <div className="detail-box-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
