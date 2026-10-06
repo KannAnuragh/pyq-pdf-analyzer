@@ -48,14 +48,8 @@ FALSE POSITIVE AWARENESS & RELABELING:
 - CRITICAL: If a line explicitly begins with 'Answer', 'Ans', 'Solution', or 'Explanation', you MUST extract all text following it into "explanation" (and/or "marked_answer"), and NOT leave it merged inside the "stem".
 - Preserve all LaTeX math ($...$) and tokens ({{IMG:...}}, {{IMG_BLOCK:...}}, {{EQ:...}}) verbatim in their respective fields.
 
-You MUST also classify the `question_type` as one of:
-- "mcq": The question provides choices and the student must select one correct option.
-- "descriptive_subquestions": A descriptive/essay question with multiple independent parts/sub-questions (e.g. a, b, c) that all need to be answered.
-- "descriptive_single": A single descriptive/essay question without sub-parts or multiple choice options.
-
 Return ONLY valid JSON:
 {
-  "question_type": "mcq" | "descriptive_subquestions" | "descriptive_single",
   "stem": "question prompt text",
   "sub_parts": {"a": "..."} | null,
   "options": {"A": "...", "B": "..."} | {},
@@ -316,33 +310,13 @@ def _finalise(llm_result: dict, segment: "QuestionSegment") -> dict:
                 if not options or cand_k in options or cand_k.lower() in options:
                     marked_answer = cand_k
 
-    # Extract explicit question_type from LLM
-    llm_q_type = llm_result.get("question_type")
-
-    # If the LLM decided it's a descriptive_subquestions but put them in options, swap them
-    if llm_q_type == "descriptive_subquestions" and options and not sub_parts:
-        sub_parts = {k.lower(): v for k, v in options.items()}
-        options = {}
-        marked_answer = None
-    elif llm_q_type == "mcq" and sub_parts and not options:
-        options = {k.upper(): v for k, v in sub_parts.items()}
-        sub_parts = None
-
-    # Determine final question type
-    if llm_q_type in ("mcq", "descriptive_subquestions", "descriptive_single"):
-        question_type = llm_q_type
-        # Fallback sanity check in case LLM contradicted itself
-        if question_type == "mcq" and not options:
-            question_type = "descriptive_single"
-        if question_type == "descriptive_subquestions" and not sub_parts:
-            question_type = "descriptive_single"
+    # Determine question type
+    if options and len(options) >= 2:
+        question_type = "mcq"
+    elif sub_parts and isinstance(sub_parts, dict) and len(sub_parts) >= 1:
+        question_type = "descriptive_subquestions"
     else:
-        if options and len(options) >= 2:
-            question_type = "mcq"
-        elif sub_parts and isinstance(sub_parts, dict) and len(sub_parts) >= 1:
-            question_type = "descriptive_subquestions"
-        else:
-            question_type = "descriptive_single"
+        question_type = "descriptive_single"
 
     # Run lightweight LaTeX repair on all text fields
     try:

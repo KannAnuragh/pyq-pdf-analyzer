@@ -579,7 +579,7 @@ async def _call_groq_for_page(
 
     for attempt in range(MAX_RETRIES):
         try:
-            max_tok = 4096
+            max_tok = min(1200, max(400, len(questions_on_page) * 450))
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
@@ -1700,7 +1700,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.1,
-                    max_tokens=4096,
+                    max_tokens=min(1800, max(500, 400 + len(clean_exp_for_prompt) // 2)),
                 )
                 if hasattr(response, "usage") and response.usage:
                     p_tok = response.usage.prompt_tokens or 0
