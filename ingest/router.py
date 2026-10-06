@@ -76,8 +76,8 @@ KNOWN_LATEX_COMMANDS = {
 #   {{IMG:https://cdn.example.com/abc.png}}   — Cloudflare R2 image
 #   {{EQ:$\frac{1}{2}$}}                      — inline LaTeX equation
 
-_ANCHOR_IMG_RE = re.compile(r'\{\{\s*IMG\s*:\s*([^}]+)\}\}')
-_ANCHOR_EQ_RE  = re.compile(r'\{\{EQ:([^}]+)\}\}')
+_ANCHOR_IMG_RE = re.compile(r'\{\{\s*IMG\s*:\s*(https?://[^\s}]+)\}*')
+_ANCHOR_EQ_RE  = re.compile(r'\{\{EQ:([^}]+)\}*\}')
 
 
 def expand_anchor_tokens(text: str) -> str:
@@ -93,21 +93,14 @@ def expand_anchor_tokens(text: str) -> str:
 
     # Block diagram token (large images)
     text = re.sub(
-        r'\{\{\s*IMG_BLOCK\s*:\s*([^}]+)\}\}',
-        lambda m: (
-            f'<div class="my-3 flex flex-col items-center">'
-            f'<img src="{m.group(1)}" alt="diagram" '
-            f'class="max-h-64 rounded shadow-sm border border-slate-200" /></div>'
-        ),
+        r'\{\{\s*IMG_BLOCK\s*:\s*(https?://[^\s}]+)\}*',
+        r'![diagram](\1)',
         text,
     )
 
     # Inline image token
     text = _ANCHOR_IMG_RE.sub(
-        lambda m: (
-            f'<img src="{m.group(1)}" alt="math" class="inline-math-img" '
-            f'style="vertical-align:-0.38em;max-height:2.2em;display:inline-block;margin:0 1px;" />'
-        ),
+        r'![math](\1)',
         text,
     )
 

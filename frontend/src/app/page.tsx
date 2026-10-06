@@ -1011,7 +1011,8 @@ export function renderLatex(text: string): string {
   let s = text;
 
   // Convert markdown images to HTML image containers if present
-  s = s.replace(/!\[(.*?)\]\((https?:\/\/[^\s\)]+)\)/g, '<div class="my-3 flex flex-col items-center"><img src="$2" alt="$1" class="max-h-64 rounded shadow-sm border border-slate-200" /></div>');
+  s = s.replace(/!\[(diagram)\]\((https?:\/\/[^\s\)]+)\)/gi, '<div class="my-3 flex flex-col items-center"><img src="$2" alt="$1" class="max-h-64 rounded shadow-sm border border-slate-200" /></div>');
+  s = s.replace(/!\[(math)\]\((https?:\/\/[^\s\)]+)\)/gi, '<img src="$2" alt="$1" class="inline-math-img" style="vertical-align:-0.38em;max-height:2.2em;display:inline-block;margin:0 1px;" />');
 
   // Ensure Cloudflare CDN domain always points to examcdn.trogon.info
   s = s.replaceAll('exam.trogon.info', 'examcdn.trogon.info');

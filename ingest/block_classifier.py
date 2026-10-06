@@ -45,7 +45,7 @@ FALSE POSITIVE AWARENESS & RELABELING:
 - CRITICAL: Never drop or merge MCQ options just because they consist entirely of math, equations, or scientific notation (e.g. 8 × 10^{-5}).
 - "sub_parts" are ONLY for explicit sub-questions (e.g. (a) Define..., (b) Derive...). Solution steps belong in "explanation".
 - "marked_answer": Explicitly printed answer key letter only (e.g. "Ans: B"), else null. Never guess.
-- CRITICAL: If a line explicitly contains [BOLD] and the word 'Answer', 'Ans', or 'Solution', you MUST extract all text following it into "explanation" (and/or "marked_answer"), and NOT leave it merged inside the "stem".
+- CRITICAL: If a line explicitly begins with 'Answer', 'Ans', 'Solution', or 'Explanation', you MUST extract all text following it into "explanation" (and/or "marked_answer"), and NOT leave it merged inside the "stem".
 - Preserve all LaTeX math ($...$) and tokens ({{IMG:...}}, {{IMG_BLOCK:...}}, {{EQ:...}}) verbatim in their respective fields.
 
 Return ONLY valid JSON:
@@ -72,12 +72,12 @@ Block:
 def classify_block_with_llm(segment: "QuestionSegment", llm=None) -> Optional[dict]:
     """
     Classify a single QuestionSegment using deterministic regex and layout extraction.
-    Enforces strict layout rules (e.g. bold "Answer:" markers) before parsing.
+    Enforces strict layout rules (e.g. "Answer:" markers) before parsing.
     """
     if not segment or not segment.elements:
         return None
 
-    # Strict rule: If an element is BOLD and starts with Answer/Solution, split it out
+    # Strict rule: If an element starts with Answer/Solution, split it out
     # to guarantee it becomes the explanation and never contaminates the stem.
     stem_elements = []
     explanation_elements = []
@@ -85,8 +85,11 @@ def classify_block_with_llm(segment: "QuestionSegment", llm=None) -> Optional[di
 
     import re
     for e in segment.elements:
-        if not found_strict_answer and e.is_bold and re.match(r"^(?:Answer|Ans|Solution|Sol|Explanation)\b", e.text.strip(), re.IGNORECASE):
-            found_strict_answer = True
+        if not found_strict_answer:
+            txt = e.text.strip()
+            if (e.is_bold and re.match(r"^(?:Answer|Ans|Solution|Sol|Explanation)\b", txt, re.IGNORECASE)) or \
+               re.match(r"^(?:Answer|Ans|Solution|Sol|Explanation)[\s\:\.\-]+", txt, re.IGNORECASE):
+                found_strict_answer = True
         
         if found_strict_answer:
             explanation_elements.append(e)

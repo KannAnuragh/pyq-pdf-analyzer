@@ -934,23 +934,53 @@ def get_question_crop_rect(page, question_number: int, next_question_number: int
     
     # Robust regex to match '1.', '1)', '(1)', 'Question 1:', 'Q. 1', etc.
     pat_prefix = r'(?i)(?:^|\n)\s*[\*\_]*(?:Question\s*(?:No\.?)?|Q\.?\s*(?:No\.?)?|Sl\.?\s*No\.?|Problem\s*|Prob\.?\s*|ചോദ്യം\s*|പ്രശ്നം\s*)?[\(\[]?\s*'
-    pat_suffix = r'\s*[\)\]]?\s*[\*\_]*(?::\-?|[\.\):-])\s+'
+    # Suffix allows space, end of string, OR an immediate open parenthesis (e.g., '8.(i)')
+    pat_suffix = r'\s*[\)\]]?\s*[\*\_]*(?::\-?|[\.\):-])(?:\s+|$|(?=[\(\[]))'
     
     q_start_pat = re.compile(f"{pat_prefix}{question_number}{pat_suffix}")
     next_q_pat = re.compile(f"{pat_prefix}{next_question_number}{pat_suffix}") if next_question_number else None
     
+    question_blocks = []
+    found_start = False
+    
     for b in blocks:
-        txt = b[4]
-        if start_y is None and q_start_pat.search(txt):
-            start_y = max(0, b[1] - 12)
-        elif start_y is not None and next_q_pat and next_q_pat.search(txt):
-            end_y = b[1] - 5
-            break
-            
+        # block_type 0 is text, 1 is image.
+        is_text = b[6] == 0
+        txt = b[4] if is_text else ""
+        
+        if not found_start:
+            if is_text and q_start_pat.search(txt):
+                found_start = True
+                start_y = max(0, b[1] - 12)
+                question_blocks.append(b)
+        else:
+            if next_q_pat and is_text and next_q_pat.search(txt):
+                end_y = b[1] - 5
+                break
+            else:
+                question_blocks.append(b)
+                
     if start_y is not None:
         if end_y is None:
-            end_y = max(start_y + 100, page.rect.height - 30)
+            if question_blocks:
+                valid_y1s = []
+                for b in question_blocks:
+                    # Ignore headers/footers at the very bottom of the page instead of relying on gap thresholds
+                    if b[1] > page.rect.height - 70:
+                        continue
+                    valid_y1s.append(b[3])
+                
+                if valid_y1s:
+                    end_y = max(valid_y1s) + 15
+                else:
+                    end_y = max(start_y + 100, page.rect.height - 30)
+            else:
+                end_y = max(start_y + 100, page.rect.height - 30)
+        
+        # Clamp to page bounds
+        end_y = min(end_y, page.rect.height)
         return pymupdf.Rect(0, start_y, page.rect.width, end_y)
+        
     return None
 
 
