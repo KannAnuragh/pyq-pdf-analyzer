@@ -1,0 +1,157 @@
+--- PAGE 0 ---
+ 
+ELECTRIC CHARGES AND FIELDS 
+UNIT TEST 
+CBSE Class 12; Physics
+1. Three charges q, −q and q0 are placed as shown in figure. The magnitude of the 
+net force on the charge q0 at point O is [k =
+1
+4πε0]  
+ 
+ 
+[1 mark] 
+ 
+(a) 0 
+(b) 
+2kqq0
+a2 
+(c) 
+√2kqq0
+a2
+ 
+(d) 
+1
+√2 
+kqq0
+a2 
+Answer: 
+(c) 
+√2kqq0
+a2
+ 
+ 
+2. Two metallic spheres of radii a and b respectively are charged and joined by a 
+wire. The ratio of the electric field intensities at the surfaces of the spheres is: 
+      
+ 
+ 
+ 
+ 
+ 
+ 
+[1 mark] 
+(a) 
+a
+b 
+(b) 
+b
+a 
+(c) 
+a2
+b2 
+(d) 
+b2
+a2 
+Answer: 
+(b) 
+b
+a 
+
+--- PAGE 1 ---
+ 
+3. An infinite line of charge has a linear charge density of 10−7 C m
+⁄
+. What will be the 
+magnitude of the force acting on an alpha particle placed at a distance of 4 cm 
+from the line of charge? 
+ 
+ 
+ 
+ 
+ 
+ 
+[1 mark] 
+(a) 14.4 × 10−15 N 
+(b) 7.2 × 10−15 N 
+(c) 4.5 × 10−15 N 
+(d) 9 × 10−15 N 
+Answer: 
+(a) 14.4 × 10−15 N 
+ 
+4. Two parallel large thin metal sheets have equal surface densities 26.4 ×
+10−12 C m2
+⁄
+ of opposite signs. The electric fields of these sheets is: 
+[1 mark] 
+(a) 1.5 N C
+⁄ 
+(b) 1.5 × 10−16 N C
+⁄ 
+(c) 3 × 10−10 N C
+⁄ 
+(d) 3 N C
+⁄ 
+Answer: 
+(d) 3 N C
+⁄ 
+ 
+5. Assertion (A): Electric lines of force cross each other.  
+Reason (R): Electric field at this cross section point superimposes to give one 
+electric field.  
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+[1 mark] 
+(a) If both Assertion and Reason are true and Reason is correct explanation of 
+Assertion. 
+(b) If both Assertion and Reason are true but Reason is not the correct 
+explanation of Assertion.  
+(c) If Assertion is true but Reason is false. 
+(d) If both Assertion and Reason are false. 
+Answer: 
+(d) If both Assertion and Reason are false. 
+ 
+ 
+ 
+
+--- PAGE 2 ---
+ 
+6. A spherical conducting shell of inner radius r1 and outer radius r2 has a charge 'Q'. 
+A charge 'q' is placed at the centre of the shell. 
+ 
+ 
+ 
+[2 marks]  
+(a) What is the surface charge density on the (i) inner surface (ii) outer surface of 
+the shell?  
+(b) Write the expression for the electric field at a point  
+Answer: 
+(a) Let us have a conducting shell of inner radius r1 and outer radius r2  
+When it is given a charge Q. The charge spreads on its outer surface and 
+there is no charge on inner surface of shell. When a charge q is placed at the 
+centre of the shell, it induces a charge −q on inner surface 1 of the shell and 
+a charge +q on outer surface 2 of the shell. 
+ 
+(i) The surface charge density on the inner surface. 
+        σ1 = −q
+4πr1
+2 
+(ii) The surface charge density on the outer surface, 
+        σ2 = + Q + q
+4πr2
+2 
+(b) For a point lying outside the spherical shell (x > r2), electric field E is given by: 
+E = Total charge on spherical shell
+4πε0x2
+ 
+E = Q + q
+4πε0x2 
+  
+ 
+ 
+ 
