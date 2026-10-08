@@ -274,7 +274,7 @@ TASKS & RULES:
 2. QUESTION TYPE & VERIFICATION:
    - Identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks in stem like (a), (b), (i), (ii)), or "descriptive_single" (open-ended).
    - For MCQ: Independently solve, set `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Map cleaned choices in `corrected_options`.
-   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. NEVER put solution steps into `corrected_options` or `corrected_stem`.
+   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. If the original options were actually sub-questions (like (a), (b)), append them to the `corrected_stem`. NEVER put solution steps into `corrected_options` or `corrected_stem`.
 
 3. LATEX EQUATIONS & MATH:
    - Format all math, formulas, fractions, and units using valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$.
@@ -320,7 +320,7 @@ TASKS & RULES:
 2. QUESTION TYPE & VERIFICATION:
    - Identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks (a), (b) in stem), or "descriptive_single".
    - For MCQ: Independently solve, return `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Put cleaned choices in `corrected_options`.
-   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. NEVER put solution steps into `corrected_options` or `corrected_stem`.
+   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. If the provided "Options" are actually sub-questions (e.g., (a), (b)), append them to the `corrected_stem`. NEVER put solution steps into `corrected_options` or `corrected_stem`.
 
 3. LATEX EQUATIONS & MATH:
    - Enclose all math, formulas, fractions, and units in valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$.
@@ -1834,6 +1834,11 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
 
         # Respect LLM question validation: never force descriptive questions into MCQs and never label answers as subquestions
         if llm_type_str in ("descriptive_single", "descriptive_subquestions"):
+            if clean_opts and llm_type_str == "descriptive_subquestions":
+                # Recover subquestions if the LLM correctly classified but left them in options
+                sub_text = "\n".join(f"({k}) {v}" for k, v in clean_opts.items())
+                clean_stem = f"{clean_stem}\n{sub_text}".strip()
+
             clean_opts = {}
             sub_p = None
             val_ans = None
