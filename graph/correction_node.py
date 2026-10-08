@@ -265,15 +265,16 @@ class DirectPageCorrectionResponse(BaseModel):
 CORRECTION_SYSTEM_PROMPT = r"""You are an expert bilingual (English & Malayalam) exam educator and math editor reviewing question papers for students.
 
 TASKS & RULES:
-1. LANGUAGE & TYPOS:
-   - Correct all spelling, OCR errors, and flagged words in their original language without cross-translating.
+1. LANGUAGE & TYPOS (STRICT PRESERVATION):
+   - CRITICAL: DO NOT rewrite, rephrase, or summarize the text. You must preserve the original wording, tone, and sentence structure exactly.
+   - ONLY correct typos, OCR errors, spelling, and flagged words in their original language without cross-translating.
    - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Preserve authentic Malayalam.
    - For English: Fix spelling, restore truncated words ('oth'->'Both', 'll'->'All'), and punctuation.
 
 2. QUESTION TYPE & VERIFICATION:
    - Identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks in stem like (a), (b), (i), (ii)), or "descriptive_single" (open-ended).
    - For MCQ: Independently solve, set `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Map cleaned choices in `corrected_options`.
-   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) in `corrected_explanation`, not subquestions.
+   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. NEVER put solution steps into `corrected_options` or `corrected_stem`.
 
 3. LATEX EQUATIONS & MATH:
    - Format all math, formulas, fractions, and units using valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$.
@@ -285,7 +286,7 @@ TASKS & RULES:
 4. PARAGRAPH FORMATTING & READABILITY:
    - Structure dense explanations and multi-point stems with clean paragraph breaks (\n\n) or numbered steps (1., 2.).
    - Un-mash concatenated words/variables (e.g. "where $h$ is", not "whereh").
-   - Immutable image markers (e.g. [[QAI_IMAGE:...]]) must remain in exact positions.
+   - Immutable image markers (e.g. `![diagram](...)` and `![math](...)`) must remain in exact positions. Do NOT remove them!
    - If no explanation was in input, return null for `corrected_explanation`. Do not invent new solutions."""
 
 JSON_CORRECTION_SYSTEM_PROMPT = f"""{CORRECTION_SYSTEM_PROMPT}
@@ -311,14 +312,15 @@ Output valid JSON matching:
 DIRECT_CORRECTION_SYSTEM_PROMPT = r"""You are an expert bilingual (English & Malayalam) exam educator and math editor reviewing question papers for students.
 
 TASKS & RULES:
-1. LANGUAGE & TYPOS:
-   - Correct all spelling, OCR errors, and truncated words (e.g. 'oth'->'Both', 'll'->'All').
+1. LANGUAGE & TYPOS (STRICT PRESERVATION):
+   - CRITICAL: DO NOT rewrite, rephrase, or summarize the text. You must preserve the original wording, tone, and sentence structure exactly.
+   - ONLY correct typos, OCR errors, and truncated words (e.g. 'oth'->'Both', 'll'->'All').
    - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Do NOT translate between English and Malayalam.
 
 2. QUESTION TYPE & VERIFICATION:
    - Identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks (a), (b) in stem), or "descriptive_single".
    - For MCQ: Independently solve, return `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Put cleaned choices in `corrected_options`.
-   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Never treat answer steps (1., 2.) as subquestions.
+   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. NEVER put solution steps into `corrected_options` or `corrected_stem`.
 
 3. LATEX EQUATIONS & MATH:
    - Enclose all math, formulas, fractions, and units in valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$.
@@ -330,7 +332,7 @@ TASKS & RULES:
 4. PARAGRAPH FORMATTING & READABILITY:
    - Format dense text and multi-step explanations with clean paragraph breaks (\n\n) or numbered steps (1., 2.).
    - Un-mash concatenated words/variables (write "where $h$ is", not "whereh").
-   - Immutable image markers ([[QAI_IMAGE:...]]) must remain in exact positions.
+   - Immutable image markers (`![diagram](...)` and `![math](...)`) must remain in exact positions. Do NOT remove them!
    - If no explanation was in input, return null for `corrected_explanation`.
 
 Output valid JSON matching:
@@ -494,7 +496,7 @@ def _build_page_prompt(
         parts.append(f"Stem: {clean_stem}")
         sub_parts = q.get("sub_parts")
         if not sub_parts and clean_stem:
-            sub_parts = extract_subparts_from_text(clean_stem)
+            sub_parts, clean_stem = extract_subparts_from_text(clean_stem)
 
         if sub_parts and isinstance(sub_parts, dict) and len(sub_parts) > 0:
             parts.append("Sub-parts:")
@@ -574,7 +576,7 @@ async def _call_groq_for_page(
     if not prompt.strip():
         return [], 0, 0
 
-    client = AsyncGroq(api_key=api_key)
+    client = AsyncGroq(api_key=api_key, max_retries=0)
     model = GROQ_CORRECTION_MODEL
 
     for attempt in range(MAX_RETRIES):
@@ -1426,10 +1428,13 @@ def correction_and_validation_node(state: dict) -> dict:
                 # Never copy answer options into sub_parts!
                 # Only populate sub_parts if the question stem itself has genuine directive subparts
                 if q.get("stem"):
-                    from ..ingest.option_answer_separator import extract_subparts_from_text, is_valid_subparts
-                    extracted_sub = extract_subparts_from_text(q.get("stem", ""))
+                    from ..ingest.option_answer_separator import extract_subparts_from_text, is_valid_subparts, strip_subparts_text_from_stem
+                    extracted_sub, clean_stem_ret = extract_subparts_from_text(q.get("stem", ""))
+                    if extracted_sub:
+                        q["stem"] = clean_stem_ret
                     if extracted_sub and is_valid_subparts(extracted_sub):
                         q["sub_parts"] = extracted_sub
+                        q["stem"] = strip_subparts_text_from_stem(q["stem"], q["sub_parts"])
                         q["question_type"] = "descriptive_subquestions"
                     else:
                         q["sub_parts"] = None
@@ -1444,6 +1449,11 @@ def correction_and_validation_node(state: dict) -> dict:
                 elif det_sub and is_valid_subparts(det_sub):
                     q["question_type"] = "descriptive_subquestions"
                     q["sub_parts"] = det_sub
+                    
+                    from ..ingest.option_answer_separator import strip_subparts_text_from_stem
+                    if q.get("stem"):
+                        q["stem"] = strip_subparts_text_from_stem(q["stem"], q["sub_parts"])
+                        
                     q["options"] = {}
                     q["marked_answer"] = None
                     q["marked_correct_answer"] = None
@@ -1476,9 +1486,13 @@ def correction_and_validation_node(state: dict) -> dict:
                         marked = None
                         if not q.get("sub_parts") and q.get("stem"):
                             from ..ingest.option_answer_separator import extract_subparts_from_text
-                            extracted_sub = extract_subparts_from_text(q.get("stem", ""))
+                            extracted_sub, clean_stem_ret = extract_subparts_from_text(q.get("stem", ""))
+                            if extracted_sub:
+                                q["stem"] = clean_stem_ret
                             if extracted_sub and is_valid_subparts(extracted_sub):
                                 q["sub_parts"] = extracted_sub
+                                from ..ingest.option_answer_separator import strip_subparts_text_from_stem
+                                q["stem"] = strip_subparts_text_from_stem(q["stem"], q["sub_parts"])
                                 first_key = sorted(extracted_sub.keys())[0]
                                 fk_esc = re.escape(first_key)
                                 first_sub_pattern = re.compile(
@@ -1691,7 +1705,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
         if api_key and not api_key.startswith("your_"):
             try:
                 from groq import AsyncGroq
-                client = AsyncGroq(api_key=api_key)
+                client = AsyncGroq(api_key=api_key, max_retries=0)
                 response = await client.chat.completions.create(
                     model=GROQ_CORRECTION_MODEL,
                     messages=[
@@ -1827,7 +1841,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
             q_type = "descriptive_single"
             if clean_stem:
                 from ..ingest.option_answer_separator import extract_subparts_from_text, is_valid_subparts
-                extracted_sub = extract_subparts_from_text(clean_stem)
+                extracted_sub, clean_stem = extract_subparts_from_text(clean_stem)
                 if extracted_sub and is_valid_subparts(extracted_sub):
                     sub_p = extracted_sub
                     q_type = "descriptive_subquestions"
@@ -1851,7 +1865,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                 _, sub_p = classify_question_type(clean_opts, reasoning, val_ans or marked)
                 if not sub_p and clean_stem:
                     from ..ingest.option_answer_separator import extract_subparts_from_text, is_valid_subparts
-                    extracted_sub = extract_subparts_from_text(clean_stem)
+                    extracted_sub, clean_stem = extract_subparts_from_text(clean_stem)
                     if extracted_sub and is_valid_subparts(extracted_sub):
                         sub_p = extracted_sub
 

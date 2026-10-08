@@ -926,10 +926,10 @@ def find_question_page(doc, question_number: int, hint_page: int = None) -> int:
     return None
 
 
-def get_question_crop_rect(page, question_number: int, next_question_number: int = None):
+def get_question_crop_rect(page, question_number: int, next_question_number: int = None, next_question_stem: str = None, is_continuation: bool = False):
     """Calculates tight bounding box Rect for the specified question on page."""
-    blocks = page.get_text("blocks")
-    start_y = None
+    blocks = page.get_text("dict")["blocks"]
+    start_y = 0 if is_continuation else None
     end_y = None
     
     # Robust regex to match '1.', '1)', '(1)', 'Question 1:', 'Q. 1', etc.
@@ -940,40 +940,65 @@ def get_question_crop_rect(page, question_number: int, next_question_number: int
     q_start_pat = re.compile(f"{pat_prefix}{question_number}{pat_suffix}")
     next_q_pat = re.compile(f"{pat_prefix}{next_question_number}{pat_suffix}") if next_question_number else None
     
-    question_blocks = []
-    found_start = False
+    found_start = is_continuation
+    valid_y1s = []
     
     for b in blocks:
-        # block_type 0 is text, 1 is image.
-        is_text = b[6] == 0
-        txt = b[4] if is_text else ""
-        
-        if not found_start:
-            if is_text and q_start_pat.search(txt):
-                found_start = True
-                start_y = max(0, b[1] - 12)
-                question_blocks.append(b)
-        else:
-            if next_q_pat and is_text and next_q_pat.search(txt):
-                end_y = b[1] - 5
+        if b["type"] == 0:
+            for l in b["lines"]:
+                txt = "".join([s["text"] for s in l["spans"]]).strip()
+                if not txt: continue
+                
+                if not found_start:
+                    if q_start_pat.search(txt):
+                        found_start = True
+                        start_y = max(0, l["bbox"][1] - 12)
+                        valid_y1s.append(l["bbox"][3])
+                else:
+                    if next_q_pat and next_q_pat.search(txt):
+                        is_valid_next_q = True
+                        if next_question_stem and not re.search(r'(?i)(?:Question|Q\.?|Sl\.?|Prob)\s*', txt):
+                            clean_txt = re.sub(r'^\s*[\(\[]?\s*\d+\s*[\)\]]?\s*[\.\:\-]?\s*', '', txt).strip().lower()
+                            clean_stem = re.sub(r'^\s*[\(\[]?\s*\d+\s*[\)\]]?\s*[\.\:\-]?\s*', '', next_question_stem).strip().lower()
+                            # Check if the start of the line has any similarity to the next question stem
+                            if clean_stem:
+                                if clean_txt:
+                                    if clean_txt[:10] not in clean_stem and clean_stem[:10] not in clean_txt:
+                                        is_valid_next_q = False
+                                else:
+                                    # If the line is literally just the number and we have a stem, 
+                                    # we should be cautious. If the actual question has a stem on the same line,
+                                    # this is a false positive (e.g. a numbered list item in the answer).
+                                    # We will reject it to prevent early crops. It's better to over-crop than under-crop.
+                                    is_valid_next_q = False
+                        
+                        if is_valid_next_q:
+                            # Fix for multi-column layouts where the next question is physically higher than the bottom of the current question.
+                            # Also prevents cropping out the rest of the current column if a false positive occurs.
+                            if valid_y1s:
+                                end_y = max(max(valid_y1s) + 15, l["bbox"][1] - 5)
+                            else:
+                                end_y = l["bbox"][1] - 5
+                            break
+                        else:
+                            valid_y1s.append(l["bbox"][3])
+                    else:
+                        # Ignore clear footers (like standalone page numbers) at the bottom
+                        if l["bbox"][1] > page.rect.height - 70 and re.match(r'^(?:page\s*)?\d+(?:\s*of\s*\d+)?$', txt, re.IGNORECASE):
+                            continue
+                        valid_y1s.append(l["bbox"][3])
+            
+            if next_q_pat and end_y is not None:
                 break
-            else:
-                question_blocks.append(b)
+        else:
+            if found_start:
+                # Keep images
+                valid_y1s.append(b["bbox"][3])
                 
     if start_y is not None:
         if end_y is None:
-            if question_blocks:
-                valid_y1s = []
-                for b in question_blocks:
-                    # Ignore headers/footers at the very bottom of the page instead of relying on gap thresholds
-                    if b[1] > page.rect.height - 70:
-                        continue
-                    valid_y1s.append(b[3])
-                
-                if valid_y1s:
-                    end_y = max(valid_y1s) + 15
-                else:
-                    end_y = max(start_y + 100, page.rect.height - 30)
+            if valid_y1s:
+                end_y = max(valid_y1s) + 15
             else:
                 end_y = max(start_y + 100, page.rect.height - 30)
         
@@ -1022,21 +1047,61 @@ def get_question_image(
         raise HTTPException(status_code=404, detail="Could not find Question in PDF pages")
 
     next_question_number = None
+    next_question_stem = None
+    end_page_idx = target_page_idx
+    
     if target_q_idx + 1 < len(result_obj.questions):
         next_q = result_obj.questions[target_q_idx + 1]
         next_hint = getattr(next_q, "page_number", None)
         next_page_idx = find_question_page(doc, next_q.question_number, next_hint)
-        if next_page_idx == target_page_idx:
+        if next_page_idx is not None:
+            # If the next question is found, it bounds the end of our current question.
+            # It could be on the same page, or a subsequent page.
+            end_page_idx = next_page_idx
             next_question_number = next_q.question_number
+            next_question_stem = getattr(next_q, "stem", None)
 
     try:
-        page = doc[target_page_idx]
-        crop_rect = get_question_crop_rect(page, question_number, next_question_number)
-        if crop_rect:
-            pix = page.get_pixmap(clip=crop_rect, dpi=200)
+        pixmaps = []
+        # Support questions spanning multiple pages
+        for p_idx in range(target_page_idx, end_page_idx + 1):
+            page = doc[p_idx]
+            is_cont = (p_idx > target_page_idx)
+            
+            # If we are on the last page of the span, look for the next question's number to stop cropping.
+            # If we are on an intermediate page, we want the crop to extend to the very bottom of the page,
+            # so we pass None for next_question_number.
+            p_next_q_num = next_question_number if p_idx == end_page_idx else None
+            p_next_q_stem = next_question_stem if p_idx == end_page_idx else None
+            
+            crop_rect = get_question_crop_rect(page, question_number, p_next_q_num, p_next_q_stem, is_continuation=is_cont)
+            
+            if crop_rect:
+                pix = page.get_pixmap(clip=crop_rect, dpi=200)
+            else:
+                pix = page.get_pixmap(dpi=200)
+            pixmaps.append(pix)
+            
+        if len(pixmaps) == 1:
+            image_bytes = pixmaps[0].tobytes("png")
         else:
-            pix = page.get_pixmap(dpi=200)
-        image_bytes = pix.tobytes("png")
+            from PIL import Image
+            import io
+            
+            imgs = [Image.open(io.BytesIO(pix.tobytes("png"))) for pix in pixmaps]
+            total_height = sum(img.height for img in imgs)
+            max_width = max(img.width for img in imgs)
+            
+            stitched_img = Image.new('RGB', (max_width, total_height), (255, 255, 255))
+            y_offset = 0
+            for img in imgs:
+                stitched_img.paste(img, (0, y_offset))
+                y_offset += img.height
+                
+            img_byte_arr = io.BytesIO()
+            stitched_img.save(img_byte_arr, format='PNG')
+            image_bytes = img_byte_arr.getvalue()
+            
         return Response(content=image_bytes, media_type="image/png")
     finally:
         doc.close()
@@ -1098,23 +1163,53 @@ def rescan_question(
 
     # 3. Crop question region (or full page if crop rect not found) and send to Vision/Tesseract
     try:
-        page = doc[target_page_idx]
-        
-        # Determine next question number on same page to avoid cutting off early
+        end_page_idx = target_page_idx
         next_question_number = None
+        next_question_stem = None
+        
         if target_q_idx + 1 < len(result_obj.questions):
             next_q = result_obj.questions[target_q_idx + 1]
             next_hint = getattr(next_q, "page_number", None)
             next_page_idx = find_question_page(doc, next_q.question_number, next_hint)
-            if next_page_idx == target_page_idx:
+            if next_page_idx is not None:
+                end_page_idx = next_page_idx
                 next_question_number = next_q.question_number
+                next_question_stem = getattr(next_q, "stem", None)
                 
-        crop_rect = get_question_crop_rect(page, question_number, next_question_number)
-        if crop_rect:
-            pix = page.get_pixmap(clip=crop_rect, dpi=200)
+        pixmaps = []
+        for p_idx in range(target_page_idx, end_page_idx + 1):
+            page = doc[p_idx]
+            is_cont = (p_idx > target_page_idx)
+            
+            p_next_q_num = next_question_number if p_idx == end_page_idx else None
+            p_next_q_stem = next_question_stem if p_idx == end_page_idx else None
+            
+            crop_rect = get_question_crop_rect(page, question_number, p_next_q_num, p_next_q_stem, is_continuation=is_cont)
+            if crop_rect:
+                pix = page.get_pixmap(clip=crop_rect, dpi=200)
+            else:
+                pix = page.get_pixmap(dpi=200)
+            pixmaps.append(pix)
+            
+        if len(pixmaps) == 1:
+            image_bytes = pixmaps[0].tobytes("png")
         else:
-            pix = page.get_pixmap(dpi=200)
-        image_bytes = pix.tobytes("png")
+            from PIL import Image
+            import io
+            
+            imgs = [Image.open(io.BytesIO(pix.tobytes("png"))) for pix in pixmaps]
+            total_height = sum(img.height for img in imgs)
+            max_width = max(img.width for img in imgs)
+            
+            stitched_img = Image.new('RGB', (max_width, total_height), (255, 255, 255))
+            y_offset = 0
+            for img in imgs:
+                stitched_img.paste(img, (0, y_offset))
+                y_offset += img.height
+                
+            img_byte_arr = io.BytesIO()
+            stitched_img.save(img_byte_arr, format='PNG')
+            image_bytes = img_byte_arr.getvalue()
         
         extracted_data, p_tok, c_tok = rescan_question_vision(image_bytes, question_number, engine=engine)
         extracted_data["page_number"] = target_page_idx

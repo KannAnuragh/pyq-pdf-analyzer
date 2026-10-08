@@ -87,15 +87,19 @@ def get_extract_llm(provider: Optional[str] = None):
         provider = llm_st.get("provider", "none")
     
     if provider == "groq":
+        if not is_groq_enabled():
+            return None
         try:
             from langchain_groq import ChatGroq
             model_name = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
             key = (os.getenv("GROQ_API_KEY") or "").strip()
-            return ChatGroq(model=model_name, temperature=0.1, api_key=key)
+            return ChatGroq(model=model_name, temperature=0.1, api_key=key, max_retries=0)
         except Exception as e:
             print(f"Warning: Failed to initialize Groq extract_llm: {e}", flush=True)
             return None
     elif provider == "gemini":
+        if not is_gemini_enabled():
+            return None
         try:
             model_name = os.getenv("GEMINI_EXTRACT_MODEL", os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"))
             key = (os.getenv("GOOGLE_API_KEY") or "").strip()
@@ -124,15 +128,19 @@ def get_solve_llm(provider: Optional[str] = None):
         provider = llm_st.get("provider", "none")
 
     if provider == "groq":
+        if not is_groq_enabled():
+            return None
         try:
             from langchain_groq import ChatGroq
             model_name = os.getenv("GROQ_SOLVE_MODEL", os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"))
             key = (os.getenv("GROQ_API_KEY") or "").strip()
-            return ChatGroq(model=model_name, temperature=0.1, api_key=key)
+            return ChatGroq(model=model_name, temperature=0.1, api_key=key, max_retries=0)
         except Exception as e:
             print(f"Warning: Failed to initialize Groq solve_llm: {e}", flush=True)
             return None
     elif provider == "gemini":
+        if not is_gemini_enabled():
+            return None
         try:
             model_name = os.getenv("GEMINI_SOLVE_MODEL", "gemini-3.1-pro-preview")
             key = (os.getenv("GOOGLE_API_KEY") or "").strip()
@@ -301,6 +309,10 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
         content
     )
 
+    # CRITICAL FIX: Extract solution/explanation FIRST so that numbered solution steps (1., 2.) 
+    # are NEVER accidentally parsed as MCQ options (A., B.) or sub-parts.
+    content, early_marked_answer, early_explanation = parse_trailing_meta(content)
+
     # Option detection pattern:
     # 1. Parenthesized markers: (A), (a), (1) - can be preceded by start of line, newline, or whitespace
     # 2. Bare letter markers: A., B., A:- - must be at line start, newline, or after 2+ spaces / sentence punctuation
@@ -394,8 +406,8 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
 
     stem = content.strip()
     options = {}
-    marked_answer = None
-    explanation = None
+    marked_answer = early_marked_answer
+    explanation = early_explanation
 
     if len(best_sequence) >= 2:
         stem = content[:best_sequence[0][1].start()].strip()
@@ -1057,7 +1069,7 @@ def extract_node(state: GraphState) -> GraphState:
                                     elem.ocr_limit_exceeded = True
                                     print(f"[extract_node] OCR cap ({max_ocr_calls}) reached. Flagging element for review queue.")
                                     
-                    llm = _init_llm(state)
+                    llm = get_extract_llm()
                     q = classify_block_with_llm(seg, llm=llm)
                     if q:
                         if seg.section and re.search(r'(?i)answer\s*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints', seg.section):

@@ -2571,6 +2571,7 @@ export default function Home() {
                                   return (baseText
                                     .replace(/<img[^>]*alt="math"[^>]*\/?>/gi, ' [Equation] ')
                                     .replace(/<img[^>]*alt="diagram"[^>]*\/?>/gi, ' [Diagram] ')
+                                    .replace(/!\[.*?\]\([^)]+\)/g, ' [Diagram] ')
                                     .replace(/<[^>]+>/g, ' ')
                                     .trim()
                                     .slice(0, 110)) || (isMcq(q) ? '[Question Choices]' : '[Descriptive Question]');

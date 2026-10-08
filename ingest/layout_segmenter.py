@@ -92,6 +92,7 @@ class QuestionSegment:
 #   "Question 3:"   "Q.No. 3"   "ചോദ്യം 3"
 _Q_HEADER_RE = re.compile(
     r"""^
+    (?:(?:Answer\s*:?\s*|Ans\.?\s*:?\s*|Solution\s*:?\s*|ഉത്തരം\s*:?\s*))?
     (?:
         (?:Question\s*(?:No\.?)?\s*|Ques\.?\s*(?:No\.?)?\s*|Q\.?\s*(?:No\.?)?\s*|Sl\.?\s*No\.?\s*|Problem\s*|Prob\.?\s*|ചോദ്യം\s*(?:നമ്പർ)?\s*)
         (\d{1,3})
@@ -429,7 +430,16 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
             remainder = text[q_m.end():]
             gap_size = len(remainder) - len(remainder.lstrip())
             
-            if 1 <= q_num <= 300 and _is_question_boundary(elem, body_size, gap_size, prev_elem, current_segment):
+            boundary_result = _is_question_boundary(elem, body_size, gap_size, prev_elem, current_segment)
+            
+            with open("/tmp/segmenter_debug.log", "a") as f:
+                f.write(f"Testing Q{q_num}: text={repr(text[:30])}...\n")
+                if prev_elem:
+                    f.write(f"  prev_elem.text={repr(prev_elem.text)}\n")
+                    f.write(f"  prev_elem ends with colon? {prev_elem.text.strip().endswith(':')}\n")
+                f.write(f"  boundary_result={boundary_result}\n\n")
+            
+            if 1 <= q_num <= 300 and boundary_result:
                 # Start a new segment
                 if current_segment is not None and current_segment.elements:
                     segments.append(current_segment)
@@ -472,6 +482,30 @@ def _is_question_boundary(elem: LayoutElement, body_size: float, gap_size: int, 
     Return True only if structural cues support this element being a
     question-header, not just a numbered list item inside explanation text.
     """
+    y_gap = 0.0
+    is_new_page = False
+    is_continuation = False
+    if prev_elem:
+        if elem.page != prev_elem.page:
+            is_new_page = True
+        else:
+            y_gap = elem.bbox[1] - prev_elem.bbox[3]
+            
+        txt = prev_elem.text.strip()
+        if txt:
+            if txt.endswith((':', ',', '-', '∶', '::')):
+                is_continuation = True
+            else:
+                last_word = txt.split()[-1]
+                if last_word.lower() in ('the', 'an', 'and', 'or', 'of', 'in', 'to', 'for', 'with', 'is', 'are', 'ratio', 'between'):
+                    is_continuation = True
+                elif last_word == 'a':  # ONLY lowercase 'a' as an article, not uppercase 'A' (Ampere, Option A, etc)
+                    is_continuation = True
+
+    # If this is physically consecutive text AND it follows a continuation marker, it is a wrapped line.
+    if is_continuation and not is_new_page and y_gap <= (body_size * 3.5):
+        return False
+
     if elem.is_bold:
         return True
 
@@ -503,30 +537,6 @@ def _is_question_boundary(elem: LayoutElement, body_size: float, gap_size: int, 
 
     # Vertical Distance Check: If there is a noticeable vertical gap (e.g. 2 lines of space)
     # between the previous block and this block, it signifies a paragraph break.
-    y_gap = 0.0
-    is_new_page = False
-    is_continuation = False
-    if prev_elem:
-        if elem.page != prev_elem.page:
-            is_new_page = True
-        else:
-            y_gap = elem.bbox[1] - prev_elem.bbox[3]
-            
-        # If the previous text ends with punctuation or words strongly implying a wrapped sentence,
-        # we track it to prevent false positive splits on typos.
-        txt = prev_elem.text.strip()
-        if txt:
-            if txt.endswith((':', ',', '-', '∶', '::')):
-                is_continuation = True
-            else:
-                last_word = txt.split()[-1].lower()
-                if last_word in ('the', 'a', 'an', 'and', 'or', 'of', 'in', 'to', 'for', 'with', 'is', 'are', 'ratio'):
-                    is_continuation = True
-                
-    # If this is physically consecutive text AND it follows a continuation marker, it is a wrapped line.
-    if is_continuation and y_gap <= (body_size * 0.8) and not is_new_page:
-        return False
-
     if not is_indented_wrap:
         if gap_size >= 1 or gap_size == 0 or elem.x_indent < 0.25 or (0.45 < elem.x_indent < 0.60):
             return True
@@ -567,13 +577,19 @@ def _filter_valid_segments(segments: list[QuestionSegment]) -> list[QuestionSegm
     accepted = [segments[start_idx]]
     expected = segments[start_idx].q_num + 1
     prev_section = segments[start_idx].section
+    last_rejected_q_num = -999
 
     for i, seg in enumerate(segments[start_idx + 1:], start=start_idx + 1):
         q = seg.q_num
         section_changed = seg.section != prev_section and seg.section is not None
 
         is_valid = False
-        if q == expected:
+        
+        if q == last_rejected_q_num + 1:
+            # This is likely a continuation of a rejected internal numbered list (e.g., inside an answer).
+            # We must reject it even if it happens to match `expected`.
+            is_valid = False
+        elif q == expected:
             is_valid = True
             expected = q + 1
         elif section_changed and q <= expected:
@@ -602,10 +618,12 @@ def _filter_valid_segments(segments: list[QuestionSegment]) -> list[QuestionSegm
 
         if is_valid:
             accepted.append(seg)
+            last_rejected_q_num = -999
         else:
             # DISCARDED as a new question, BUT we must not lose the text!
             # It's a false positive boundary (e.g. a numbered list inside the previous question).
             # Merge its elements into the last accepted segment.
+            last_rejected_q_num = q
             if accepted:
                 accepted[-1].elements.extend(seg.elements)
 

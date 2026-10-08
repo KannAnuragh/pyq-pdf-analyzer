@@ -873,7 +873,7 @@ def strip_subquestion_labels_from_answer(text: Optional[str]) -> Optional[str]:
     return s
 
 
-def extract_subparts_from_text(text: str) -> Optional[Dict[str, str]]:
+def extract_subparts_from_text(text: str) -> Tuple[Optional[Dict[str, str]], str]:
     """
     Extracts subquestions (e.g. (a), (b), (c) or (i), (ii)) from text
     when they are not already in sub_parts or options.
@@ -882,7 +882,7 @@ def extract_subparts_from_text(text: str) -> Optional[Dict[str, str]]:
     Answers and solutions are NEVER scanned or extracted as subquestions.
     """
     if not text or not isinstance(text, str):
-        return None
+        return None, text
 
     # Strip any trailing answer or solution section before searching for subquestions!
     # Answers must NEVER be scanned or extracted as subquestions!
@@ -904,7 +904,7 @@ def extract_subparts_from_text(text: str) -> Optional[Dict[str, str]]:
     )
     raw_matches = list(subq_pattern.finditer(text))
     if len(raw_matches) < 2:
-        return None
+        return None, text
 
     valid_matches = []
     for m in raw_matches:
@@ -943,12 +943,12 @@ def extract_subparts_from_text(text: str) -> Optional[Dict[str, str]]:
         valid_matches.append((k, m))
 
     if len(valid_matches) < 2:
-        return None
+        return None, text
 
     keys = [item[0] for item in valid_matches]
     first_key = keys[0]
     if first_key not in ('a', '1', 'i'):
-        return None
+        return None, text
 
     subparts: Dict[str, str] = {}
     for i, (k, m) in enumerate(valid_matches):
@@ -963,9 +963,12 @@ def extract_subparts_from_text(text: str) -> Optional[Dict[str, str]]:
             subparts[k] = part_content
 
     if not is_valid_subparts(subparts):
-        return None
+        return None, text
 
-    return subparts
+    first_match_start = valid_matches[0][1].start()
+    clean_stem = text[:first_match_start].strip()
+
+    return subparts, clean_stem
 
 
 def clean_stem_contamination(
@@ -1322,3 +1325,24 @@ def clean_question_options_and_answer(q: Any) -> Any:
                 q.reasoning = getattr(q, "explanation", None) or f"Answer key verified and matches Option {val_ans}"
 
     return q
+
+def strip_subparts_text_from_stem(stem: str, sub_parts: Dict[str, str]) -> str:
+    """
+    Removes the text of subparts from the stem if they were duplicated by the LLM
+    without their list markers (e.g., (a), (b)).
+    """
+    if not stem or not sub_parts:
+        return stem
+        
+    clean_stem = stem
+    for k, v in sub_parts.items():
+        if len(v) > 10:
+            import re
+            v_pat = re.escape(v.strip())
+            # Replace escaped whitespace with a flexible whitespace matcher
+            v_pat = re.sub(r'\\\s+', r'\\s+', v_pat)
+            clean_stem = re.sub(v_pat, '', clean_stem, flags=re.IGNORECASE)
+            
+    # Also strip any orphaned list markers left dangling at the end
+    clean_stem = re.sub(r'(?:^|\n|\s+)\([a-zA-Z0-9]+\)[\.\:]?\s*$', '', clean_stem).strip()
+    return clean_stem

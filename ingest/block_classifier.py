@@ -45,7 +45,7 @@ FALSE POSITIVE AWARENESS & RELABELING:
 - CRITICAL: Never drop or merge MCQ options just because they consist entirely of math, equations, or scientific notation (e.g. 8 × 10^{-5}).
 - "sub_parts" are ONLY for explicit sub-questions (e.g. (a) Define..., (b) Derive...). Solution steps belong in "explanation".
 - "marked_answer": Explicitly printed answer key letter only (e.g. "Ans: B"), else null. Never guess.
-- CRITICAL: If a line explicitly begins with 'Answer', 'Ans', 'Solution', or 'Explanation', you MUST extract all text following it into "explanation" (and/or "marked_answer"), and NOT leave it merged inside the "stem".
+- CRITICAL: If a line explicitly begins with 'Answer', 'Ans', 'Solution', or 'Explanation', EVERYTHING following it belongs exclusively to the solution. NEVER extract numbered points or steps from the solution as "options" or "sub_parts". Put ALL of it into "explanation".
 - Preserve all LaTeX math ($...$) and tokens ({{IMG:...}}, {{IMG_BLOCK:...}}, {{EQ:...}}) verbatim in their respective fields.
 
 Return ONLY valid JSON:
@@ -88,7 +88,8 @@ def classify_block_with_llm(segment: "QuestionSegment", llm=None) -> Optional[di
         if not found_strict_answer:
             txt = e.text.strip()
             if (e.is_bold and re.match(r"^(?:Answer|Ans|Solution|Sol|Explanation)\b", txt, re.IGNORECASE)) or \
-               re.match(r"^(?:Answer|Ans|Solution|Sol|Explanation)[\s\:\.\-]+", txt, re.IGNORECASE):
+               re.match(r"^(?:Answer|Ans|Solution|Sol|Explanation)\s*[\:\.\-]+", txt, re.IGNORECASE) or \
+               re.match(r"^(?:Answer|Ans|Solution|Sol)\s*(?:\([a-d]\)|[a-d]\b)", txt, re.IGNORECASE):
                 found_strict_answer = True
         
         if found_strict_answer:
@@ -223,7 +224,7 @@ def _fallback_regex(segment: "QuestionSegment") -> dict:
         )
 
         if not sub_parts and stem and question_type != "mcq":
-            extracted_sub = extract_subparts_from_text(stem)
+            extracted_sub, stem = extract_subparts_from_text(stem)
             if extracted_sub and is_valid_subparts(extracted_sub):
                 sub_parts = extracted_sub
                 question_type = "descriptive_subquestions"
