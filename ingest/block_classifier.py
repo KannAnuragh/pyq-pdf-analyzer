@@ -120,13 +120,14 @@ def classify_block_with_llm(segment: "QuestionSegment", llm=None) -> Optional[di
             existing_exp = result.get("explanation")
             result["explanation"] = f"{existing_exp}\n{strict_exp_text}".strip() if existing_exp else strict_exp_text
             
-            # If marked_answer was not found, check if strict_exp_text begins with an option key:
-            if not result.get("marked_answer"):
-                ans_key_m = re.match(r"^\s*[\(\[]?\s*([a-eA-E1-4])(?:\s*[\)\]\.\:\-]|(?=\s|$))", strict_exp_text)
-                if ans_key_m:
-                    cand_k = ans_key_m.group(1).upper()
-                    result["marked_answer"] = cand_k
-                    result["marked_correct_answer"] = cand_k
+            # Check if strict_exp_text begins with an option key.
+            # We override any LLM-extracted marked_answer because the LLM didn't even see the strict Answer block
+            # and might have hallucinated the answer key from the stem (e.g. 'A.C' -> 'A').
+            ans_key_m = re.match(r"^\s*[\(\[]?\s*([a-eA-E1-4])(?:\s*[\)\]\.\:\-]|(?=\s|$))", strict_exp_text)
+            if ans_key_m:
+                cand_k = ans_key_m.group(1).upper()
+                result["marked_answer"] = cand_k
+                result["marked_correct_answer"] = cand_k
 
     if result is not None:
         return _finalise(result, segment)
