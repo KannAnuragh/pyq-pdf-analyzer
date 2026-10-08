@@ -75,6 +75,9 @@ def is_answer_validation_enabled() -> bool:
 
 def get_extract_llm(provider: Optional[str] = None):
     """Returns an extraction LLM from Groq (if enabled) or Gemini."""
+    if os.getenv("ENABLE_EXTRACTION_LLM", "false").strip().lower() not in ("true", "1", "yes"):
+        return None
+
     if not provider:
         try:
             from ..storage.config_manager import get_setting
