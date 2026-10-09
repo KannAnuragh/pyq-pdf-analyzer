@@ -1455,6 +1455,17 @@ async def verify_question_with_ai_endpoint(
                                 if not q.get("explanation"):
                                     q["explanation"] = reasoning
                                     q["answer_text"] = reasoning
+                            
+                            # Update structure if LLM verification corrected the question type
+                            if "question_type" in result:
+                                q["question_type"] = result["question_type"]
+                            if "sub_parts" in result:
+                                q["sub_parts"] = result["sub_parts"]
+                            if "corrected_options" in result:
+                                q["options"] = result["corrected_options"]
+                            if "corrected_stem" in result:
+                                q["stem"] = result["corrected_stem"]
+                                
                             q["token_usage"] = tu
                             marked = q.get("marked_correct_answer") or q.get("marked_answer") or val_ans
                             q["pipeline_steps"] = {

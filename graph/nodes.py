@@ -1105,6 +1105,7 @@ def extract_node(state: GraphState) -> GraphState:
                         q.setdefault("marked_correct_answer", None)
                         q.setdefault("explanation", None)
                         q.setdefault("answer_text", q.get("explanation"))
+                        q.setdefault("raw_text", seg.structured_text())
 
                         # Flag unreadable/garbled questions without making automatic AI Vision calls
                         if is_question_unreadable(q.get("stem", ""), q.get("options", {})):

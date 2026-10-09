@@ -5,7 +5,7 @@ import {
   UploadCloud, FileText, CheckCircle2, AlertTriangle, Trash2, ExternalLink, 
   RefreshCw, Type, X, Sparkles, ArrowLeft, Eye, Check, Clock, Cpu, ShieldCheck, 
   ChevronRight, BarChart3, HelpCircle, Layers, Sliders, Settings, Save, CheckCircle,
-  ScanLine, Database, Bot, Zap, Cloud, Copy
+  ScanLine, Database, Bot, Zap, Cloud, Copy, Download
 } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
@@ -764,6 +764,9 @@ function healSeveredAndSwallowedMath(text: string): string {
   s = s.replace(/\bgiven\s*(?:\$t\$|t)\s*hat\b/gi, 'given that');
   s = s.replace(/\bwhere\s*(?:\$t\$|t)\s*he\b/gi, 'where the');
   s = s.replace(/\bwhere\s*(?:\$i\$|i)\s*s\b/gi, 'where is');
+
+  // Heal LLM hallucinated \text}{ syntax (e.g. \frac{2\text}{ hf}{\text{m}} -> \frac{2\text{ hf}}{\text{m}})
+  s = s.replace(/\\text\}\{\s*([^{}]+)\}/g, '\\text{$1}');
 
   // Heal mangled subscript fractions like \frac{V_}{proton}{V_{alpha} = 1}
   s = s.replace(/\\frac\{([a-zA-Z0-9]+)_\}\{([a-zA-Z0-9]+)\}\{([a-zA-Z0-9]+)_?\{?([a-zA-Z0-9]+)\}?\s*=\s*([0-9a-zA-Z\.\-]+)\}?/g, '\\frac{$1_{$2}}{$3_{$4}} = $5');
@@ -1678,7 +1681,7 @@ export default function Home() {
         stem: result.corrected_stem,
         options: result.corrected_options,
         question_type: result.question_type || qData.question_type,
-        sub_parts: result.sub_parts || (isValidSubparts(qData.sub_parts) ? qData.sub_parts : null),
+        sub_parts: result.sub_parts !== undefined ? result.sub_parts : (isValidSubparts(qData.sub_parts) ? qData.sub_parts : null),
         marked_answer: markedAns,
         marked_correct_answer: markedAns,
         is_valid: isValid,
@@ -1769,6 +1772,10 @@ export default function Home() {
 
       const updatedQuestion = {
         ...qData,
+        stem: result.corrected_stem || qData.stem,
+        options: result.corrected_options || qData.options,
+        question_type: result.question_type || qData.question_type,
+        sub_parts: result.sub_parts !== undefined ? result.sub_parts : (isValidSubparts(qData.sub_parts) ? qData.sub_parts : null),
         is_valid: isValid,
         validated_answer: valAns,
         reasoning: reasoning,
@@ -2349,6 +2356,24 @@ export default function Home() {
                   </div>
 
                   <div className="hero-actions">
+                    <a
+                      href={`${API_BASE}/pdfs/${selectedJobId}/result`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn btn-secondary"
+                      style={{
+                        padding: '0.45rem 0.95rem',
+                        borderRadius: '9999px',
+                        fontSize: '0.82rem',
+                        textDecoration: 'none'
+                      }}
+                      download={`${jobResult.source_file.replace('.pdf', '')}_result.json`}
+                      title="Download parsed JSON result"
+                    >
+                      <Download size={14} color="#34d399" />
+                      <span>Download JSON</span>
+                    </a>
+
                     <a
                       href={`${API_BASE}/pdfs/${selectedJobId}/file`}
                       target="_blank"

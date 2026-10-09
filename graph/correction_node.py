@@ -182,6 +182,10 @@ def calculate_token_cost(prompt_tokens: int, completion_tokens: int, provider: s
 class QuestionCorrection(BaseModel):
     """Per-question structured response from the LLM."""
     question_number: int
+    is_too_messy: bool = Field(
+        default=False,
+        description="True if the raw text is completely garbled or missing critical math symbols, requiring a cropped image to validate."
+    )
     question_type: str = Field(
         default="mcq",
         description="The verified structural type of the question: 'mcq' | 'descriptive_single' | 'descriptive_subquestions'"
@@ -229,6 +233,10 @@ class PageCorrectionResponse(BaseModel):
 class DirectQuestionCorrection(BaseModel):
     """Per-question structured response for Direct LLM Validation mode."""
     question_number: int
+    is_too_messy: bool = Field(
+        default=False,
+        description="True if the raw text is completely garbled or missing critical math symbols, requiring a cropped image to validate."
+    )
     question_type: str = Field(
         default="mcq",
         description="'mcq' | 'descriptive_single' | 'descriptive_subquestions'"
@@ -318,7 +326,8 @@ TASKS & RULES:
    - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Do NOT translate between English and Malayalam.
 
 2. QUESTION TYPE & VERIFICATION:
-   - Identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks (a), (b) in stem), or "descriptive_single".
+   - Read the provided "Raw Text". If the text is completely garbled, unreadable, or missing critical mathematical symbols making it impossible to confidently structure and validate, set `is_too_messy`: true, return nulls for everything else, and we will request a cropped image for Vision AI verification.
+   - Otherwise, structure the question and identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks (a), (b) in stem), or "descriptive_single".
    - For MCQ: Independently solve, return `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Put cleaned choices in `corrected_options`.
    - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. If the provided "Options" are actually sub-questions (e.g., (a), (b)), append them to the `corrected_stem`. NEVER put solution steps into `corrected_options` or `corrected_stem`.
 
@@ -340,6 +349,7 @@ Output valid JSON matching:
   "corrections": [
     {
       "question_number": <int>,
+      "is_too_messy": <boolean>,
       "question_type": "mcq" | "descriptive_single" | "descriptive_subquestions",
       "corrected_stem": "<string>",
       "corrected_options": {"A": "<string>"} or {},
@@ -493,6 +503,8 @@ def _build_page_prompt(
             q["_clean_exp"] = clean_exp
 
         parts.append(f"\n--- Question {q_num} ---")
+        if q.get("raw_text"):
+            parts.append(f"Raw Text:\n{q.get('raw_text')}\n---")
         parts.append(f"Stem: {clean_stem}")
         sub_parts = q.get("sub_parts")
         if not sub_parts and clean_stem:
@@ -1414,6 +1426,20 @@ def correction_and_validation_node(state: dict) -> dict:
             q["answer_text"] = final_explanation
 
         if c:
+            if getattr(c, "is_too_messy", False):
+                q["is_garbled"] = True
+                q["ocr_ambiguous"] = True
+                q["marked_answer"] = None
+                q["marked_correct_answer"] = None
+                q["validated_answer"] = None
+                marked = None
+                final_explanation = "Text was too messy to validate automatically. Requesting image crop for Vision AI."
+                q["explanation"] = final_explanation
+                q["answer_text"] = final_explanation
+                q["question_type"] = "descriptive_single" # generic fallback
+                c = None # Skip further LLM parsing for this question
+                
+        if c:
             from ..ingest.option_answer_separator import classify_question_type, is_valid_subparts
             cur_opts = q.get("options", {})
             llm_qtype = getattr(c, "question_type", None)
@@ -1544,9 +1570,14 @@ def correction_and_validation_node(state: dict) -> dict:
         else:
             validated_answer = None
             is_valid = False
-            reasoning = final_explanation or "LLM call skipped or offline"
-            llm_status = "skipped"
-            llm_details = "LLM validation skipped / offline"
+            if q.get("is_garbled"):
+                reasoning = q.get("reasoning", "Text was too messy to validate automatically. Requesting image crop for Vision AI.")
+                llm_status = "completed"
+                llm_details = f"{provider.title()} flagged text as too messy for validation."
+            else:
+                reasoning = final_explanation or "LLM call skipped or offline"
+                llm_status = "skipped"
+                llm_details = "LLM validation skipped / offline"
         
         # Build step-by-step pipeline status
         has_math_img = "<img" in q.get("stem", "") or any("<img" in str(v) for v in q.get("options", {}).values())
@@ -1685,7 +1716,10 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
     clean_stem_for_prompt, extracted_images_stem = _mask_owned_images(stem, f"q{q_num}:stem")
     clean_exp_for_prompt, extracted_images_exp = _mask_owned_images(explanation, f"q{q_num}:explanation")
 
-    prompt = f"--- Question {q_num} ---\nStem: {clean_stem_for_prompt}\n"
+    prompt = f"--- Question {q_num} ---\n"
+    if q_data.get("raw_text"):
+        prompt += f"Raw Text:\n{q_data['raw_text']}\n---\n"
+    prompt += f"Stem: {clean_stem_for_prompt}\n"
     if options:
         prompt += "Options:\n"
         for key in sorted(options.keys()):
@@ -1769,6 +1803,29 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
         c = corrections[0]
         cost_usd = calculate_token_cost(p_tok, c_tok, provider)
 
+        if getattr(c, "is_too_messy", False):
+            msg = "Text was too messy to validate automatically. Requesting image crop for Vision AI."
+            return {
+                "success": True,
+                "is_garbled": True,
+                "ocr_ambiguous": True,
+                "question_type": "descriptive_single",
+                "corrected_stem": stem,
+                "corrected_options": options,
+                "validated_answer": None,
+                "is_valid": False,
+                "reasoning": msg,
+                "explanation": msg,
+                "answer_text": msg,
+                "corrected_explanation": msg,
+                "token_usage": {
+                    "prompt_tokens": p_tok,
+                    "completion_tokens": c_tok,
+                    "total_tokens": p_tok + c_tok,
+                    "estimated_cost_usd": cost_usd,
+                }
+            }
+
         # Clean any accidental question number prefix in stem
         clean_stem = c.corrected_stem.strip()
         clean_stem = re.sub(r'^(?:Question\s*|Q\.?\s*|ചോദ്യം\s*)\d+\s*(?::\-?|[\.\):-])\s*', '', clean_stem, flags=re.IGNORECASE)
@@ -1835,20 +1892,27 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
         # Respect LLM question validation: never force descriptive questions into MCQs and never label answers as subquestions
         if llm_type_str in ("descriptive_single", "descriptive_subquestions"):
             if clean_opts and llm_type_str == "descriptive_subquestions":
-                # Recover subquestions if the LLM correctly classified but left them in options
-                sub_text = "\n".join(f"({k}) {v}" for k, v in clean_opts.items())
-                clean_stem = f"{clean_stem}\n{sub_text}".strip()
+                # The LLM often fails to append the subquestions to the stem and instead returns them in corrected_options.
+                # If it explicitly classified them as subquestions, trust the classification and use options as subparts directly.
+                sub_p = {str(k).strip().lower(): v for k, v in clean_opts.items()}
+                clean_opts = {}
+            else:
+                clean_opts = {}
+                sub_p = None
 
-            clean_opts = {}
-            sub_p = None
             val_ans = None
             cur_marked = None
             q_type = "descriptive_single"
-            if clean_stem:
+            
+            # If sub_p is already extracted from LLM options, use it!
+            if sub_p and len(sub_p) >= 2:
+                q_type = "descriptive_subquestions"
+            elif clean_stem:
                 from ..ingest.option_answer_separator import extract_subparts_from_text, is_valid_subparts
-                extracted_sub, clean_stem = extract_subparts_from_text(clean_stem)
+                extracted_sub, clean_stem_temp = extract_subparts_from_text(clean_stem)
                 if extracted_sub and is_valid_subparts(extracted_sub):
                     sub_p = extracted_sub
+                    clean_stem = clean_stem_temp
                     q_type = "descriptive_subquestions"
         elif clean_opts and len(clean_opts) >= 2:
             det_type, det_sub = classify_question_type(clean_opts, reasoning, val_ans or marked)
@@ -1925,9 +1989,8 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                 "completion_tokens": c_tok,
                 "total_tokens": p_tok + c_tok,
                 "estimated_cost_usd": cost_usd,
-            }
+            },
+            "sub_parts": sub_p
         }
-        if sub_p:
-            res_dict["sub_parts"] = sub_p
         return res_dict
     return {"success": False, "error": "LLM failed to return a valid correction"}

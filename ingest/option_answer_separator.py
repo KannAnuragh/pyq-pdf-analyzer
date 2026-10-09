@@ -374,7 +374,7 @@ def separate_options_dict(
             extracted_ans = ans
         if exp and not extracted_exp:
             extracted_exp = exp
-    # Override extracted answer if the explanation explicitly starts with an option letter (e.g., "(C) E != 0" or "Answer: A")
+    # Extract answer if the explanation explicitly starts with an option letter (e.g., "(C) E != 0" or "Answer: A")
     if extracted_exp:
         has_multi_sub_exp = len(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', extracted_exp, re.IGNORECASE)) >= 2
         if not has_multi_sub_exp:
@@ -391,7 +391,9 @@ def separate_options_dict(
                 candidate = (explicit_match.group(1) if m1 else (m2.group(1) or m2.group(2) if m2 else m3.group(1))).upper()
                 # Only override if this candidate actually exists in the options
                 if any(k.upper() == candidate for k in clean_opts.keys()):
-                    extracted_ans = candidate
+                    # Only override if it's an explicit "Answer:" marker OR if we don't already have an answer
+                    if m1 or not extracted_ans:
+                        extracted_ans = candidate
                     # We no longer strip the prefix so that "Answer: C" remains visible in the explanation block.
 
     # If marked answer wasn't explicitly given as a letter, check if explanation/answer text
