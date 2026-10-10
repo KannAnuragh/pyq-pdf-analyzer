@@ -947,12 +947,16 @@ function cleanExplanationDisplay(text: string, markedAnswer?: string, isMcqQuest
   s = s.replace(/^(?:Solution|Explanation|Description|Sol|Exp|Hint|Answer|Ans|ഉത്തരം|വിശദീകരണം|പരിഹാരം|വിവരണം|സൂചന)\s*(?:[\*\:\-]+(?:\s*|\n|$)|(?:\n|\\n))/i, '').trim();
 
   // 2. Detect subparts in text: (b) after prior text, or presence of both (a) and (b)
-  const subsequentB = /\S+[\s\S]+?(?:^|\n|\s)(?:\(?[b-hB-H]\)?|[b-hB-H]\.|\(ii\)|\(2\))[\s\:\-\.]+/i.test(s);
-  const hasA = /(?:^|\n|\s)\(?[aA1]\)?[\s\.\:\-]+/i.test(s);
-  const hasB = /(?:^|\n|\s)(?:\(?[b-hB-H2]\)?|[b-hB-H]\.)[\s\.\:\-]+/i.test(s);
+  // Strict matching to prevent bare letters/numbers (e.g. "1 mv^2" or "and b is") from triggering subparts.
+  const subpartBRegex = /(?:^|\n|\s)(?:\([b-hB-H2]\)|[b-hB-H2]\)|[b-hB-H2]\.|\(ii\)|ii\)|ii\.)[\s\:\-]+/i;
+  const subpartARegex = /(?:^|\n|\s)(?:\([aA1]\)|[aA1]\)|[aA1]\.|\(i\)|i\)|i\.)[\s\:\-]+/i;
+  
+  const subsequentB = new RegExp(`\\S+[\\s\\S]+?${subpartBRegex.source}`, 'i').test(s);
+  const hasA = subpartARegex.test(s);
+  const hasB = subpartBRegex.test(s);
   const isMultiPart = subsequentB || (hasA && hasB);
 
-  const startsWithSubpart = /^\(?[a-dA-D1-9]\)?[\s\.\:\-]+|^\(?[ivxIVX]+\)?[\s\.\:\-]+/i.test(s);
+  const startsWithSubpart = /^(?:\([a-dA-D1-9]\)|[a-dA-D1-9]\)|[a-dA-D1-9]\.|\([ivxIVX]+\)|[ivxIVX]+\)|[ivxIVX]+\.)[\s\:\-]+/i.test(s);
 
   // 3. Auto-heal missing (a) at start of multi-part answer:
   // e.g. "Rectifier (b) Circuit diagram of full wave rectifier" -> "(a) Rectifier (b) Circuit diagram..."
@@ -1486,6 +1490,84 @@ function getQuestionPipelineSteps(q: any): Record<string, PipelineStepItem> {
       details: hasMath ? 'Math equations / OCR clips processed' : 'Text-only question (no image OCR required)'
     }
   };
+}
+
+function QuestionImageCrop({ jobId, questionNumber }: { jobId: string | null, questionNumber: number }) {
+  const [partsCount, setPartsCount] = useState<number>(0);
+  const [currentPart, setCurrentPart] = useState<number>(0);
+
+  useEffect(() => {
+    let active = true;
+    if (!jobId) return;
+    fetch(`${API_BASE}/pdfs/${jobId}/questions/${questionNumber}/image_info`)
+      .then(res => res.json())
+      .then(data => {
+        if (active && data && typeof data.parts === 'number') {
+          setPartsCount(data.parts);
+          setCurrentPart(0);
+        }
+      })
+      .catch(err => console.error("Failed to fetch image info:", err));
+    return () => { active = false; };
+  }, [jobId, questionNumber]);
+
+  if (!jobId) return null;
+
+  return (
+    <div className="detail-box" style={{ marginBottom: '1.25rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <h4 style={{ margin: 0, fontSize: '0.95rem', color: '#f1f5f9' }}>Original Question Crop</h4>
+        {partsCount > 1 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <button 
+              onClick={() => setCurrentPart(p => Math.max(0, p - 1))}
+              disabled={currentPart === 0}
+              style={{
+                background: currentPart === 0 ? '#374151' : '#4f46e5',
+                color: currentPart === 0 ? '#9ca3af' : 'white',
+                border: 'none',
+                borderRadius: '4px',
+                padding: '4px 10px',
+                cursor: currentPart === 0 ? 'not-allowed' : 'pointer',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                transition: 'background 0.2s'
+              }}
+            >
+              Previous Page
+            </button>
+            <span style={{ fontSize: '0.85rem', color: '#cbd5e1', fontWeight: 500 }}>
+              Page {currentPart + 1} of {partsCount}
+            </span>
+            <button 
+              onClick={() => setCurrentPart(p => Math.min(partsCount - 1, p + 1))}
+              disabled={currentPart === partsCount - 1}
+              style={{
+                background: currentPart === partsCount - 1 ? '#374151' : '#4f46e5',
+                color: currentPart === partsCount - 1 ? '#9ca3af' : 'white',
+                border: 'none',
+                borderRadius: '4px',
+                padding: '4px 10px',
+                cursor: currentPart === partsCount - 1 ? 'not-allowed' : 'pointer',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                transition: 'background 0.2s'
+              }}
+            >
+              Next Page
+            </button>
+          </div>
+        )}
+      </div>
+      <div style={{ background: '#111827', borderRadius: '6px', padding: '1rem', border: '1px solid #374151', display: 'flex', justifyContent: 'center' }}>
+        <img 
+          src={`${API_BASE}/pdfs/${jobId}/questions/${questionNumber}/image${partsCount > 1 ? `?part=${currentPart}` : ''}`} 
+          alt={`Question ${questionNumber} crop`}
+          style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain' }}
+        />
+      </div>
+    </div>
+  );
 }
 
 export default function Home() {
@@ -3052,16 +3134,7 @@ export default function Home() {
             )}
 
             {/* Original Question Image Crop */}
-            <div className="detail-box" style={{ marginBottom: '1.25rem' }}>
-              <h4 style={{ margin: '0 0 1rem 0', fontSize: '0.95rem', color: '#f1f5f9' }}>Original Question Crop</h4>
-              <div style={{ background: '#111827', borderRadius: '6px', padding: '1rem', border: '1px solid #374151', display: 'flex', justifyContent: 'center' }}>
-                <img 
-                  src={`${API_BASE}/pdfs/${selectedJobId}/questions/${selectedQuestion.question_number}/image`} 
-                  alt={`Question ${selectedQuestion.question_number}`}
-                  style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain' }}
-                />
-              </div>
-            </div>
+            <QuestionImageCrop jobId={selectedJobId} questionNumber={selectedQuestion.question_number} />
 
             {/* Question Stem Box (Hidden if question only has sub-questions, to avoid showing 2 times) */}
             {(() => {

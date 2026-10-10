@@ -274,7 +274,7 @@ CORRECTION_SYSTEM_PROMPT = r"""You are an expert bilingual (English & Malayalam)
 
 TASKS & RULES:
 1. LANGUAGE & TYPOS (STRICT PRESERVATION):
-   - CRITICAL: DO NOT rewrite, rephrase, or summarize the text. You must preserve the original wording, tone, and sentence structure exactly.
+   - CRITICAL: DO NOT rewrite, rephrase, summarize, or generate any new content. You must preserve the original wording exactly as provided. DO NOT add conversational pleasantries.
    - ONLY correct typos, OCR errors, spelling, and flagged words in their original language without cross-translating.
    - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Preserve authentic Malayalam.
    - For English: Fix spelling, restore truncated words ('oth'->'Both', 'll'->'All'), and punctuation.
@@ -282,7 +282,7 @@ TASKS & RULES:
 2. QUESTION TYPE & VERIFICATION:
    - Identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks in stem like (a), (b), (i), (ii)), or "descriptive_single" (open-ended).
    - For MCQ: Independently solve, set `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Map cleaned choices in `corrected_options`.
-   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. If the original options were actually sub-questions (like (a), (b)), append them to the `corrected_stem`. NEVER put solution steps into `corrected_options` or `corrected_stem`.
+   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. If "Sub-parts" are provided in the input, DO NOT duplicate them into the `corrected_stem`; the `corrected_stem` must only contain the introductory text. NEVER put solution steps into `corrected_options` or `corrected_stem`.
 
 3. LATEX EQUATIONS & MATH:
    - Format all math, formulas, fractions, and units using valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$.
@@ -321,7 +321,7 @@ DIRECT_CORRECTION_SYSTEM_PROMPT = r"""You are an expert bilingual (English & Mal
 
 TASKS & RULES:
 1. LANGUAGE & TYPOS (STRICT PRESERVATION):
-   - CRITICAL: DO NOT rewrite, rephrase, or summarize the text. You must preserve the original wording, tone, and sentence structure exactly.
+   - CRITICAL: DO NOT rewrite, rephrase, summarize, or generate any new content. You must preserve the original wording exactly as provided. DO NOT add conversational pleasantries.
    - ONLY correct typos, OCR errors, and truncated words (e.g. 'oth'->'Both', 'll'->'All').
    - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Do NOT translate between English and Malayalam.
 
@@ -329,7 +329,7 @@ TASKS & RULES:
    - Read the provided "Raw Text". If the text is completely garbled, unreadable, or missing critical mathematical symbols making it impossible to confidently structure and validate, set `is_too_messy`: true, return nulls for everything else, and we will request a cropped image for Vision AI verification.
    - Otherwise, structure the question and identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks (a), (b) in stem), or "descriptive_single".
    - For MCQ: Independently solve, return `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Put cleaned choices in `corrected_options`.
-   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. If the provided "Options" are actually sub-questions (e.g., (a), (b)), append them to the `corrected_stem`. NEVER put solution steps into `corrected_options` or `corrected_stem`.
+   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. If "Sub-parts" are provided in the input, DO NOT duplicate them into the `corrected_stem`; the `corrected_stem` must only contain the introductory text. NEVER put solution steps into `corrected_options` or `corrected_stem`.
 
 3. LATEX EQUATIONS & MATH:
    - Enclose all math, formulas, fractions, and units in valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$.
@@ -1724,6 +1724,13 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
         prompt += "Options:\n"
         for key in sorted(options.keys()):
             prompt += f"  ({key}) {options[key]}\n"
+    
+    sub_parts = q_data.get("sub_parts")
+    if sub_parts and isinstance(sub_parts, dict):
+        prompt += "Sub-parts:\n"
+        for key in sorted(sub_parts.keys()):
+            prompt += f"  ({key.lower()}) {sub_parts[key]}\n"
+            
     prompt += f"Marked correct answer: {marked}\n"
     if clean_exp_for_prompt:
         prompt += f"Explanation from PDF: {clean_exp_for_prompt}\n"
@@ -1938,6 +1945,14 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                     if extracted_sub and is_valid_subparts(extracted_sub):
                         sub_p = extracted_sub
 
+        # Restore sub_parts if the LLM successfully followed instructions and didn't return them in the stem or options
+        orig_sub_parts = q_data.get("sub_parts")
+        if not sub_p and orig_sub_parts and isinstance(orig_sub_parts, dict):
+            sub_p = orig_sub_parts
+            if q_type != "mcq":
+                q_type = "descriptive_subquestions"
+
+
         if q_type == "mcq" and clean_opts:
             final_opts = clean_opts
             cur_marked = marked if marked != "Unknown" else val_ans
@@ -1948,6 +1963,19 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
             val_ans = None
             cur_marked = None
             is_valid = True
+            
+            # Deduplicate subparts from stem to avoid double-printing if LLM returned them in both
+            for sp_v in sub_p.values():
+                v_clean = sp_v.strip()
+                if v_clean and len(v_clean) > 3:
+                    if v_clean in clean_stem:
+                        clean_stem = clean_stem.replace(v_clean, "")
+            clean_stem = clean_stem.strip()
+            while True:
+                prev_stem = clean_stem
+                clean_stem = re.sub(r'(?i)(?:^|\n|\s+)(?:\([a-h]\)|\[[a-h]\]|[a-h][\.\)\:\-])\s*$', '', clean_stem).strip()
+                if clean_stem == prev_stem:
+                    break
             if not reasoning:
                 reasoning = "Descriptive question — solution verified"
             if clean_stem:

@@ -1004,6 +1004,10 @@ def get_question_crop_rect(page, question_number: int, next_question_number: int
         
         # Clamp to page bounds
         end_y = min(end_y, page.rect.height)
+        
+        if is_continuation and not valid_y1s:
+            return None
+            
         return pymupdf.Rect(0, start_y, page.rect.width, end_y)
         
     return None
@@ -1015,6 +1019,7 @@ from fastapi.responses import Response
 def get_question_image(
     job_id: str,
     question_number: int,
+    part: Optional[int] = Query(None),
     db: Session = Depends(database.get_db)
 ):
     job = db.query(models.Job).filter(models.Job.id == job_id).first()
@@ -1061,6 +1066,16 @@ def get_question_image(
             next_question_number = next_q.question_number
             next_question_stem = getattr(next_q, "stem", None)
 
+    if end_page_idx == target_page_idx and target_q_idx + 1 == len(result_obj.questions):
+        # Last question in the parsed results. It might spill over!
+        next_p_idx = find_question_page(doc, question_number + 1, target_page_idx)
+        if next_p_idx is not None:
+            end_page_idx = next_p_idx
+            next_question_number = question_number + 1
+        else:
+            # If we don't find the next question, assume it might span up to 2 more pages
+            end_page_idx = min(len(doc) - 1, target_page_idx + 2)
+
     try:
         pixmaps = []
         # Support questions spanning multiple pages
@@ -1076,13 +1091,20 @@ def get_question_image(
             
             crop_rect = get_question_crop_rect(page, question_number, p_next_q_num, p_next_q_stem, is_continuation=is_cont)
             
+            if is_cont and crop_rect is None:
+                continue
+                
             if crop_rect:
                 pix = page.get_pixmap(clip=crop_rect, dpi=200)
             else:
                 pix = page.get_pixmap(dpi=200)
             pixmaps.append(pix)
             
-        if len(pixmaps) == 1:
+        if part is not None:
+            if part < 0 or part >= len(pixmaps):
+                raise HTTPException(status_code=404, detail="Image part not found")
+            image_bytes = pixmaps[part].tobytes("png")
+        elif len(pixmaps) == 1:
             image_bytes = pixmaps[0].tobytes("png")
         else:
             from PIL import Image
@@ -1102,7 +1124,79 @@ def get_question_image(
             stitched_img.save(img_byte_arr, format='PNG')
             image_bytes = img_byte_arr.getvalue()
             
-        return Response(content=image_bytes, media_type="image/png")
+        response = Response(content=image_bytes, media_type="image/png")
+        response.headers["X-Image-Parts-Count"] = str(len(pixmaps))
+        return response
+    finally:
+        doc.close()
+
+@router.get("/pdfs/{job_id}/questions/{question_number}/image_info")
+def get_question_image_info(
+    job_id: str,
+    question_number: int,
+    db: Session = Depends(database.get_db)
+):
+    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not job or not job.result_json:
+        raise HTTPException(status_code=404, detail="Job or result not found")
+
+    file_path = get_job_file_path(job)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="PDF file not found")
+
+    result_obj = schemas.PDFResult.model_validate_json(job.result_json)
+    target_q_idx = -1
+    for i, q in enumerate(result_obj.questions):
+        if q.question_number == question_number:
+            target_q_idx = i
+            break
+
+    if target_q_idx == -1:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    try:
+        doc = pymupdf.open(file_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to open PDF: {e}")
+        
+    try:
+        hint_page = getattr(result_obj.questions[target_q_idx], "page_number", None)
+        target_page_idx = find_question_page(doc, question_number, hint_page)
+                    
+        if target_page_idx is None:
+            return {"parts": 0}
+
+        end_page_idx = target_page_idx
+        next_question_number = None
+        next_question_stem = None
+        
+        if target_q_idx + 1 < len(result_obj.questions):
+            next_q = result_obj.questions[target_q_idx + 1]
+            next_hint = getattr(next_q, "page_number", None)
+            next_page_idx = find_question_page(doc, next_q.question_number, next_hint)
+            if next_page_idx is not None:
+                end_page_idx = next_page_idx
+                next_question_number = next_q.question_number
+                next_question_stem = getattr(next_q, "stem", None)
+        
+        if end_page_idx == target_page_idx and target_q_idx + 1 == len(result_obj.questions):
+            next_p_idx = find_question_page(doc, question_number + 1, target_page_idx)
+            if next_p_idx is not None:
+                end_page_idx = next_p_idx
+                next_question_number = question_number + 1
+            else:
+                end_page_idx = min(len(doc) - 1, target_page_idx + 2)
+
+        valid_parts = 1
+        for p_idx in range(target_page_idx + 1, end_page_idx + 1):
+            page = doc[p_idx]
+            p_next_q_num = next_question_number if p_idx == end_page_idx else None
+            p_next_q_stem = next_question_stem if p_idx == end_page_idx else None
+            crop_rect = get_question_crop_rect(page, question_number, p_next_q_num, p_next_q_stem, is_continuation=True)
+            if crop_rect is not None:
+                valid_parts += 1
+
+        return {"parts": valid_parts}
     finally:
         doc.close()
 
@@ -1461,10 +1555,6 @@ async def verify_question_with_ai_endpoint(
                                 q["question_type"] = result["question_type"]
                             if "sub_parts" in result:
                                 q["sub_parts"] = result["sub_parts"]
-                            if "corrected_options" in result:
-                                q["options"] = result["corrected_options"]
-                            if "corrected_stem" in result:
-                                q["stem"] = result["corrected_stem"]
                                 
                             q["token_usage"] = tu
                             marked = q.get("marked_correct_answer") or q.get("marked_answer") or val_ans
