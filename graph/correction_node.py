@@ -70,10 +70,10 @@ def is_answer_validation_enabled() -> bool:
     """Checks whether AI answer validation is enabled."""
     try:
         from ..storage.config_manager import get_setting
-        return bool(get_setting("validation_enabled", True))
+        return bool(get_setting("validation_enabled", False))
     except Exception:
         pass
-    val = os.getenv("ENABLE_ANSWER_VALIDATION", os.getenv("ENABLE_VALIDATION", "true")).lower()
+    val = os.getenv("ENABLE_ANSWER_VALIDATION", os.getenv("ENABLE_VALIDATION", "false")).lower()
     return val in ("true", "1", "yes")
 
 
@@ -1081,12 +1081,14 @@ def correction_and_validation_node(state: dict) -> dict:
             cache_status = "completed" if word_corr_on else "skipped"
             cache_details = "Word correction disabled in .env (ENABLE_WORD_CORRECTION=false)" if not word_corr_on else "Passed dictionary & font cache validation"
 
+            ext_dur = q.get("extraction_time_seconds") or (q.get("step_times") or {}).get("extraction")
             p_steps = {
                 "scanned": {
                     "name": "scanned",
                     "label": "Scanned",
                     "status": "completed",
-                    "details": f"Extracted from PDF Page {(q.get('page_number') or 0) + 1}"
+                    "duration_seconds": ext_dur,
+                    "details": f"Extracted from PDF Page {(q.get('page_number') or 0) + 1}" + (f" ({ext_dur}s)" if ext_dur is not None else "")
                 },
                 "checked_with_caches": {
                     "name": "checked_with_caches",
@@ -1600,12 +1602,17 @@ def correction_and_validation_node(state: dict) -> dict:
             llm_status = "completed"
             llm_details = f"Re-verified after OCR: {ocr_solved.get('reasoning', '')}"
 
+        ext_dur = q.get("extraction_time_seconds") or (q.get("step_times") or {}).get("extraction")
+        val_dur = q.get("validation_time_seconds") or (q.get("step_times") or {}).get("validation")
+        ocr_dur = q.get("ocr_scan_time_seconds") or (q.get("step_times") or {}).get("ocr_scan")
+
         pipeline_steps = {
             "scanned": {
                 "name": "scanned",
                 "label": "Scanned",
                 "status": "completed",
-                "details": f"Extracted from PDF Page {(q.get('page_number') or 0) + 1}"
+                "duration_seconds": ext_dur,
+                "details": f"Extracted from PDF Page {(q.get('page_number') or 0) + 1}" + (f" ({ext_dur}s)" if ext_dur is not None else "")
             },
             "checked_with_caches": {
                 "name": "checked_with_caches",
@@ -1617,12 +1624,14 @@ def correction_and_validation_node(state: dict) -> dict:
                 "name": "send_errors_to_llms",
                 "label": "Send Errors to LLMs",
                 "status": llm_status,
-                "details": llm_details
+                "duration_seconds": val_dur,
+                "details": llm_details + (f" ({val_dur}s)" if val_dur is not None and not re.search(r'\([\d\.]+s\)', llm_details) else "")
             },
             "ocr_scanned": {
                 "name": "ocr_scanned",
                 "label": "OCR Scanned",
                 "status": "completed" if (has_math_img or has_latex or ocr_solved) else "not_needed",
+                "duration_seconds": ocr_dur,
                 "details": "Dynamic OCR fallback triggered by LLM" if ocr_solved else ("Math equation clips OCR parsed to LaTeX" if has_math_img else ("Math expressions parsed" if has_latex else "Text-only question (no image OCR needed)"))
             }
         }
@@ -1638,6 +1647,15 @@ def correction_and_validation_node(state: dict) -> dict:
             "answer_text": final_explanation,
             "reasoning": reasoning,
             "used_web_search": False,
+            "extraction_time_seconds": ext_dur,
+            "validation_time_seconds": val_dur,
+            "ocr_scan_time_seconds": ocr_dur,
+            "step_times": {
+                **(q.get("step_times") or {}),
+                **({"extraction": ext_dur} if ext_dur is not None else {}),
+                **({"validation": val_dur} if val_dur is not None else {}),
+                **({"ocr_scan": ocr_dur} if ocr_dur is not None else {}),
+            },
             "pipeline_steps": pipeline_steps
         }
         clean_question_options_and_answer(p_item)

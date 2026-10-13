@@ -29,6 +29,12 @@ class QuestionResult(BaseModel):
     is_garbled: bool = False
     question_image_path: Optional[str] = None
 
+    # Processing time fields (in seconds)
+    extraction_time_seconds: Optional[float] = None
+    validation_time_seconds: Optional[float] = None
+    ocr_scan_time_seconds: Optional[float] = None
+    step_times: Optional[Dict[str, float]] = None
+
 class TokenUsage(BaseModel):
     model_config = ConfigDict(extra="allow")
     prompt_tokens: int = 0
@@ -45,6 +51,7 @@ class Summary(BaseModel):
     unvalidated: int = 0
     gemini_enabled: bool = True
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    processing_time_seconds: Optional[float] = None
 
 class PDFResult(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -53,6 +60,7 @@ class PDFResult(BaseModel):
     processed_at: datetime
     questions: List[QuestionResult] = Field(default_factory=list)
     summary: Summary = Field(default_factory=Summary)
+    processing_time_seconds: Optional[float] = None
 
 class JobStatusResponse(BaseModel):
     job_id: str
@@ -61,6 +69,7 @@ class JobStatusResponse(BaseModel):
     created_at: datetime
     has_file: bool = True
     question_count: Optional[int] = None
+    processing_time_seconds: Optional[float] = None
 
 class JobResultResponse(BaseModel):
     job_id: str

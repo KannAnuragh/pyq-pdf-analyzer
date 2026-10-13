@@ -67,9 +67,9 @@ def is_answer_validation_enabled() -> bool:
     """Checks whether AI answer solving & verification is enabled via runtime configuration or env."""
     try:
         from ..storage.config_manager import get_setting
-        return bool(get_setting("validation_enabled", True))
+        return bool(get_setting("validation_enabled", False))
     except Exception:
-        val = os.getenv("ENABLE_ANSWER_VALIDATION", os.getenv("ENABLE_VALIDATION", "true"))
+        val = os.getenv("ENABLE_ANSWER_VALIDATION", os.getenv("ENABLE_VALIDATION", "false"))
         return val.strip().lower() in ("true", "1", "yes")
 
 
@@ -1034,6 +1034,7 @@ def extract_node(state: GraphState) -> GraphState:
                     and os.getenv("ENABLE_MATH_OCR", "false").lower() in ("true", "1")
                 )
                 for seg in segments:
+                    seg_start = time.perf_counter()
                     had_gemini_ocr_call = False
                     # Perform Structural OCR on flagged elements if enabled (Math OCR in equations)
                     if doc and enable_structural_ocr:
@@ -1111,6 +1112,12 @@ def extract_node(state: GraphState) -> GraphState:
                         if is_question_unreadable(q.get("stem", ""), q.get("options", {})):
                             q["ocr_ambiguous"] = True
                             q["is_garbled"] = True
+
+                        seg_dur = round(time.perf_counter() - seg_start, 2)
+                        q["extraction_time_seconds"] = seg_dur
+                        if "step_times" not in q or not isinstance(q["step_times"], dict):
+                            q["step_times"] = {}
+                        q["step_times"]["extraction"] = seg_dur
                         
                         # Pass review flag to the parsed question if any element triggered it
                         has_uncertain = any(getattr(e, "ocr_uncertain", False) for e in seg.elements)
@@ -1187,13 +1194,20 @@ def extract_node(state: GraphState) -> GraphState:
 
     # --- Existing regex / LLM fallback path (unchanged) ---
     print("[extract_node] Using regex/LLM path.", flush=True)
+    t_regex_start = time.perf_counter()
     extracted = parse_questions_from_text(raw_text, state["token_usage"])
+    t_regex_elapsed = time.perf_counter() - t_regex_start
+    per_q_dur = round(t_regex_elapsed / max(1, len(extracted)), 2)
     
     # Strip leading question numbers from stems
     prefix_re = re.compile(r'^[Qq]*[\.\s]*\d+[\.\)\-:]?\s*')
     for q in extracted:
         if q.get("stem"):
             q["stem"] = prefix_re.sub('', q["stem"])
+        q["extraction_time_seconds"] = per_q_dur
+        if "step_times" not in q or not isinstance(q["step_times"], dict):
+            q["step_times"] = {}
+        q["step_times"]["extraction"] = per_q_dur
 
     return {"extracted_blocks": extracted, "token_usage": state.get("token_usage", {})}
 
@@ -1925,10 +1939,10 @@ def _solve_single_block(b: dict, total: int = 1) -> dict:
 
     try:
         from ..storage.config_manager import get_setting
-        validation_enabled = get_setting("validation_enabled", True)
+        validation_enabled = get_setting("validation_enabled", False)
         provider = get_setting("validation_provider", "groq")
     except Exception:
-        validation_enabled = True
+        validation_enabled = False
         provider = "groq"
 
     if not validation_enabled or not is_llm_enabled():

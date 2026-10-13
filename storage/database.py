@@ -31,8 +31,8 @@ if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA busy_timeout=15000")
+        cursor.execute("PRAGMA synchronous=FULL")
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -45,6 +45,15 @@ def init_db():
     # Import models so their table definitions are registered on Base.metadata
     from . import models  # noqa: F401
     Base.metadata.create_all(bind=engine)
+    
+    # Safely migrate existing jobs table to add processing_time_seconds if missing
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE jobs ADD COLUMN processing_time_seconds REAL"))
+            conn.commit()
+    except Exception:
+        pass # Column already exists or table freshly created
 
 
 # Auto-create tables on first import

@@ -11,6 +11,7 @@ class Job(Base):
     file_path = Column(String, nullable=True)
     status = Column(String, default="pending") # pending, processing, done, failed
     created_at = Column(DateTime, default=datetime.utcnow)
+    processing_time_seconds = Column(Float, nullable=True)
     
     # Store JSON result as text
     result_json = Column(Text, nullable=True)
