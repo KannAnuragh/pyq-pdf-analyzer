@@ -77,6 +77,50 @@ def is_answer_validation_enabled() -> bool:
     return val in ("true", "1", "yes")
 
 
+def resolve_pdf_path(path_or_job_id: Optional[str]) -> Optional[str]:
+    """Resolves physical PDF path across host, Docker, UUID, and relative filenames."""
+    if not path_or_job_id:
+        return None
+    if os.path.exists(path_or_job_id):
+        return path_or_job_id
+    try:
+        from ..storage import database, models
+        # 1. Check basename inside current UPLOADS_DIR
+        candidate = os.path.join(database.UPLOADS_DIR, os.path.basename(path_or_job_id))
+        if os.path.exists(candidate):
+            return candidate
+        # 2. Match glob for {job_id}* inside UPLOADS_DIR
+        import glob
+        matches = glob.glob(os.path.join(database.UPLOADS_DIR, f"{path_or_job_id}*"))
+        if matches and os.path.exists(matches[0]):
+            return matches[0]
+        # 3. Lookup Job by id or filename in SQLite
+        with database.SessionLocal() as session:
+            job = session.query(models.Job).filter(
+                (models.Job.id == path_or_job_id) | (models.Job.filename == os.path.basename(path_or_job_id))
+            ).first()
+            if job:
+                if job.file_path and os.path.exists(job.file_path):
+                    return job.file_path
+                if job.file_path:
+                    cand = os.path.join(database.UPLOADS_DIR, os.path.basename(job.file_path))
+                    if os.path.exists(cand):
+                        return cand
+                if job.filename:
+                    cand = os.path.join(database.UPLOADS_DIR, f"{job.id}_{job.filename}")
+                    if os.path.exists(cand):
+                        return cand
+                    cand2 = os.path.join(database.UPLOADS_DIR, job.filename)
+                    if os.path.exists(cand2):
+                        return cand2
+                matches = glob.glob(os.path.join(database.UPLOADS_DIR, f"{job.id}*"))
+                if matches and os.path.exists(matches[0]):
+                    return matches[0]
+    except Exception as e:
+        logger.debug("[CorrectionNode] Path resolution failed for %s: %s", path_or_job_id, e)
+    return None
+
+
 def get_correction_provider() -> str:
     """
     Determine which LLM provider to use for correction & validation.
@@ -184,7 +228,11 @@ class QuestionCorrection(BaseModel):
     question_number: int
     is_too_messy: bool = Field(
         default=False,
-        description="True if the raw text is completely garbled or missing critical math symbols, requiring a cropped image to validate."
+        description="True if raw text is garbled, unclear, or requires visual inspection/diagram crop."
+    )
+    needs_ocr_fallback: bool = Field(
+        default=False,
+        description="Set to true if the question cannot be understood or requires a diagram, figure, or drawing from the PDF to answer, requesting a cropped PDF image OCR."
     )
     question_type: str = Field(
         default="mcq",
@@ -207,21 +255,17 @@ class QuestionCorrection(BaseModel):
         ge=0.0, le=1.0,
         description="Confidence in the text corrections (0.0-1.0)"
     )
-    needs_ocr_fallback: bool = Field(
-        default=False,
-        description="Set to true if the Malayalam text is completely garbled and unreadable, requiring a full OCR rescan."
-    )
     validated_answer: str | None = Field(
         default=None,
-        description="The option letter (A, B, C, D) determined by the AI to be correct. MUST be null for a question with no listed options (descriptive) — never guess a letter for those."
+        description="The option letter (A, B, C, D) determined by the AI if options exist. MUST be null for descriptive questions or if no answer was provided — never guess or fabricate an answer."
     )
     answer_status: str = Field(
-        default="agrees",
-        description="'agrees' if the marked answer is correct, 'disagrees' if not, 'none' if the question is descriptive and has no options to validate against"
+        default="none",
+        description="'agrees' if the marked answer matches verified answer, 'disagrees' if not, 'none' if no answer key was provided in the paper or if question is descriptive"
     )
     corrected_explanation: str | None = Field(
         default=None,
-        description="The completely corrected explanation / solution text with typos and OCR errors fixed. Null if no explanation was present."
+        description="Math- and typo-corrected explanation/solution from the input. MUST be null if no explanation or solution was provided in the input — never fabricate new answers or solutions."
     )
 
 
@@ -235,30 +279,34 @@ class DirectQuestionCorrection(BaseModel):
     question_number: int
     is_too_messy: bool = Field(
         default=False,
-        description="True if the raw text is completely garbled or missing critical math symbols, requiring a cropped image to validate."
+        description="True if raw text is garbled, unclear, or requires visual inspection/diagram crop."
+    )
+    needs_ocr_fallback: bool = Field(
+        default=False,
+        description="Set to true if question is not understandable or needs a diagram/figure from the PDF to answer."
     )
     question_type: str = Field(
         default="mcq",
         description="'mcq' | 'descriptive_single' | 'descriptive_subquestions'"
     )
     corrected_stem: str = Field(
-        description="The completely rewritten and corrected question text (stem)."
+        description="The math-corrected and typo-fixed question text (stem)."
     )
     corrected_options: dict[str, str] = Field(
         default_factory=dict,
-        description="The completely rewritten and corrected options. Keys are option letters (A, B, C, D). Empty for descriptive questions."
+        description="The math-corrected options. Keys are option letters (A, B, C, D). Empty dict {} for descriptive questions."
     )
     validated_answer: str | None = Field(
         default=None,
-        description="The option letter (A, B, C, D) determined by the AI to be correct. Null for descriptive."
+        description="The option letter (A, B, C, D) determined by the AI to be correct. MUST be null for descriptive or if no answer was provided."
     )
     answer_status: str = Field(
-        default="agrees",
-        description="'agrees' if the marked answer is correct, 'disagrees' if not. 'none' for descriptive."
+        default="none",
+        description="'agrees' if marked answer is correct, 'disagrees' if not. 'none' if no answer was provided or question is descriptive."
     )
     corrected_explanation: str | None = Field(
         default=None,
-        description="The completely rewritten and corrected explanation text. Return null if no explanation is provided."
+        description="The corrected explanation text from the input. MUST be null if no explanation is provided in the input — never fabricate."
     )
 
 
@@ -273,29 +321,36 @@ class DirectPageCorrectionResponse(BaseModel):
 CORRECTION_SYSTEM_PROMPT = r"""You are an expert bilingual (English & Malayalam) exam educator and math editor reviewing question papers for students.
 
 TASKS & RULES:
-1. LANGUAGE & TYPOS (STRICT PRESERVATION):
-   - CRITICAL: DO NOT rewrite, rephrase, summarize, or generate any new content. You must preserve the original wording exactly as provided. DO NOT add conversational pleasantries.
+1. CORRECT TYPOS & MATHEMATICAL SYMBOLS (PRESERVE ORIGINAL MEANING):
+   - CRITICAL: DO NOT rewrite, rephrase, summarize, or alter the wording of questions. Preserve the original phrasing and structure.
    - ONLY correct typos, OCR errors, spelling, and flagged words in their original language without cross-translating.
    - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Preserve authentic Malayalam.
    - For English: Fix spelling, restore truncated words ('oth'->'Both', 'll'->'All'), and punctuation.
+   - For Math: Format all equations, formulas, fractions, and units using valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$. Fix broken braces ($V_{proton}$) and fraction equations ($\frac{A}{B} = \frac{C}{D}$). Never wrap ordinary prose sentences inside $...$.
 
-2. QUESTION TYPE & VERIFICATION:
-   - Identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks in stem like (a), (b), (i), (ii)), or "descriptive_single" (open-ended).
-   - For MCQ: Independently solve, set `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Map cleaned choices in `corrected_options`.
-   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. If "Sub-parts" are provided in the input, DO NOT duplicate them into the `corrected_stem`; the `corrected_stem` must only contain the introductory text. NEVER put solution steps into `corrected_options` or `corrected_stem`.
+2. DETERMINE QUESTION TYPE:
+   - Identify `question_type`:
+     * "mcq": Multiple Choice Question with choices (A/B/C/D). Clean choices into `corrected_options`.
+     * "descriptive_single": Open-ended question without options or sub-tasks. Set `corrected_options`: {}.
+     * "descriptive_subquestions": Descriptive question with explicit sub-parts like (a), (b), (i), (ii). Set `corrected_options`: {}. Keep subpart prompts in the question, but do NOT put answers into options or stem.
 
-3. LATEX EQUATIONS & MATH:
-   - Format all math, formulas, fractions, and units using valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$.
-   - Fix broken braces and subscripts ($V_{proton}$, $\lambda_{\alpha}$, never $V_}{proton}$).
-   - Repair fraction equations: write $\frac{A}{B} = \frac{C}{D}$, never $\frac{A}{B = \frac{C}{D}}$.
-   - Use `\times` for multiplication ($5 \times 10^5$).
-   - NEVER enclose normal English/Malayalam sentences in $...$ (avoids mashed text like `isPlanck'sconstantande`). Keep prose outside math delimiters.
+3. FIND & VALIDATE ANSWER:
+   - For MCQ: Independently solve the question and set `validated_answer` ('A'|'B'|'C'|'D'). If "Marked Answer" was provided, compare it and set `answer_status` ('agrees'|'disagrees').
+   - If an answer is provided, validate whether it is correct.
 
-4. PARAGRAPH FORMATTING & READABILITY:
-   - Structure dense explanations and multi-point stems with clean paragraph breaks (\n\n) or numbered steps (1., 2.).
-   - Un-mash concatenated words/variables (e.g. "where $h$ is", not "whereh").
-   - Immutable image markers (e.g. `![diagram](...)` and `![math](...)`) must remain in exact positions. Do NOT remove them!
-   - If no explanation was in input, return null for `corrected_explanation`. Do not invent new solutions."""
+4. NO ANSWER GENERATION FOR UNANSWERED QUESTIONS:
+   - CRITICAL: If a question does NOT have an answer, marked answer, or explanation provided in the input paper:
+     * DO NOT generate, invent, solve, or fabricate answers or step-by-step solutions!
+     * Set `validated_answer`: null
+     * Set `answer_status`: "none"
+     * Set `corrected_explanation`: null
+   - Only correct an explanation if an "Explanation" was actually provided in the input.
+
+5. REQUEST OCR VIA PDF CROP (FOR UNCLEAR QUESTIONS OR MISSING DIAGRAMS):
+   - If the question cannot be understood (raw text is garbled, OCR corrupted, incomplete, missing key equations), OR
+   - If the question requires or refers to a diagram, graph, circuit, or drawing to understand or answer (e.g. "as shown in the figure", "find current in the circuit below") and the visual details are missing or needed:
+     * Set `needs_ocr_fallback`: true and `is_too_messy`: true.
+     * This will automatically trigger a tight PDF crop of the question to be sent for Vision AI / OCR inspection."""
 
 JSON_CORRECTION_SYSTEM_PROMPT = f"""{CORRECTION_SYSTEM_PROMPT}
 
@@ -304,12 +359,13 @@ Output valid JSON matching:
   "corrections": [
     {{
       "question_number": <int>,
+      "is_too_messy": <bool>,
+      "needs_ocr_fallback": <bool>,
       "question_type": "mcq" | "descriptive_single" | "descriptive_subquestions",
       "corrected_stem": "<string or null>",
       "corrected_options": {{"A": "<string>"}} or {{}} or null,
       "corrected_words": {{"<flagged_word>": "<corrected_word>"}},
       "text_confidence": <float 0.0 to 1.0>,
-      "needs_ocr_fallback": <bool>,
       "validated_answer": "A" | "B" | "C" | "D" | null,
       "answer_status": "agrees" | "disagrees" | "none",
       "corrected_explanation": "<string or null>"
@@ -320,29 +376,34 @@ Output valid JSON matching:
 DIRECT_CORRECTION_SYSTEM_PROMPT = r"""You are an expert bilingual (English & Malayalam) exam educator and math editor reviewing question papers for students.
 
 TASKS & RULES:
-1. LANGUAGE & TYPOS (STRICT PRESERVATION):
-   - CRITICAL: DO NOT rewrite, rephrase, summarize, or generate any new content. You must preserve the original wording exactly as provided. DO NOT add conversational pleasantries.
-   - ONLY correct typos, OCR errors, and truncated words (e.g. 'oth'->'Both', 'll'->'All').
+1. CORRECT TYPOS & MATHEMATICAL SYMBOLS (PRESERVE ORIGINAL MEANING):
+   - CRITICAL: DO NOT rewrite, rephrase, summarize, or alter the wording of questions. Preserve original wording.
+   - ONLY correct typos, OCR errors, spelling, and truncated words (e.g. 'oth'->'Both', 'll'->'All').
    - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Do NOT translate between English and Malayalam.
+   - For Math: Enclose all math, formulas, fractions, and units in valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$. Fix broken braces ($V_{proton}$). Never enclose ordinary sentences inside $...$.
 
-2. QUESTION TYPE & VERIFICATION:
-   - Read the provided "Raw Text". If the text is completely garbled, unreadable, or missing critical mathematical symbols making it impossible to confidently structure and validate, set `is_too_messy`: true, return nulls for everything else, and we will request a cropped image for Vision AI verification.
-   - Otherwise, structure the question and identify `question_type`: "mcq" (choices A/B/C/D), "descriptive_subquestions" (directive sub-tasks (a), (b) in stem), or "descriptive_single".
-   - For MCQ: Independently solve, return `validated_answer` ('A'|'B'|'C'|'D') and `answer_status` ('agrees'|'disagrees'). Put cleaned choices in `corrected_options`.
-   - For Descriptive: Set `corrected_options`: {}, `validated_answer`: null, `answer_status`: "none". Keep answer/solution steps (e.g. 1. Higher, 2. Lower) ONLY in `corrected_explanation`. If "Sub-parts" are provided in the input, DO NOT duplicate them into the `corrected_stem`; the `corrected_stem` must only contain the introductory text. NEVER put solution steps into `corrected_options` or `corrected_stem`.
+2. DETERMINE QUESTION TYPE:
+   - Identify `question_type`:
+     * "mcq": Choices A/B/C/D or 1/2/3/4. Clean choices in `corrected_options`.
+     * "descriptive_single": Open-ended question without options. Set `corrected_options`: {}.
+     * "descriptive_subquestions": Sub-tasks (a), (b) in question. Set `corrected_options`: {}.
 
-3. LATEX EQUATIONS & MATH:
-   - Enclose all math, formulas, fractions, and units in valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$.
-   - Fix broken braces and subscripts ($V_{proton}$, $\lambda_{\alpha}$).
-   - Fix equations with fractions: write $\frac{A}{B} = \frac{C}{D}$, never $\frac{A}{B = \frac{C}{D}}$.
-   - Use `\times` for multiplication ($5 \times 10^5$).
-   - NEVER enclose ordinary English/Malayalam sentences inside $...$ (avoids mashed text like `isPlanck'sconstantande`). Keep prose outside math delimiters.
+3. FIND & VALIDATE ANSWER:
+   - For MCQ: Solve against the given options to find which choice is correct and return `validated_answer` ('A'|'B'|'C'|'D'|'1'|'2'|'3'|'4'). If a marked answer is provided in the input, set `answer_status` ('agrees'|'disagrees'). If no marked answer was provided, set `answer_status`: "agrees".
+   - If an answer/explanation is provided in the input, validate whether it is correct.
 
-4. PARAGRAPH FORMATTING & READABILITY:
-   - Format dense text and multi-step explanations with clean paragraph breaks (\n\n) or numbered steps (1., 2.).
-   - Un-mash concatenated words/variables (write "where $h$ is", not "whereh").
-   - Immutable image markers (`![diagram](...)` and `![math](...)`) must remain in exact positions. Do NOT remove them!
-   - If no explanation was in input, return null for `corrected_explanation`.
+4. NO ANSWER GENERATION FOR UNANSWERED DESCRIPTIVE QUESTIONS:
+   - CRITICAL: For descriptive questions without options, if NO answer or explanation is provided in the source paper/input:
+     * DO NOT generate, invent, solve, or fabricate answers or explanations!
+     * Set `validated_answer`: null
+     * Set `answer_status`: "none"
+     * Set `corrected_explanation`: null
+   - Only correct an explanation if an explanation was explicitly provided in the input.
+
+5. REQUEST OCR VIA PDF CROP (FOR UNCLEAR QUESTIONS OR MISSING DIAGRAMS):
+   - If the raw text is unreadable, garbled, incomplete, or if the question needs/refers to a diagram, graph, circuit, or drawing to understand or answer:
+     * Set `is_too_messy`: true and `needs_ocr_fallback`: true.
+     * Return nulls for answers, and the system will perform targeted PDF crop and vision OCR.
 
 Output valid JSON matching:
 {
@@ -350,11 +411,12 @@ Output valid JSON matching:
     {
       "question_number": <int>,
       "is_too_messy": <boolean>,
+      "needs_ocr_fallback": <boolean>,
       "question_type": "mcq" | "descriptive_single" | "descriptive_subquestions",
       "corrected_stem": "<string>",
-      "corrected_options": {"A": "<string>"} or {},
+      "corrected_options": {"1": "<string>"} or {"A": "<string>"} or {},
       "corrected_explanation": "<string or null>",
-      "validated_answer": "A" | "B" | "C" | "D" | null,
+      "validated_answer": "1" | "2" | "A" | "B" | null,
       "answer_status": "agrees" | "disagrees" | "none"
     }
   ]
@@ -518,10 +580,13 @@ def _build_page_prompt(
             parts.append("Options:")
             for key in sorted(options.keys()):
                 parts.append(f"  ({key}) {options[key]}")
-            parts.append(f"Marked Answer: {marked}")
+            if marked and marked != "Unknown":
+                parts.append(f"Marked Answer: {marked}")
 
         if clean_exp.strip():
             parts.append(f"Explanation: {clean_exp.strip()}")
+        else:
+            parts.append("Explanation: None provided (do NOT generate any answer or explanation)")
 
         if flagged:
             parts.append("Flagged words to check:")
@@ -780,6 +845,7 @@ def _apply_post_processing_gate(
         from ..ingest.quality_check import is_question_unreadable
         if (
             getattr(correction, 'needs_ocr_fallback', False)
+            or getattr(correction, 'is_too_messy', False)
             or q.get("is_garbled", False)
             or q.get("ocr_uncertain", False)
             or is_question_unreadable(stem, q.get("options", {}))
@@ -1259,7 +1325,9 @@ def correction_and_validation_node(state: dict) -> dict:
             else:
                 cur_streak = [qn]
 
-        if streak_threshold > 0 and len(longest_streak) >= streak_threshold and os.path.exists(job_id):
+        resolved_pdf_path = resolve_pdf_path(job_id) or resolve_pdf_path(state.get("file_path")) or resolve_pdf_path(state.get("pdf_path"))
+
+        if streak_threshold > 0 and len(longest_streak) >= streak_threshold and resolved_pdf_path and os.path.exists(resolved_pdf_path):
             logger.info(
                 "[CorrectionNode] Detected %d consecutive unreadable questions flagged by LLM (Q%d-Q%d). "
                 "Escalating to full PDF OCR scan...",
@@ -1271,7 +1339,7 @@ def correction_and_validation_node(state: dict) -> dict:
             except Exception:
                 ocr_engine = os.getenv("AUTO_WHOLE_PDF_OCR_ENGINE", "auto")
 
-            ocr_res = ocr_whole_pdf(job_id, engine=ocr_engine)
+            ocr_res = ocr_whole_pdf(resolved_pdf_path, engine=ocr_engine)
             fallback_p_tokens += ocr_res.get("prompt_tokens", 0)
             fallback_c_tokens += ocr_res.get("completion_tokens", 0)
 
@@ -1291,55 +1359,87 @@ def correction_and_validation_node(state: dict) -> dict:
                         q["_ocr_solved_result"] = solved
                     except Exception as e:
                         logger.error("[CorrectionNode] Failed to re-solve recovered Q%d: %s", q_num, e)
-        else:
-            logger.info("[CorrectionNode] Executing dynamic targeted OCR fallback for %d questions", len(ocr_fallbacks))
+        elif resolved_pdf_path and os.path.exists(resolved_pdf_path):
+            logger.info("[CorrectionNode] Executing dynamic targeted OCR fallback using PDF crops for %d questions", len(ocr_fallbacks))
             try:
-                doc = pymupdf.open(job_id)
+                doc = pymupdf.open(resolved_pdf_path)
                 
-                def _get_crop(page, qn: int):
-                    blocks = page.get_text("blocks")
-                    start_y = None; end_y = None
-                    q_start = re.compile(fr'(?:^|\n)\s*{qn}\s*[\.\):-]\s+')
-                    next_q = re.compile(fr'(?:^|\n)\s*{qn + 1}\s*[\.\):-]\s+')
-                    for b in blocks:
-                        txt = b[4]
-                        if start_y is None and q_start.search(txt):
-                            start_y = max(0, b[1] - 12)
-                        elif start_y is not None and next_q.search(txt):
-                            end_y = b[1] - 5; break
-                    if start_y is not None:
-                        if end_y is None: end_y = max(start_y + 100, page.rect.height - 30)
-                        return pymupdf.Rect(0, start_y, page.rect.width, end_y)
-                    return None
+                from ..ingest.crop_utils import get_question_crop_rect, find_question_page
 
                 for q in corrected_blocks:
                     q_num = q.get("question_number")
                     if q_num in ocr_fallbacks:
-                        page_idx = q.get("page_number") or 0
+                        page_idx = find_question_page(doc, q_num, question_stem=q.get("stem"), hint_page=q.get("page_number"))
+                        if page_idx is None:
+                            page_idx = q.get("page_number") or 0
                         if page_idx < len(doc):
                             page = doc[page_idx]
-                            crop = _get_crop(page, q_num)
+                            next_q_num = q_num + 1
+                            next_stem = None
+                            for oq in corrected_blocks:
+                                if oq.get("question_number") == next_q_num:
+                                    next_stem = oq.get("stem")
+                                    break
+                            crop = get_question_crop_rect(
+                                page,
+                                q_num,
+                                next_question_number=next_q_num,
+                                next_question_stem=next_stem,
+                                current_question_stem=q.get("stem"),
+                                current_options=q.get("options")
+                            )
                             pix = page.get_pixmap(clip=crop, dpi=200) if crop else page.get_pixmap(dpi=200)
                             image_bytes = pix.tobytes("png")
                             
                             try:
-                                ext_data, p_tok, c_tok = rescan_question_vision(image_bytes, q_num, engine="gemini")
+                                ext_data, p_tok, c_tok = rescan_question_vision(image_bytes, q_num)
                                 fallback_p_tokens += p_tok
                                 fallback_c_tokens += c_tok
                                 
-                                # Replace content
-                                q["stem"] = ext_data.get("stem", q["stem"])
-                                q["options"] = ext_data.get("options", q.get("options", {}))
+                                # Replace content from cropped Vision OCR
+                                if ext_data.get("stem"):
+                                    q["stem"] = ext_data["stem"]
+                                if ext_data.get("options") is not None:
+                                    q["options"] = ext_data["options"]
+                                if ext_data.get("question_type"):
+                                    q["question_type"] = ext_data["question_type"]
                                 
                                 # Retain marking if not extracted
                                 if not ext_data.get("marked_answer"):
                                     ext_data["marked_answer"] = q.get("marked_answer")
-                                    
-                                # solve again with new text
-                                solved = _solve_single_block(ext_data, 1)
-                                
-                                # Store solved result for Step 6
-                                q["_ocr_solved_result"] = solved
+                                else:
+                                    q["marked_answer"] = ext_data["marked_answer"]
+                                    q["marked_correct_answer"] = ext_data["marked_answer"]
+
+                                if ext_data.get("explanation") or ext_data.get("answer_text"):
+                                    q["explanation"] = ext_data.get("explanation") or ext_data.get("answer_text")
+                                    q["answer_text"] = q["explanation"]
+
+                                if ext_data.get("reasoning"):
+                                    q["reasoning"] = ext_data["reasoning"]
+
+                                if ext_data.get("validated_answer"):
+                                    q["validated_answer"] = ext_data["validated_answer"]
+                                    q["is_valid"] = True
+                                    solved = {
+                                        "validated_answer": ext_data["validated_answer"],
+                                        "is_valid": True,
+                                        "reasoning": ext_data.get("reasoning") or ext_data.get("explanation"),
+                                        "explanation": ext_data.get("explanation"),
+                                        "confidence": "high"
+                                    }
+                                    q["_ocr_solved_result"] = solved
+                                elif q.get("options") or q.get("marked_answer") or q.get("explanation"):
+                                    solved = _solve_single_block(ext_data, 1)
+                                    q["_ocr_solved_result"] = solved
+                                else:
+                                    q["_ocr_solved_result"] = {
+                                        "validated_answer": None,
+                                        "is_valid": False,
+                                        "confidence": "none",
+                                        "reasoning": None,
+                                        "explanation": None
+                                    }
                             except Exception as e:
                                 logger.error("[CorrectionNode] OCR fallback failed for Q%d: %s", q_num, e)
                 doc.close()
@@ -1426,20 +1526,24 @@ def correction_and_validation_node(state: dict) -> dict:
             final_explanation = normalize_math_in_text(final_explanation)
             q["explanation"] = final_explanation
             q["answer_text"] = final_explanation
+        else:
+            q["explanation"] = None
+            q["answer_text"] = None
 
         if c:
-            if getattr(c, "is_too_messy", False):
-                q["is_garbled"] = True
-                q["ocr_ambiguous"] = True
-                q["marked_answer"] = None
-                q["marked_correct_answer"] = None
-                q["validated_answer"] = None
-                marked = None
-                final_explanation = "Text was too messy to validate automatically. Requesting image crop for Vision AI."
-                q["explanation"] = final_explanation
-                q["answer_text"] = final_explanation
-                q["question_type"] = "descriptive_single" # generic fallback
-                c = None # Skip further LLM parsing for this question
+            if getattr(c, "is_too_messy", False) or getattr(c, "needs_ocr_fallback", False):
+                if not q.get("_ocr_solved_result"):
+                    q["is_garbled"] = True
+                    q["ocr_ambiguous"] = True
+                    q["marked_answer"] = None
+                    q["marked_correct_answer"] = None
+                    q["validated_answer"] = None
+                    marked = None
+                    final_explanation = "Question was unclear or required diagram. Cropped image was requested for Vision AI."
+                    q["explanation"] = final_explanation
+                    q["answer_text"] = final_explanation
+                    q["question_type"] = getattr(c, "question_type", "descriptive_single") or "descriptive_single"
+                    c = None # Skip further LLM parsing for this question
                 
         if c:
             from ..ingest.option_answer_separator import classify_question_type, is_valid_subparts
@@ -1538,12 +1642,18 @@ def correction_and_validation_node(state: dict) -> dict:
             current_qtype = q.get("question_type", "unknown")
             if current_qtype.startswith("descriptive"):
                 validated_answer = None
-                is_valid = True
-                reasoning = final_explanation or "Descriptive question — solution verified."
-                llm_status = "completed"
-                llm_details = f"{provider.title()} verified descriptive question."
-                if has_corrected_exp:
-                    llm_details += " Corrected solution explanation."
+                if final_explanation:
+                    is_valid = True
+                    reasoning = final_explanation
+                    llm_status = "completed"
+                    llm_details = f"{provider.title()} verified descriptive question."
+                    if has_corrected_exp:
+                        llm_details += " Corrected solution explanation."
+                else:
+                    is_valid = False
+                    reasoning = None
+                    llm_status = "completed"
+                    llm_details = f"{provider.title()} classified as {current_qtype} (no answer in paper to validate)."
             elif not ans_val_on:
                 validated_answer = None
                 is_valid = False
@@ -1828,21 +1938,86 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
         c = corrections[0]
         cost_usd = calculate_token_cost(p_tok, c_tok, provider)
 
-        if getattr(c, "is_too_messy", False):
-            msg = "Text was too messy to validate automatically. Requesting image crop for Vision AI."
+        if getattr(c, "is_too_messy", False) or getattr(c, "needs_ocr_fallback", False):
+            # Attempt targeted PDF crop OCR if PDF file is available!
+            pdf_path = resolve_pdf_path(q_data.get("file_path")) or resolve_pdf_path(q_data.get("job_id"))
+
+            if pdf_path and os.path.exists(pdf_path):
+                try:
+                    import pymupdf
+                    from ..ingest.crop_utils import get_question_crop_rect, find_question_page
+                    from ..graph.nodes import rescan_question_vision
+                    doc = pymupdf.open(pdf_path)
+                    p_num = find_question_page(doc, q_num, question_stem=stem, hint_page=q_data.get("page_number"))
+                    if p_num is None:
+                        p_num = q_data.get("page_number", 0)
+                    if 0 <= p_num < len(doc):
+                        page = doc[p_num]
+                        crop = get_question_crop_rect(
+                            page,
+                            q_num,
+                            next_question_number=q_num + 1,
+                            current_question_stem=stem,
+                            current_options=options
+                        )
+                        pix = page.get_pixmap(clip=crop, dpi=200) if crop else page.get_pixmap(dpi=200)
+                        image_bytes = pix.tobytes("png")
+                        ext_data, p_tok_v, c_tok_v = rescan_question_vision(image_bytes, q_num)
+                        doc.close()
+                        
+                        rec_stem = ext_data.get("stem") or stem
+                        rec_opts = ext_data.get("options") or {}
+                        rec_qtype = ext_data.get("question_type") or ("mcq" if rec_opts else "descriptive_single")
+                        rec_ans = ext_data.get("validated_answer") or ext_data.get("marked_answer")
+                        rec_exp = ext_data.get("reasoning") or ext_data.get("explanation") or ext_data.get("answer_text")
+                        
+                        is_val = False
+                        if rec_ans:
+                            if marked and marked != "Unknown":
+                                is_val = (str(rec_ans).strip().upper() == str(marked).strip().upper())
+                            else:
+                                is_val = True
+                        elif rec_qtype.startswith("descriptive"):
+                            is_val = True
+
+                        return {
+                            "success": True,
+                            "question_number": q_num,
+                            "question_type": rec_qtype,
+                            "corrected_stem": rec_stem,
+                            "corrected_options": rec_opts,
+                            "validated_answer": rec_ans,
+                            "is_valid": is_val,
+                            "reasoning": rec_exp,
+                            "explanation": rec_exp,
+                            "answer_text": rec_exp,
+                            "corrected_explanation": rec_exp,
+                            "ocr_source": "vision_crop_fallback",
+                            "token_usage": {
+                                "prompt_tokens": p_tok + p_tok_v,
+                                "completion_tokens": c_tok + c_tok_v,
+                                "total_tokens": p_tok + c_tok + p_tok_v + c_tok_v,
+                                "estimated_cost_usd": cost_usd,
+                            }
+                        }
+                except Exception as e:
+                    logger.error("[CorrectionNode] Targeted crop OCR failed in fix_single_question_with_llm: %s", e)
+
+            msg = "Question was unclear or required diagram. Requesting image crop for Vision AI."
             return {
                 "success": True,
                 "is_garbled": True,
                 "ocr_ambiguous": True,
-                "question_type": "descriptive_single",
+                "needs_ocr_fallback": True,
+                "question_type": getattr(c, "question_type", "descriptive_single") or "descriptive_single",
                 "corrected_stem": stem,
                 "corrected_options": options,
                 "validated_answer": None,
                 "is_valid": False,
                 "reasoning": msg,
-                "explanation": msg,
-                "answer_text": msg,
-                "corrected_explanation": msg,
+                "explanation": None,
+                "answer_text": None,
+                "corrected_explanation": None,
                 "token_usage": {
                     "prompt_tokens": p_tok,
                     "completion_tokens": c_tok,
@@ -1886,8 +2061,8 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
 
         c_val = getattr(c, "validated_answer", None)
         if c_val and str(c_val).strip():
-            m_letter = re.search(r'\b([A-D])\b', str(c_val).upper())
-            val_ans = m_letter.group(1) if m_letter else str(c_val).strip().upper()[:1]
+            m_choice = re.search(r'\b([A-Da-d1-4])\b', str(c_val))
+            val_ans = m_choice.group(1).upper() if m_choice else str(c_val).strip().upper()[:1]
         else:
             val_ans = marked if c.answer_status == "agrees" else None
 
@@ -2015,9 +2190,9 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
             final_opts = {}
             val_ans = None
             cur_marked = None
-            is_valid = True
+            is_valid = bool(reasoning)
             if not reasoning:
-                reasoning = "Descriptive question — solution verified"
+                reasoning = None
 
         res_dict = {
             "success": True,

@@ -193,9 +193,9 @@ CRITICAL STUDENT-CENTRIC READABILITY & MATH FORMATTING RULES:
 - DO NOT PUT REGULAR TEXT, SENTENCES, OR SUBQUESTION LABELS INSIDE LATEX MATH DELIMITERS ($...$ or $$...$$):
   * LaTeX math mode strips all spaces and renders words in unreadable slanted italics.
   * Explanatory prose, subquestion labels like "(a)" or "(b)", and connecting words MUST remain normal text OUTSIDE math delimiters.
-  * WRONG: `$\text{(b) The reactance is given by } X_C = \frac{1}{\omega C}$`
-  * CORRECT: `(b) The reactance is given by $X_C = \frac{1}{\omega C}$`
-  * EXCEPTION for Equations: If an equation inherently contains words or subscripts as words (e.g. "Power = ", "Work", or $i_{\mathrm{rms}}$), you MUST use `\text{...}` or `\mathrm{...}` inside the math block exactly as they appear in the PDF so they render in the correct font (e.g., $i_{\mathrm{rms}} = \frac{V_{\mathrm{rms}}}{R}$ or $\text{Power} = 400\text{ W}$). Do not break the equation just to keep the word out.
+  * WRONG: `$\\text{(b) The reactance is given by } X_C = \\frac{1}{\\omega C}$`
+  * CORRECT: `(b) The reactance is given by $X_C = \\frac{1}{\\omega C}$`
+  * EXCEPTION for Equations: If an equation inherently contains words or subscripts as words (e.g. "Power = ", "Work", or $i_{\\mathrm{rms}}$), you MUST use `\\text{...}` or `\\mathrm{...}` inside the math block exactly as they appear in the PDF so they render in the correct font (e.g., $i_{\\mathrm{rms}} = \\frac{V_{\\mathrm{rms}}}{R}$ or $\\text{Power} = 400\\text{ W}$). Do not break the equation just to keep the word out.
 - DO NOT LABEL ANYTHING IN ANSWERS AS SUBQUESTION: Numbered steps or items in answers/solutions are ANSWER/SOLUTION STEPS, NOT sub-questions! Keep all solution steps in 'explanation' / 'answer_text'. NEVER put answer steps into 'sub_parts'.
 
 CRITICAL INSTRUCTIONS:
@@ -317,19 +317,27 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
     content, early_marked_answer, early_explanation = parse_trailing_meta(content)
 
     # Option detection pattern:
+    # Option detection pattern:
     # 1. Parenthesized markers: (A), (a), (1) - can be preceded by start of line, newline, or whitespace
-    # 2. Bare letter markers: A., B., A:- - must be at line start, newline, or after 2+ spaces / sentence punctuation
+    # 2. Closing paren markers: A), a) - can be preceded by space, newline, or sentence punctuation
+    # 3. Bare letter markers: A., B., A:- - must be followed by whitespace
     opt_pattern = re.compile(
-        r'(?:(?:^|\n|\s+)\(([A-Ea-e1-4])\)[\.\:\-]?\s*)|'
-        r'(?:(?:^|\n|[ \t]+|\.\s+)([A-Ea-e1-4])[\.\)\:-]\s+)'
+        r'(?:(?<=^)|(?<=\n)|(?<=\s)|(?<=\))|(?<=\.))'
+        r'(?:'
+        r'\(([A-Ea-e1-4])\)[\.\:\-]?'
+        r'|'
+        r'([A-Ea-e1-4])\s*\)'
+        r'|'
+        r'([A-Ea-e1-4])\s*(?::[-]+|[\.\:-])(?=\s|[^\w\s]|[\u0D00-\u0D7F]|$)'
+        r')'
     )
     matches = []
     for m in opt_pattern.finditer(content):
-        letter = m.group(1) or m.group(2)
-        start_idx = m.start(1) if m.group(1) else m.start(2)
+        letter = m.group(1) or m.group(2) or m.group(3)
+        start_idx = m.start()
         prefix = content[max(0, start_idx - 35):start_idx].lower()
         full_match = m.group(0).strip()
-        has_paren = full_match.startswith("(")
+        has_paren = full_match.startswith("(") or full_match.endswith(")")
 
         # 0. Reject if followed by equation operator or equal sign (e.g. A = 240, A = 120, A + B)
         # CRITICAL: ONLY reject bare letters without parentheses (e.g. 'A = 240', 'A + B').
@@ -345,7 +353,7 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
             continue
         # 2. Reject candidate matches preceded by prepositions / linkers / points / math variable contexts:
         #    ONLY reject bare letters (e.g. 'between points A and B', '0.2 A.', 'each of A = 120').
-        #    Parenthesized markers like '(B)' should NEVER be rejected by words like 'to', 'of', 'or'.
+        #    Parenthesized markers like '(B)' or 'B)' should NEVER be rejected by words like 'to', 'of', 'or'.
         prev_word_match = re.search(r'([a-zA-Z]+)\s*(?:and\s*)?$', prefix)
         if prev_word_match:
             prev_word = prev_word_match.group(1).lower()
@@ -362,7 +370,7 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
                 if prev_word in structural_reject:
                     continue
         # 3. If bare letter (no parens), ensure it is not preceded by a number (scientific unit like '0.2 A.' or '5 V.')
-        if not has_paren and re.search(r'\d+(?:\.\d+)?\s*$', prefix):
+        if not has_paren and full_match.endswith('.') and re.search(r'\d+(?:\.\d+)?\s*$', prefix):
             continue
         # 3.5. Reject acronyms like A.C., D.C., A.M., P.M.
         if not has_paren:
@@ -433,11 +441,11 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
     if len(options) < 2:
         fb_matches = []
         for m in opt_pattern.finditer(content):
-            letter = m.group(1) or m.group(2)
-            start_idx = m.start(1) if m.group(1) else m.start(2)
+            letter = m.group(1) or m.group(2) or m.group(3)
+            start_idx = m.start()
             prefix = content[max(0, start_idx - 35):start_idx].lower()
             full_match = m.group(0).strip()
-            has_paren = full_match.startswith("(")
+            has_paren = full_match.startswith("(") or full_match.endswith(")")
             # 1. Reject candidate matches preceded by Assertion/Reason/Statement labels:
             if re.search(r'(?:assertion|reason|statement|പ്രസ്താവന|കാരണം)[\s\:\-\*\_\(]*$', prefix, re.IGNORECASE):
                 continue
@@ -457,7 +465,7 @@ def separate_stem_and_options(content: str) -> tuple[str, dict[str, str], Option
                     if fb_prev_word in structural_reject:
                         continue
             # 3. If bare letter (no parens), ensure it is not preceded by a number (scientific unit like '0.2 A.' or '5 V.')
-            if not has_paren and re.search(r'\d+(?:\.\d+)?\s*$', prefix):
+            if not has_paren and full_match.endswith('.') and re.search(r'\d+(?:\.\d+)?\s*$', prefix):
                 continue
             # 3.5. Reject acronyms like A.C., D.C., A.M., P.M.
             if not has_paren:
@@ -949,7 +957,16 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
                     ans_text = stem if stem else explanation
                     if ans_text:
                         clean_ans = ans_text.strip()
-                        if len(clean_ans) == 1 and clean_ans.upper() in "ABCDE1234":
+                        cleaned = re.sub(rf'^(?:Question\s*(?:No\.?)?\s*|Q\.?\s*)?{q_num}\s*[-:\.\s]\s*', '', clean_ans, flags=re.IGNORECASE)
+                        m_letter = re.match(r'^\(?([A-Ea-e])\)?(?:\s*[-:\.]|\s+|$)', cleaned)
+                        if m_letter:
+                            opt_let = m_letter.group(1).upper()
+                            target_q["marked_answer"] = opt_let
+                            target_q["marked_correct_answer"] = opt_let
+                            rest = cleaned[m_letter.end():].strip()
+                            if rest and not target_q.get("answer_text"):
+                                target_q["answer_text"] = rest
+                        elif len(clean_ans) == 1 and clean_ans.upper() in "ABCDE1234":
                             target_q["marked_answer"] = clean_ans.upper()
                             target_q["marked_correct_answer"] = clean_ans.upper()
                         elif not target_q.get("answer_text"):
@@ -971,6 +988,21 @@ def parse_questions_from_text(raw_text: str, token_tracker: dict = None) -> list
                 "page_number": page_number,
                 "section": section_name,
             })
+
+    # Filter out any blocks belonging to an Answer Key section
+    extracted = [q for q in extracted if not (q.get("section") and re.search(r'(?i)\b(?:answer[\s\/\\]*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints)\b', str(q.get("section"))))]
+
+    # Map answer key table / list entries if an Answer Key section exists in raw_text
+    ans_m = re.search(r'(?i)\b(?:answer[\s\/\\]*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ)\b', raw_text)
+    if ans_m:
+        ans_section_text = raw_text[ans_m.start():]
+        for m in re.finditer(r'(?:^|\n|[ \t])(\d{1,3})\s*(?:[-:\.]|\n|[ \t]+)\s*([A-Ea-e])(?:\b|[^a-zA-Z]|$)', ans_section_text):
+            k_num = int(m.group(1))
+            ans_letter = m.group(2).upper()
+            target_q = next((t for t in extracted if t["question_number"] == k_num), None)
+            if target_q and not target_q.get("marked_answer"):
+                target_q["marked_answer"] = ans_letter
+                target_q["marked_correct_answer"] = ans_letter
 
     # If duplicate question numbers exist (e.g. Section A: 1..5 and Section B: 1..5),
     # renumber sequentially to guarantee unique IDs downstream while saving original_question_number
@@ -1076,7 +1108,7 @@ def extract_node(state: GraphState) -> GraphState:
                     llm = get_extract_llm()
                     q = classify_block_with_llm(seg, llm=llm)
                     if q:
-                        if seg.section and re.search(r'(?i)answer\s*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints', seg.section):
+                        if seg.section and re.search(r'(?i)\b(?:answer[\s\/\\]*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints)\b', seg.section):
                             target_q = next((t for t in extracted if t["question_number"] == seg.q_num and t.get("section") != seg.section), None)
                             if target_q:
                                 ans_text = q.get("stem", "")
@@ -1084,14 +1116,23 @@ def extract_node(state: GraphState) -> GraphState:
                                     ans_text = q.get("explanation", "")
                                 if ans_text:
                                     clean_ans = ans_text.strip()
-                                    if len(clean_ans) == 1 and clean_ans.upper() in "ABCDE1234":
+                                    cleaned = re.sub(rf'^(?:Question\s*(?:No\.?)?\s*|Q\.?\s*)?{seg.q_num}\s*[-:\.\s]\s*', '', clean_ans, flags=re.IGNORECASE)
+                                    m_letter = re.match(r'^\(?([A-Ea-e])\)?(?:\s*[-:\.]|\s+|$)', cleaned)
+                                    if m_letter:
+                                        opt_let = m_letter.group(1).upper()
+                                        target_q["marked_answer"] = opt_let
+                                        target_q["marked_correct_answer"] = opt_let
+                                        rest = cleaned[m_letter.end():].strip()
+                                        if rest and not target_q.get("answer_text"):
+                                            target_q["answer_text"] = rest
+                                    elif len(clean_ans) == 1 and clean_ans.upper() in "ABCDE1234":
                                         target_q["marked_answer"] = clean_ans.upper()
                                         target_q["marked_correct_answer"] = clean_ans.upper()
                                     elif not target_q.get("answer_text"):
                                         target_q["answer_text"] = ans_text
                                     else:
                                         target_q["answer_text"] += "\n" + ans_text
-                                continue
+                            continue
 
                         q["question_number"] = seg.q_num
                         if "stem" in q and q["stem"]:
@@ -1159,8 +1200,39 @@ def extract_node(state: GraphState) -> GraphState:
                     if had_gemini_ocr_call:
                         time.sleep(1.0)
 
-                if doc:
+                # Filter out any blocks belonging to an Answer Key section
+                extracted = [q for q in extracted if not (q.get("section") and re.search(r'(?i)\b(?:answer[\s\/\\]*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints)\b', str(q.get("section"))))]
+
+                # Extract answer keys from all available Answer Key text sources
+                ans_sources = []
+                ans_header_re = re.compile(r'(?i)\b(?:answer[\s\/\\]*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints)\b')
+                for s in segments:
+                    if s.section and ans_header_re.search(s.section):
+                        ans_sources.append(s.flat_text)
+                
+                raw_ans_m = ans_header_re.search(raw_text)
+                if raw_ans_m:
+                    ans_sources.append(raw_text[raw_ans_m.start():])
+
+                if doc and not doc.is_closed and len(doc) > 0:
+                    for p_idx in range(max(0, len(doc) - 2), len(doc)):
+                        p_txt = doc[p_idx].get_text()
+                        p_m = ans_header_re.search(p_txt)
+                        if p_m:
+                            ans_sources.append(p_txt[p_m.start():])
+
+                if doc and not doc.is_closed:
                     doc.close()
+
+                ans_pat = re.compile(r'(?:^|\n|[ \t])(\d{1,3})\s*(?:[-:\.]|\n|[ \t]+)\s*([A-Ea-e])(?:\b|[^a-zA-Z]|$)')
+                for src in ans_sources:
+                    for m in ans_pat.finditer(src):
+                        k_num = int(m.group(1))
+                        ans_letter = m.group(2).upper()
+                        target_q = next((t for t in extracted if t["question_number"] == k_num), None)
+                        if target_q and not target_q.get("marked_answer"):
+                            target_q["marked_answer"] = ans_letter
+                            target_q["marked_correct_answer"] = ans_letter
 
                 # De-duplicate and re-number if section restarts caused duplicates
                 seen_qnums: set = set()
@@ -1176,11 +1248,16 @@ def extract_node(state: GraphState) -> GraphState:
 
                 print(f"[extract_node] Layout-aware extraction produced {len(extracted)} questions.", flush=True)
                 
-                # Strip leading question numbers from stems
-                prefix_re = re.compile(r'^[Qq]*[\.\s]*\d+[\.\)\-:]?\s*')
+                # Strip leading question numbers from stems ONLY if matching this question's number
                 for q in extracted:
-                    if q.get("stem"):
-                        q["stem"] = prefix_re.sub('', q["stem"])
+                    q_num = q.get("question_number")
+                    if q.get("stem") and q_num:
+                        q["stem"] = re.sub(
+                            rf'^(?:Question\s*(?:No\.?)?\s*|Q\.?\s*(?:No\.?)?\s*|Sl\.?\s*No\.?\s*|Problem\s*|Prob\.?\s*)?{q_num}\s*(?:[\.\)\:-]|--)\s*',
+                            '',
+                            q["stem"],
+                            flags=re.IGNORECASE,
+                        ).lstrip('.:- \t')
                 
                 return {"extracted_blocks": extracted, "token_usage": state.get("token_usage", {})}
 
@@ -1199,11 +1276,16 @@ def extract_node(state: GraphState) -> GraphState:
     t_regex_elapsed = time.perf_counter() - t_regex_start
     per_q_dur = round(t_regex_elapsed / max(1, len(extracted)), 2)
     
-    # Strip leading question numbers from stems
-    prefix_re = re.compile(r'^[Qq]*[\.\s]*\d+[\.\)\-:]?\s*')
+    # Strip leading question numbers from stems ONLY if matching this question's number
     for q in extracted:
-        if q.get("stem"):
-            q["stem"] = prefix_re.sub('', q["stem"])
+        q_num = q.get("question_number")
+        if q.get("stem") and q_num:
+            q["stem"] = re.sub(
+                rf'^(?:Question\s*(?:No\.?)?\s*|Q\.?\s*(?:No\.?)?\s*|Sl\.?\s*No\.?\s*|Problem\s*|Prob\.?\s*)?{q_num}\s*(?:[\.\)\:-]|--)\s*',
+                '',
+                q["stem"],
+                flags=re.IGNORECASE,
+            ).lstrip('.:- \t')
         q["extraction_time_seconds"] = per_q_dur
         if "step_times" not in q or not isinstance(q["step_times"], dict):
             q["step_times"] = {}
@@ -1766,24 +1848,20 @@ def rule_check_node(state: GraphState) -> GraphState:
 
 
 def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Optional[str] = None):
-    """Uses Groq Vision, Gemini Vision, or Local Tesseract OCR to re-extract a specific question accurately."""
+    """Uses Groq Vision, Gemini Vision, or Local Tesseract OCR to re-extract and solve a specific question accurately."""
     import base64
     import io
 
-    # Resolve active OCR engine & enabled status
+    # Resolve active OCR engine
     try:
         from ..storage.config_manager import get_setting
-        ocr_enabled = get_setting("question_ocr_enabled", True)
-        if not ocr_enabled and engine is None:
-            raise ValueError("Whole Question OCR is disabled in Pipeline Settings.")
         if engine is None:
-            engine = get_setting("question_ocr_engine", "gemini")
-    except Exception as err:
-        if "disabled in Pipeline Settings" in str(err):
-            raise
-    engine = str(engine or "gemini").strip().lower()
+            engine = get_setting("question_ocr_engine", "groq")
+    except Exception:
+        pass
+    engine = str(engine or "groq").strip().lower()
     if engine in ("off", "disabled"):
-        raise ValueError("Whole Question OCR is disabled.")
+        engine = "groq"
 
     # --- Engine 1: Tesseract Local ($0, offline Malayalam & English) ---
     if engine == "tesseract":
@@ -1826,101 +1904,124 @@ def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Opt
             print(f"[Question OCR] Tesseract OCR failed: {e}", flush=True)
             raise
 
-    prompt = """
-Extract ONLY Question {question_number} from this page exactly as it appears for STUDENTS studying for exams.
-The text must make complete, clear pedagogical and grammatical sense to a student.
+    prompt = r"""You are an expert bilingual exam educator and STEM professor.
+Carefully inspect this question crop containing Question {question_number}.
 CRITICAL INSTRUCTIONS:
-1. Transcribe and preserve all mathematical equations, fractions, formulas, and symbols into standard inline LaTeX ($...) or display LaTeX ($$...$$).
-   - DO NOT put regular English or Malayalam sentences, or subquestion labels (like "(a)" or "(b)") inside math delimiters ($...$ or $$...$$). Words inside math mode lose spaces and become unreadable.
-   - WRONG: `$\text{(b) The reactance is given by } X_C = \frac{1}{\omega C}$`
-   - CORRECT: `(b) The reactance is given by $X_C = \frac{1}{\omega C}$`
-   - Explanatory phrases must remain normal text outside math mode: write "where $h$ is Planck's constant and $e$ is the charge of an electron", never "whereh $$isPlanck'sconstantande$$".
-   - Keep spaces between words and variables (write "where $h$", not "whereh").
-2. Preserve all image tokens (e.g., {{IMG:https://...}} or {{IMG_BLOCK:...}}) EXACTLY as they appear in the text. NEVER remove or modify them.
-3. Determine if the question is "mcq" (Multiple Choice) or "descriptive".
-4. For "mcq" questions:
-   - Extract options into 'options': {"A": "...", "B": "...", "C": "...", "D": "..."}.
-   - Extract the correct answer into 'marked_answer'.
-   - Extract any solution or explanation into 'explanation'.
-5. For "descriptive" questions (no A/B/C/D choices, often with sub-questions like (a), (b)):
-   - Keep the entire question, including sub-questions, inside the 'stem'.
-   - Extract the provided solution, answer, or diagrams into 'answer_text'. Make sure to include any {{IMG:...}} tokens that are part of the answer!
-   - Leave 'options' empty.
-6. Transcribe Malayalam and Indic text faithfully into standard Unicode script. Do not invent or summarize.
+1. Transcribe the question stem cleanly into 'stem'.
+   - Transcribe and preserve all mathematical equations, fractions, formulas, and symbols into standard inline LaTeX ($...) or display LaTeX ($$...$$).
+   - DO NOT put regular English or Malayalam sentences inside math delimiters ($...$ or $$...$$).
+   - Preserve all image tokens (e.g., {{IMG:https://...}} or {{IMG_BLOCK:...}}) exactly as they appear.
+2. Determine question type: 'mcq', 'descriptive_single', or 'descriptive_subquestions'.
+3. Extract all options into 'options' using their printed keys (e.g., '1', '2', '3', '4' or 'A', 'B', 'C', 'D'). Clean values into standard LaTeX ($...$).
+4. SOLVE AND VALIDATE THE QUESTION:
+   - For MCQs: Solve the problem/circuit/diagram step-by-step.
+     * Check circuit symmetry / balanced bridge condition (e.g. Wheatstone bridge R1/R2 = R3/R4 eliminates the central bridge resistor).
+     * Calculate the final equivalent value.
+   - Keep 'reasoning' concise and direct (under 100 words), summarizing the final derivation clearly.
+   - Compare the derived answer with 'options' and set 'validated_answer' to the EXACT key of the matching option (e.g. '2' or 'B').
+   - If an exam key or answer is printed on the paper, extract it into 'marked_answer', otherwise set 'marked_answer': null.
+5. For descriptive questions (no options):
+   - Only extract 'answer_text'/'explanation' if printed on the page. If not printed, set to null. NEVER invent solutions for descriptive questions.
 
-Output ONLY a valid JSON object exactly matching this schema, with no markdown code blocks or extra text:
+Output ONLY a valid JSON object:
 {
   "question_number": {question_number},
-  "question_type": "mcq",
-  "stem": "Question stem text here\\na. $\\chi^2$ test\\nb. 't' test",
+  "question_type": "mcq" | "descriptive_single" | "descriptive_subquestions",
+  "stem": "Question stem text here",
   "options": {
-    "A": "Option A text",
-    "B": "Option B text"
+    "1": "Option 1 text",
+    "2": "Option 2 text"
   },
-  "marked_answer": "B",
-  "explanation": "Solution or explanation text here",
+  "marked_answer": null,
+  "reasoning": "Concise derivation under 100 words",
+  "explanation": "Brief solution explanation",
+  "validated_answer": "2",
   "answer_text": null
 }
 """.replace("{question_number}", str(question_number))
-    # --- Engine 2: Groq Vision ---
-    if engine == "groq" or (engine not in ("gemini", "tesseract") and is_groq_enabled()):
-        if is_groq_enabled():
-            try:
-                from groq import Groq
-                groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
-                client = Groq(api_key=groq_key)
-                b64_img = base64.b64encode(image_bytes).decode("utf-8")
-                model_name = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
-                chat_completion = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{b64_img}"
-                                    }
-                                }
-                            ]
-                        }
-                    ],
-                    temperature=0.1,
-                    max_tokens=600,
-                    response_format={"type": "json_object"}
-                )
-                resp_text = chat_completion.choices[0].message.content
-                cleaned = _clean_json_output(resp_text)
-                data = json.loads(cleaned)
-                p_tok = chat_completion.usage.prompt_tokens if chat_completion.usage else 0
-                c_tok = chat_completion.usage.completion_tokens if chat_completion.usage else 0
-                return data, p_tok, c_tok
-            except Exception as e:
-                print(f"Groq vision rescan failed: {e}", flush=True)
-                if engine == "groq":
-                    raise
 
-    # --- Engine 3: Gemini Vision ---
-    if engine == "gemini" or is_gemini_enabled():
-        if is_gemini_enabled():
-            google_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
-            client = genai.Client(api_key=google_key)
-            model_name = os.getenv("GEMINI_EXTRACT_MODEL", "gemini-3.1-flash") 
-            res = client.models.generate_content(
-                model=model_name,
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-                    prompt
-                ],
-                config=types.GenerateContentConfig(temperature=0.1)
-            )
-            cleaned = _clean_json_output(res.text)
-            data = json.loads(cleaned)
-            p_tok = res.usage_metadata.prompt_token_count if res.usage_metadata else 0
-            c_tok = res.usage_metadata.candidates_token_count if res.usage_metadata else 0
-            return data, p_tok, c_tok
+    # Helper function for Groq Vision
+    def _try_groq_vision():
+        groq_key = (os.getenv("GROQ_API_KEY") or "").strip()
+        if not groq_key or groq_key.startswith("your_"):
+            return None
+        from groq import Groq
+        client = Groq(api_key=groq_key)
+        b64_img = base64.b64encode(image_bytes).decode("utf-8")
+        model_name = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
+        chat_completion = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{b64_img}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0.1,
+            max_tokens=2000,
+            response_format={"type": "json_object"}
+        )
+        resp_text = chat_completion.choices[0].message.content
+        cleaned = _clean_json_output(resp_text)
+        data = json.loads(cleaned)
+        p_tok = chat_completion.usage.prompt_tokens if chat_completion.usage else 0
+        c_tok = chat_completion.usage.completion_tokens if chat_completion.usage else 0
+        return data, p_tok, c_tok
+
+    # Helper function for Gemini Vision
+    def _try_gemini_vision():
+        google_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+        if not google_key or google_key.startswith("your_"):
+            return None
+        client = genai.Client(api_key=google_key)
+        model_name = os.getenv("GEMINI_EXTRACT_MODEL", "gemini-2.5-flash")
+        res = client.models.generate_content(
+            model=model_name,
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                prompt
+            ],
+            config=types.GenerateContentConfig(temperature=0.1, response_mime_type="application/json")
+        )
+        cleaned = _clean_json_output(res.text)
+        data = json.loads(cleaned)
+        p_tok = res.usage_metadata.prompt_token_count if res.usage_metadata else 0
+        c_tok = res.usage_metadata.candidates_token_count if res.usage_metadata else 0
+        return data, p_tok, c_tok
+
+    # Execution order based on engine preference with automatic fallback
+    if engine == "gemini":
+        try:
+            res = _try_gemini_vision()
+            if res:
+                return res
+        except Exception as e:
+            print(f"Gemini vision rescan failed: {e}; falling back to Groq", flush=True)
+        res = _try_groq_vision()
+        if res:
+            return res
+    else:
+        # Default: Groq vision first then Gemini
+        try:
+            res = _try_groq_vision()
+            if res:
+                return res
+        except Exception as e:
+            print(f"Groq vision rescan failed: {e}; falling back to Gemini", flush=True)
+        try:
+            res = _try_gemini_vision()
+            if res:
+                return res
+        except Exception as e:
+            print(f"Gemini vision rescan failed: {e}", flush=True)
 
     groq_st = get_groq_status()
     gemini_st = get_gemini_status()

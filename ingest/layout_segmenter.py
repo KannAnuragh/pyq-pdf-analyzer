@@ -101,9 +101,15 @@ _Q_HEADER_RE = re.compile(
         |
         (\d{1,3})
         \s*
-        (?:[.):\-]|--)
+        (?:
+            \.(?!\d(?![a-zA-Z]))
+            |
+            \)(?=\s|$)
+            |
+            [\:\-]|--
+        )
     )
-    (?!\d)
+    (?!\d(?![a-zA-Z]))
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -170,13 +176,17 @@ def sort_blocks_in_reading_order(blocks: list[dict]) -> list[dict]:
                 line_yc = (line_y0 + line_y1) / 2.0
                 line_h = max(1.0, line_y1 - line_y0)
                 
+                b_w = max(1.0, bbox[2] - bbox[0])
                 # Check for significant horizontal collision with existing line elements.
-                # If block b starts at the same horizontal position as an element in line, they are vertically stacked separate lines!
-                has_horizontal_collision = any(
-                    max(bbox[0], x.get("bbox", [0, 0, 0, 0])[0]) <
-                    min(bbox[2], x.get("bbox", [0, 0, 0, 0])[2]) - 3.0
-                    for x in line
-                )
+                # Only treat as vertically stacked lines if two substantial elements have major overlap (>15px and >50% width).
+                has_horizontal_collision = False
+                for x in line:
+                    x_b = x.get("bbox", [0, 0, 0, 0])
+                    x_w = max(1.0, x_b[2] - x_b[0])
+                    overlap_x = min(bbox[2], x_b[2]) - max(bbox[0], x_b[0])
+                    if overlap_x > 15.0 and overlap_x > 0.5 * min(b_w, x_w):
+                        has_horizontal_collision = True
+                        break
                 if has_horizontal_collision:
                     continue
 
@@ -414,11 +424,19 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
                 current_segment.elements.append(elem)
             continue
 
-        ans_m = re.search(r'(?i)^(?:answer\s*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints)\s*$', text)
-        if ans_m and elem.font_size >= body_size * 1.05:
+        is_provisional_title = bool(re.search(r'(?i)\b(?:provisional|final)\s+answer\s*key\b', text))
+        ans_m = re.search(r'(?i)\b(?:answer[\s\/\\]*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints)\b', text)
+        if ans_m and not is_provisional_title and (elem.font_size >= body_size * 1.05 or elem.is_bold or len(text.strip()) <= 35):
             current_section = "Answer Key"
-            if current_segment is not None:
-                current_segment.elements.append(elem)
+            if current_segment is not None and current_segment.elements:
+                segments.append(current_segment)
+            current_segment = QuestionSegment(
+                q_num=0,
+                page=elem.page,
+                section="Answer Key",
+                elements=[elem],
+            )
+            prev_elem = elem
             continue
 
         # -----------------------------------------------------------------
@@ -430,7 +448,7 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
             remainder = text[q_m.end():]
             gap_size = len(remainder) - len(remainder.lstrip())
             
-            boundary_result = _is_question_boundary(elem, body_size, gap_size, prev_elem, current_segment)
+            boundary_result = _is_question_boundary(elem, body_size, gap_size, prev_elem, current_segment, q_num=q_num)
             
             with open("/tmp/segmenter_debug.log", "a") as f:
                 f.write(f"Testing Q{q_num}: text={repr(text[:30])}...\n")
@@ -476,9 +494,8 @@ def segment_questions(span_blocks: list[dict]) -> list[QuestionSegment]:
 # Structural corroboration test
 # ---------------------------------------------------------------------------
 
-def _is_question_boundary(elem: LayoutElement, body_size: float, gap_size: int, prev_elem: Optional[LayoutElement], current_segment: Optional[QuestionSegment]) -> bool:
+def _is_question_boundary(elem: LayoutElement, body_size: float, gap_size: int, prev_elem: Optional[LayoutElement], current_segment: Optional[QuestionSegment], q_num: int = 0) -> bool:
     """
-    Return True only if structural cues support this element being a
     Return True only if structural cues support this element being a
     question-header, not just a numbered list item inside explanation text.
     """
@@ -501,6 +518,10 @@ def _is_question_boundary(elem: LayoutElement, body_size: float, gap_size: int, 
                     is_continuation = True
                 elif last_word == 'a':  # ONLY lowercase 'a' as an article, not uppercase 'A' (Ampere, Option A, etc)
                     is_continuation = True
+
+    # If q_num represents the next sequential question, it is NEVER a wrapped continuation of the previous question!
+    if current_segment and q_num >= current_segment.q_num + 1:
+        is_continuation = False
 
     # If this is physically consecutive text AND it follows a continuation marker, it is a wrapped line.
     if is_continuation and not is_new_page and y_gap <= (body_size * 3.5):
@@ -580,16 +601,16 @@ def _filter_valid_segments(segments: list[QuestionSegment]) -> list[QuestionSegm
     last_rejected_q_num = -999
 
     for i, seg in enumerate(segments[start_idx + 1:], start=start_idx + 1):
+        if seg.section and re.search(r'(?i)\b(?:answer[\s\/\\]*key|answers|solutions|ഉത്തരങ്ങൾ|പരിഹാരങ്ങൾ|hints)\b', seg.section):
+            accepted.append(seg)
+            continue
+
         q = seg.q_num
         section_changed = seg.section != prev_section and seg.section is not None
 
         is_valid = False
         
-        if q == last_rejected_q_num + 1:
-            # This is likely a continuation of a rejected internal numbered list (e.g., inside an answer).
-            # We must reject it even if it happens to match `expected`.
-            is_valid = False
-        elif q == expected:
+        if q == expected:
             is_valid = True
             expected = q + 1
         elif section_changed and q <= expected:
@@ -606,10 +627,10 @@ def _filter_valid_segments(segments: list[QuestionSegment]) -> list[QuestionSegm
                 is_valid = True
                 expected = 2
         elif q > expected:
-            # Check lookahead: if a future segment (within next 10) matches 'expected' or 'expected+1' or 'expected+2',
+            # Check lookahead: if a future segment has a number LESS than q that matches expected,
             # then THIS 'q' is a false positive jump (e.g. we see 90, but 6 is coming up).
             future_qs = [s.q_num for s in segments[i + 1 : i + 12]]
-            if any(fq in (expected, expected + 1, expected + 2) for fq in future_qs):
+            if any(fq < q and fq in (expected, expected + 1) for fq in future_qs):
                 is_valid = False
             else:
                 is_valid = True

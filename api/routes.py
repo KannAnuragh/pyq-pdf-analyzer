@@ -972,142 +972,13 @@ def update_app_config(updates: dict = Body(...)):
     update_settings(updates)
     return get_app_config()
 
-def is_cover_or_instruction_page(page_text: str) -> bool:
-    """Identifies cover, instructions, or syllabus pages that are not part of the question paper."""
-    has_inst = any(w in page_text for w in [
-        'j]¡SÇw°¥', 'നിർദ്ദേശങ്ങൾ', 'Instructions', 'INSTRUCTIONS',
-        'DSh|LYL¡À]W¥¨Oç', 'ഉദ്യോഗാർത്ഥികൾക്കുള്ള', 'CANDIDATES'
-    ])
-    has_booklet = any(w in page_text for w in [
-        'S\\Lh|kOñW', 'ചോദ്യപുസ്തക', 'Question Booklet', 'Alpha Code', 'AƒqSWLcV',
-        'Max. Marks', 'Maximum Marks', 'yopU :'
-    ])
-    return has_inst and has_booklet
 
+from ..ingest.crop_utils import (
+    is_cover_or_instruction_page,
+    find_question_page,
+    get_question_crop_rect,
+)
 
-def find_question_page(doc, question_number: int, hint_page: int = None) -> int:
-    """Finds the true physical page containing question_number, skipping cover/instruction pages."""
-    if hint_page is not None and 0 <= hint_page < len(doc):
-        txt = doc[hint_page].get_text()
-        if not is_cover_or_instruction_page(txt):
-            if re.search(fr'(?:^|\n)\s*{question_number}\s*[\.\):-]', txt):
-                return hint_page
-
-    # Priority 1: Explicit 'Question N' or 'Q. N'
-    q_explicit = re.compile(fr'(?i)(?:^|\n)\s*(?:Question\s*|Q\.?\s*){question_number}\s*(?::\-?|[\.\):-])\s*')
-    for p in range(len(doc)):
-        txt = doc[p].get_text()
-        if is_cover_or_instruction_page(txt):
-            continue
-        if q_explicit.search(txt):
-            return p
-
-    # Priority 2: Question number followed by options (A, B, C, D) on the same page
-    q_with_opts = re.compile(fr'(?:^|\n)\s*{question_number}\s*[\.\):-]\s+.*?(?:^|\n|\s+)(?:\(?[A-D][\.\):-]|\([a-d]\))', re.DOTALL)
-    for p in range(len(doc)):
-        txt = doc[p].get_text()
-        if is_cover_or_instruction_page(txt):
-            continue
-        if q_with_opts.search(txt):
-            return p
-
-    # Priority 3: Fallback N. on a non-instruction page
-    q_fallback = re.compile(fr'(?:^|\n)\s*{question_number}\s*(?:[\.\)]|:-)\s+')
-    for p in range(len(doc)):
-        txt = doc[p].get_text()
-        if is_cover_or_instruction_page(txt):
-            continue
-        if q_fallback.search(txt):
-            return p
-
-    return None
-
-
-def get_question_crop_rect(page, question_number: int, next_question_number: int = None, next_question_stem: str = None, is_continuation: bool = False):
-    """Calculates tight bounding box Rect for the specified question on page."""
-    blocks = page.get_text("dict")["blocks"]
-    start_y = 0 if is_continuation else None
-    end_y = None
-    
-    # Robust regex to match '1.', '1)', '(1)', 'Question 1:', 'Q. 1', etc.
-    pat_prefix = r'(?i)(?:^|\n)\s*[\*\_]*(?:Question\s*(?:No\.?)?|Q\.?\s*(?:No\.?)?|Sl\.?\s*No\.?|Problem\s*|Prob\.?\s*|ചോദ്യം\s*|പ്രശ്നം\s*)?[\(\[]?\s*'
-    # Suffix allows space, end of string, OR an immediate open parenthesis (e.g., '8.(i)')
-    pat_suffix = r'\s*[\)\]]?\s*[\*\_]*(?::\-?|[\.\):-])(?:\s+|$|(?=[\(\[]))'
-    
-    q_start_pat = re.compile(f"{pat_prefix}{question_number}{pat_suffix}")
-    next_q_pat = re.compile(f"{pat_prefix}{next_question_number}{pat_suffix}") if next_question_number else None
-    
-    found_start = is_continuation
-    valid_y1s = []
-    
-    for b in blocks:
-        if b["type"] == 0:
-            for l in b["lines"]:
-                txt = "".join([s["text"] for s in l["spans"]]).strip()
-                if not txt: continue
-                
-                if not found_start:
-                    if q_start_pat.search(txt):
-                        found_start = True
-                        start_y = max(0, l["bbox"][1] - 12)
-                        valid_y1s.append(l["bbox"][3])
-                else:
-                    if next_q_pat and next_q_pat.search(txt):
-                        is_valid_next_q = True
-                        if next_question_stem and not re.search(r'(?i)(?:Question|Q\.?|Sl\.?|Prob)\s*', txt):
-                            clean_txt = re.sub(r'^\s*[\(\[]?\s*\d+\s*[\)\]]?\s*[\.\:\-]?\s*', '', txt).strip().lower()
-                            clean_stem = re.sub(r'^\s*[\(\[]?\s*\d+\s*[\)\]]?\s*[\.\:\-]?\s*', '', next_question_stem).strip().lower()
-                            # Check if the start of the line has any similarity to the next question stem
-                            if clean_stem:
-                                if clean_txt:
-                                    if clean_txt[:10] not in clean_stem and clean_stem[:10] not in clean_txt:
-                                        is_valid_next_q = False
-                                else:
-                                    # If the line is literally just the number and we have a stem, 
-                                    # we should be cautious. If the actual question has a stem on the same line,
-                                    # this is a false positive (e.g. a numbered list item in the answer).
-                                    # We will reject it to prevent early crops. It's better to over-crop than under-crop.
-                                    is_valid_next_q = False
-                        
-                        if is_valid_next_q:
-                            # Fix for multi-column layouts where the next question is physically higher than the bottom of the current question.
-                            # Also prevents cropping out the rest of the current column if a false positive occurs.
-                            if valid_y1s:
-                                end_y = max(max(valid_y1s) + 15, l["bbox"][1] - 5)
-                            else:
-                                end_y = l["bbox"][1] - 5
-                            break
-                        else:
-                            valid_y1s.append(l["bbox"][3])
-                    else:
-                        # Ignore clear footers (like standalone page numbers) at the bottom
-                        if l["bbox"][1] > page.rect.height - 70 and re.match(r'^(?:page\s*)?\d+(?:\s*of\s*\d+)?$', txt, re.IGNORECASE):
-                            continue
-                        valid_y1s.append(l["bbox"][3])
-            
-            if next_q_pat and end_y is not None:
-                break
-        else:
-            if found_start:
-                # Keep images
-                valid_y1s.append(b["bbox"][3])
-                
-    if start_y is not None:
-        if end_y is None:
-            if valid_y1s:
-                end_y = max(valid_y1s) + 15
-            else:
-                end_y = max(start_y + 100, page.rect.height - 30)
-        
-        # Clamp to page bounds
-        end_y = min(end_y, page.rect.height)
-        
-        if is_continuation and not valid_y1s:
-            return None
-            
-        return pymupdf.Rect(0, start_y, page.rect.width, end_y)
-        
-    return None
 
 
 from fastapi.responses import Response
@@ -1142,8 +1013,11 @@ def get_question_image(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to open PDF: {e}")
         
-    hint_page = getattr(result_obj.questions[target_q_idx], "page_number", None)
-    target_page_idx = find_question_page(doc, question_number, hint_page)
+    target_q = result_obj.questions[target_q_idx]
+    hint_page = getattr(target_q, "page_number", None)
+    target_stem = getattr(target_q, "stem", None)
+    target_options = getattr(target_q, "options", None)
+    target_page_idx = find_question_page(doc, question_number, hint_page, question_stem=target_stem)
                 
     if target_page_idx is None:
         raise HTTPException(status_code=404, detail="Could not find Question in PDF pages")
@@ -1155,13 +1029,14 @@ def get_question_image(
     if target_q_idx + 1 < len(result_obj.questions):
         next_q = result_obj.questions[target_q_idx + 1]
         next_hint = getattr(next_q, "page_number", None)
-        next_page_idx = find_question_page(doc, next_q.question_number, next_hint)
+        next_stem = getattr(next_q, "stem", None)
+        next_page_idx = find_question_page(doc, next_q.question_number, next_hint, question_stem=next_stem)
         if next_page_idx is not None:
             # If the next question is found, it bounds the end of our current question.
             # It could be on the same page, or a subsequent page.
             end_page_idx = next_page_idx
             next_question_number = next_q.question_number
-            next_question_stem = getattr(next_q, "stem", None)
+            next_question_stem = next_stem
 
     if end_page_idx == target_page_idx and target_q_idx + 1 == len(result_obj.questions):
         # Last question in the parsed results. It might spill over!
@@ -1186,7 +1061,16 @@ def get_question_image(
             p_next_q_num = next_question_number if p_idx == end_page_idx else None
             p_next_q_stem = next_question_stem if p_idx == end_page_idx else None
             
-            crop_rect = get_question_crop_rect(page, question_number, p_next_q_num, p_next_q_stem, is_continuation=is_cont)
+            crop_rect = get_question_crop_rect(
+                page,
+                question_number,
+                p_next_q_num,
+                p_next_q_stem,
+                is_continuation=is_cont,
+                current_question_stem=target_stem,
+                current_options=target_options
+            )
+
             
             if is_cont and crop_rect is None:
                 continue
@@ -1223,7 +1107,11 @@ def get_question_image(
             
         response = Response(content=image_bytes, media_type="image/png")
         response.headers["X-Image-Parts-Count"] = str(len(pixmaps))
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
         return response
+
     finally:
         doc.close()
 
@@ -1257,8 +1145,11 @@ def get_question_image_info(
         raise HTTPException(status_code=500, detail=f"Failed to open PDF: {e}")
         
     try:
-        hint_page = getattr(result_obj.questions[target_q_idx], "page_number", None)
-        target_page_idx = find_question_page(doc, question_number, hint_page)
+        target_q = result_obj.questions[target_q_idx]
+        hint_page = getattr(target_q, "page_number", None)
+        target_stem = getattr(target_q, "stem", None)
+        target_options = getattr(target_q, "options", None)
+        target_page_idx = find_question_page(doc, question_number, hint_page, question_stem=target_stem)
                     
         if target_page_idx is None:
             return {"parts": 0}
@@ -1270,11 +1161,12 @@ def get_question_image_info(
         if target_q_idx + 1 < len(result_obj.questions):
             next_q = result_obj.questions[target_q_idx + 1]
             next_hint = getattr(next_q, "page_number", None)
-            next_page_idx = find_question_page(doc, next_q.question_number, next_hint)
+            next_stem = getattr(next_q, "stem", None)
+            next_page_idx = find_question_page(doc, next_q.question_number, next_hint, question_stem=next_stem)
             if next_page_idx is not None:
                 end_page_idx = next_page_idx
                 next_question_number = next_q.question_number
-                next_question_stem = getattr(next_q, "stem", None)
+                next_question_stem = next_stem
         
         if end_page_idx == target_page_idx and target_q_idx + 1 == len(result_obj.questions):
             next_p_idx = find_question_page(doc, question_number + 1, target_page_idx)
@@ -1289,7 +1181,15 @@ def get_question_image_info(
             page = doc[p_idx]
             p_next_q_num = next_question_number if p_idx == end_page_idx else None
             p_next_q_stem = next_question_stem if p_idx == end_page_idx else None
-            crop_rect = get_question_crop_rect(page, question_number, p_next_q_num, p_next_q_stem, is_continuation=True)
+            crop_rect = get_question_crop_rect(
+                page,
+                question_number,
+                p_next_q_num,
+                p_next_q_stem,
+                is_continuation=True,
+                current_question_stem=target_stem,
+                current_options=target_options
+            )
             if crop_rect is not None:
                 valid_parts += 1
 
@@ -1347,8 +1247,11 @@ def rescan_question(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to open PDF: {e}")
         
-    hint_page = getattr(result_obj.questions[target_q_idx], "page_number", None)
-    target_page_idx = find_question_page(doc, question_number, hint_page)
+    target_q = result_obj.questions[target_q_idx]
+    hint_page = getattr(target_q, "page_number", None)
+    target_stem = getattr(target_q, "stem", None)
+    target_options = getattr(target_q, "options", None)
+    target_page_idx = find_question_page(doc, question_number, hint_page, question_stem=target_stem)
                 
     if target_page_idx is None:
         raise HTTPException(status_code=404, detail=f"Could not find Question {question_number} in the PDF pages")
@@ -1362,11 +1265,12 @@ def rescan_question(
         if target_q_idx + 1 < len(result_obj.questions):
             next_q = result_obj.questions[target_q_idx + 1]
             next_hint = getattr(next_q, "page_number", None)
-            next_page_idx = find_question_page(doc, next_q.question_number, next_hint)
+            next_stem = getattr(next_q, "stem", None)
+            next_page_idx = find_question_page(doc, next_q.question_number, next_hint, question_stem=next_stem)
             if next_page_idx is not None:
                 end_page_idx = next_page_idx
                 next_question_number = next_q.question_number
-                next_question_stem = getattr(next_q, "stem", None)
+                next_question_stem = next_stem
                 
         pixmaps = []
         for p_idx in range(target_page_idx, end_page_idx + 1):
@@ -1376,7 +1280,15 @@ def rescan_question(
             p_next_q_num = next_question_number if p_idx == end_page_idx else None
             p_next_q_stem = next_question_stem if p_idx == end_page_idx else None
             
-            crop_rect = get_question_crop_rect(page, question_number, p_next_q_num, p_next_q_stem, is_continuation=is_cont)
+            crop_rect = get_question_crop_rect(
+                page,
+                question_number,
+                p_next_q_num,
+                p_next_q_stem,
+                is_continuation=is_cont,
+                current_question_stem=target_stem,
+                current_options=target_options
+            )
             if crop_rect:
                 pix = page.get_pixmap(clip=crop_rect, dpi=200)
             else:
@@ -1831,7 +1743,7 @@ def revalidate_job_endpoint(job_id: str, db: Session = Depends(database.get_db))
 
         # Step 2: Run correction and validation node with force_validation=True (user clicked the button)
         t_reval_start = time.perf_counter()
-        pdf_file_path = job.filepath if hasattr(job, "filepath") and job.filepath else job_id
+        pdf_file_path = get_job_file_path(job) or job.file_path or job_id
         state = {
             "extracted_blocks": questions,
             "job_id": job_id,

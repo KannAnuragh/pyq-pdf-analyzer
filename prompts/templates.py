@@ -41,6 +41,7 @@ TASKS & RULES:
 4. LATEX EQUATIONS: Format all math, fractions, and units with valid inline LaTeX ($...$). Fix broken braces ($V_{proton}$), fractions ($\\frac{a}{b}$), and units ($5 \\times 10^5\\text{ V/m}$, $20\\,\\Omega$). Never put ordinary prose or sentences inside $...$.
 5. READABILITY & PARAGRAPHS: Format explanations with clean paragraph breaks (\\n\\n) and numbered steps (1., 2.). Un-mash joined words ("where $h$ is", not "whereh").
 6. VERIFICATION: Independently solve and return `validated_answer` ('A'|'B'|'C'|'D' or null for descriptive), reasoning, and confidence.
+7. NO ANSWER GENERATION FOR UNANSWERED QUESTIONS: If no answer or explanation was provided in the input, DO NOT invent or generate one. Set `corrected_explanation` to null and `reasoning` to null.
 
 Question Type:
 {question_type}
@@ -62,8 +63,8 @@ Output valid JSON matching:
   "is_garbled": false,
   "corrected_stem": "Cleaned stem with typos fixed",
   "corrected_options": {{"A": "Cleaned option A"}},
-  "reasoning": "Step-by-step reasoning",
-  "corrected_explanation": "Cleaned, readable explanation with proper paragraphs and LaTeX, or empty string if none provided",
+  "reasoning": "Step-by-step reasoning or null if no answer/explanation provided",
+  "corrected_explanation": "Cleaned explanation or null if none provided in paper",
   "validated_answer": "A" | "B" | "C" | "D" | null,
   "confidence": "high" | "medium" | "low"
 }}
