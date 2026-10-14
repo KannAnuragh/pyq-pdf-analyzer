@@ -1425,7 +1425,6 @@ def correction_and_validation_node(state: dict) -> dict:
                 doc = pymupdf.open(resolved_pdf_path)
                 
                 from ..ingest.crop_utils import get_question_crop_rect, find_question_page
-                from ..storage.cloudflare import upload_image_to_cloudflare
 
                 for q in corrected_blocks:
                     q_num = q.get("question_number")
@@ -1453,18 +1452,10 @@ def correction_and_validation_node(state: dict) -> dict:
                             image_bytes = pix.tobytes("png")
                             
                             try:
-                                ext_data, p_tok, c_tok = rescan_question_vision(image_bytes, q_num)
+                                ext_data, p_tok, c_tok = rescan_question_vision(image_bytes, q_num, existing_stem=q.get("stem"))
                                 fallback_p_tokens += p_tok
                                 fallback_c_tokens += c_tok
                                 
-                                # Check if diagram is required/present in question
-                                # If the question requires a diagram, upload the high-DPI crop to Cloudflare and embed image tag
-                                if requires_diagram(ext_data.get("stem", "") or q.get("stem", ""), ext_data.get("options", {}) or q.get("options", {})):
-                                    diagram_url = upload_image_to_cloudflare(image_bytes, filename=f"q_{q_num}")
-                                    img_tag = f'<img src="{diagram_url}" alt="Question {q_num} Diagram" />'
-                                    cur_stem = ext_data.get("stem") or q.get("stem", "")
-                                    if "<img" not in cur_stem:
-                                        ext_data["stem"] = f"{cur_stem}\n\n{img_tag}".strip()
 
                                 # Replace content from cropped Vision OCR
                                 if ext_data.get("stem"):
@@ -1592,6 +1583,23 @@ def correction_and_validation_node(state: dict) -> dict:
             q["stem"] = normalize_math_in_text(q.get("stem", ""))
             if "options" in q and isinstance(q["options"], dict):
                 q["options"] = {k: normalize_math_in_text(str(v)) for k, v in q["options"].items()}
+
+        # Guarantee authentic diagram preservation across all questions:
+        authentic_diagrams = []
+        if extracted_images_stem:
+            for tok_val in extracted_images_stem.values():
+                if "example.com" not in tok_val and tok_val not in authentic_diagrams:
+                    authentic_diagrams.append(tok_val)
+        raw_diagrams = re.findall(r'(\{\{\s*(?:IMG|IMG_BLOCK)\s*:\s*https?://[^\s}]+\}\})', q.get("raw_text", ""))
+        for r_diag in raw_diagrams:
+            if "example.com" not in r_diag and r_diag not in authentic_diagrams:
+                authentic_diagrams.append(r_diag)
+
+        cur_stem = q.get("stem", "")
+        for diag in authentic_diagrams:
+            if diag not in cur_stem:
+                cur_stem = f"{cur_stem.strip()}\n\n{diag}".strip()
+        q["stem"] = cur_stem
 
         # Determine corrected explanation: strictly NO EXTRA TEXTS
         final_explanation = None
@@ -2044,7 +2052,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                         )
                         pix = page.get_pixmap(clip=crop, dpi=200) if crop else page.get_pixmap(dpi=200)
                         image_bytes = pix.tobytes("png")
-                        ext_data, p_tok_v, c_tok_v = rescan_question_vision(image_bytes, q_num)
+                        ext_data, p_tok_v, c_tok_v = rescan_question_vision(image_bytes, q_num, existing_stem=stem)
                         doc.close()
                         
                         rec_stem = ext_data.get("stem") or stem
@@ -2053,13 +2061,6 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                         rec_ans = ext_data.get("validated_answer") or ext_data.get("marked_answer")
                         rec_exp = ext_data.get("explanation") or ext_data.get("answer_text") or None
                         
-                        # If question requires diagram, upload crop to Cloudflare and embed img tag
-                        if requires_diagram(rec_stem, rec_opts):
-                            from ..storage.cloudflare import upload_image_to_cloudflare
-                            diagram_url = upload_image_to_cloudflare(image_bytes, filename=f"q_{q_num}")
-                            img_tag = f'<img src="{diagram_url}" alt="Question {q_num} Diagram" />'
-                            if "<img" not in rec_stem:
-                                rec_stem = f"{rec_stem}\n\n{img_tag}".strip()
 
                         is_val = False
                         if rec_ans:

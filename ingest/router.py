@@ -110,6 +110,10 @@ def expand_anchor_tokens(text: str) -> str:
     # Strip any un-restored QAI_IMAGE tokens so raw placeholders never show to users
     text = re.sub(r'\[\[\s*QAI_IMAGE:[^\]]+\]\]', '', text)
 
+    # Strip any hallucinated example.com / placeholder tokens
+    text = re.sub(r'\{\{\s*(?:IMG|IMG_BLOCK)\s*:\s*https?://(?:www\.)?example\.com[^\s}]*\}\}', '', text)
+    text = re.sub(r'!\[(?:diagram|math)\]\(https?://(?:www\.)?example\.com[^\s)]*\)', '', text)
+
     return text
 
 

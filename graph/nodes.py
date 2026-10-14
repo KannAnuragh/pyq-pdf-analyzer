@@ -1847,10 +1847,16 @@ def rule_check_node(state: GraphState) -> GraphState:
     }
 
 
-def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Optional[str] = None):
+def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Optional[str] = None, existing_stem: Optional[str] = None):
     """Uses Groq Vision, Gemini Vision, or Local Tesseract OCR to re-extract and solve a specific question accurately."""
     import base64
     import io
+
+    # Extract any authentic image tokens already attached to this question from the PDF
+    auth_tokens = []
+    if existing_stem:
+        raw_tokens = re.findall(r'(\{\{\s*(?:IMG|IMG_BLOCK)\s*:\s*https?://[^\s}]+\}\})', existing_stem)
+        auth_tokens = [tok for tok in raw_tokens if "example.com" not in tok and "placeholder" not in tok]
 
     # Resolve active OCR engine
     try:
@@ -1888,6 +1894,11 @@ def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Opt
             question_type, sub_parts = classify_question_type(options or {}, explanation)
             q_options = (options or {}) if question_type == "mcq" else {}
 
+            if auth_tokens:
+                for tok in auth_tokens:
+                    if tok not in stem:
+                        stem = f"{stem.strip()}\n\n{tok}".strip()
+
             data = {
                 "question_number": question_number,
                 "stem": stem or raw_text,
@@ -1904,14 +1915,18 @@ def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Opt
             print(f"[Question OCR] Tesseract OCR failed: {e}", flush=True)
             raise
 
+    if auth_tokens:
+        img_instruction = f"\n   - PRESERVE AUTHENTIC DIAGRAM: This question has an authentic diagram token: {' '.join(auth_tokens)}. You MUST keep this exact token in 'stem'."
+    else:
+        img_instruction = "\n   - CRITICAL: DO NOT invent, fabricate, or hallucinate image URLs or placeholder tokens (such as example.com, test.png, etc.). Output ONLY clean text and LaTeX."
+
     prompt = r"""You are an expert bilingual exam educator and STEM professor.
 Carefully inspect this question crop containing Question {question_number}.
 
 CRITICAL INSTRUCTION - NO EXTRA TEXTS:
 The role of AI verification is strictly to:
 1. Transcribe the question stem cleanly into 'stem' with all mathematical equations, fractions, and symbols formatted in standard inline LaTeX ($...).
-   - DO NOT generate any extra commentary, conversational preambles, or notes.
-   - Preserve all image tokens (e.g., {{IMG:https://...}} or {{IMG_BLOCK:...}}) exactly as they appear.
+   - DO NOT generate any extra commentary, conversational preambles, or notes.{img_instruction}
 2. Determine question type: 'mcq', 'descriptive_single', or 'descriptive_subquestions'.
 3. Extract all options into 'options' using their printed keys (e.g., '1', '2', '3', '4' or 'A', 'B', 'C', 'D'). Clean values into standard LaTeX ($...).
 4. Validate the answer: For MCQs, find which option matches the derivation and set 'validated_answer' to the exact option key (e.g. '2' or 'B').
@@ -1932,7 +1947,20 @@ Output ONLY a valid JSON object:
   "validated_answer": "2",
   "answer_text": null
 }
-""".replace("{question_number}", str(question_number))
+""".replace("{question_number}", str(question_number)).replace("{img_instruction}", img_instruction)
+
+    def _sanitize_ocr_output(data: dict) -> dict:
+        stem = data.get("stem") or ""
+        # Strip any hallucinated example.com or placeholder tokens
+        stem = re.sub(r'\{\{\s*(?:IMG|IMG_BLOCK)\s*:\s*https?://(?:www\.)?example\.com[^\s}]*\}\}', '', stem)
+        stem = re.sub(r'<img[^>]*example\.com[^>]*>', '', stem)
+        # Restore authentic diagram tokens if dropped
+        if auth_tokens:
+            for tok in auth_tokens:
+                if tok not in stem:
+                    stem = f"{stem.strip()}\n\n{tok}".strip()
+        data["stem"] = stem.strip()
+        return data
 
     # Helper function for Groq Vision
     def _try_groq_vision():
@@ -1992,30 +2020,29 @@ Output ONLY a valid JSON object:
         return data, p_tok, c_tok
 
     # Execution order based on engine preference with automatic fallback
+    res = None
     if engine == "gemini":
         try:
             res = _try_gemini_vision()
-            if res:
-                return res
         except Exception as e:
             print(f"Gemini vision rescan failed: {e}; falling back to Groq", flush=True)
-        res = _try_groq_vision()
-        if res:
-            return res
+        if not res:
+            res = _try_groq_vision()
     else:
         # Default: Groq vision first then Gemini
         try:
             res = _try_groq_vision()
-            if res:
-                return res
         except Exception as e:
             print(f"Groq vision rescan failed: {e}; falling back to Gemini", flush=True)
-        try:
-            res = _try_gemini_vision()
-            if res:
-                return res
-        except Exception as e:
-            print(f"Gemini vision rescan failed: {e}", flush=True)
+        if not res:
+            try:
+                res = _try_gemini_vision()
+            except Exception as e:
+                print(f"Gemini vision rescan failed: {e}", flush=True)
+
+    if res:
+        data, p_tok, c_tok = res
+        return _sanitize_ocr_output(data), p_tok, c_tok
 
     groq_st = get_groq_status()
     gemini_st = get_gemini_status()

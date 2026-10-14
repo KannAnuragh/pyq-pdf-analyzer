@@ -632,7 +632,13 @@ def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
             from ..ingest.router import expand_anchor_tokens
 
             def _expand_question(q):
+                raw_text = getattr(q, "raw_text", "") or ""
                 if hasattr(q, "stem") and q.stem:
+                    if raw_text:
+                        raw_imgs = re.findall(r'(\{\{\s*(?:IMG|IMG_BLOCK)\s*:\s*https?://[^\s}]+\}\})', raw_text)
+                        for r_img in raw_imgs:
+                            if "example.com" not in r_img and r_img not in q.stem and "examcdn.trogon.info" not in q.stem:
+                                q.stem = f"{q.stem.strip()}\n\n{r_img}".strip()
                     q.stem = expand_anchor_tokens(q.stem)
                 if hasattr(q, "explanation") and q.explanation:
                     q.explanation = expand_anchor_tokens(q.explanation)
