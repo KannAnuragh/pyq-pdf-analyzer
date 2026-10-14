@@ -28,8 +28,13 @@ class ProcessedQuestion(QuestionBlock, total=False):
     used_web_search: bool
 
 
-class GraphState(TypedDict):
+class GraphState(TypedDict, total=False):
+    job_id: Optional[str]
     file_path: Optional[str]
+    pdf_path: Optional[str]
+    document_id: Optional[str]
+    force_validation: Optional[bool]
+    provider: Optional[str]
     raw_text: str
     pages: List[PageMetadata]                   # per-page extraction metadata
     # Layout-aware span stream from extract_text_from_pdf (list of LayoutElement-compatible

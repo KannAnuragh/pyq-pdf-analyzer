@@ -70,10 +70,10 @@ def is_answer_validation_enabled() -> bool:
     """Checks whether AI answer validation is enabled."""
     try:
         from ..storage.config_manager import get_setting
-        return bool(get_setting("validation_enabled", False))
+        return bool(get_setting("validation_enabled", True))
     except Exception:
         pass
-    val = os.getenv("ENABLE_ANSWER_VALIDATION", os.getenv("ENABLE_VALIDATION", "false")).lower()
+    val = os.getenv("ENABLE_ANSWER_VALIDATION", os.getenv("ENABLE_VALIDATION", "true")).lower()
     return val in ("true", "1", "yes")
 
 
@@ -320,13 +320,21 @@ class DirectPageCorrectionResponse(BaseModel):
 
 CORRECTION_SYSTEM_PROMPT = r"""You are an expert bilingual (English & Malayalam) exam educator and math editor reviewing question papers for students.
 
+CRITICAL INSTRUCTION - NO EXTRA TEXTS:
+The role of AI verification is strictly to:
+1. Correct typos, split characters, and OCR errors in the stem and options (preserve original wording without rewriting or summarizing).
+2. Determine question type ('mcq', 'descriptive_single', or 'descriptive_subquestions').
+3. Validate the answer.
+DO NOT generate any extra texts, commentary, preambles, notes, or unprompted solutions.
+If no explanation or solution was provided in the input paper, set `corrected_explanation`: null. Never invent or fabricate explanations or solutions.
+
 TASKS & RULES:
 1. CORRECT TYPOS & MATHEMATICAL SYMBOLS (PRESERVE ORIGINAL MEANING):
    - CRITICAL: DO NOT rewrite, rephrase, summarize, or alter the wording of questions. Preserve the original phrasing and structure.
    - ONLY correct typos, OCR errors, spelling, and flagged words in their original language without cross-translating.
    - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Preserve authentic Malayalam.
    - For English: Fix spelling, restore truncated words ('oth'->'Both', 'll'->'All'), and punctuation.
-   - For Math: Format all equations, formulas, fractions, and units using valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$. Fix broken braces ($V_{proton}$) and fraction equations ($\frac{A}{B} = \frac{C}{D}$). Never wrap ordinary prose sentences inside $...$.
+   - For Math: Format all equations, formulas, fractions, and units using valid inline LaTeX ($...). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$. Fix broken braces ($V_{proton}$) and fraction equations ($\frac{A}{B} = \frac{C}{D}$). Never wrap ordinary prose sentences inside $...$.
 
 2. DETERMINE QUESTION TYPE:
    - Identify `question_type`:
@@ -347,8 +355,8 @@ TASKS & RULES:
    - Only correct an explanation if an "Explanation" was actually provided in the input.
 
 5. REQUEST OCR VIA PDF CROP (FOR UNCLEAR QUESTIONS OR MISSING DIAGRAMS):
-   - If the question cannot be understood (raw text is garbled, OCR corrupted, incomplete, missing key equations), OR
-   - If the question requires or refers to a diagram, graph, circuit, or drawing to understand or answer (e.g. "as shown in the figure", "find current in the circuit below") and the visual details are missing or needed:
+   - If the question cannot be understood (raw text is garbled, OCR corrupted, incomplete, missing key equations or options), OR
+   - If the question requires or refers to a diagram, graph, circuit, or drawing to understand or answer (e.g. "as shown in the figure", "find current in the circuit below", "തന്നിരിക്കുന്ന ചിത്രം"):
      * Set `needs_ocr_fallback`: true and `is_too_messy`: true.
      * This will automatically trigger a tight PDF crop of the question to be sent for Vision AI / OCR inspection."""
 
@@ -375,12 +383,20 @@ Output valid JSON matching:
 
 DIRECT_CORRECTION_SYSTEM_PROMPT = r"""You are an expert bilingual (English & Malayalam) exam educator and math editor reviewing question papers for students.
 
+CRITICAL INSTRUCTION - NO EXTRA TEXTS:
+The role of AI verification is strictly to:
+1. Correct typos and math formulas in the existing text (without altering or rephrasing wording).
+2. Identify the question type (mcq, descriptive_single, descriptive_subquestions).
+3. Validate the answer.
+DO NOT generate any extra texts, commentary, preambles, notes, or solutions.
+If no explanation or solution was provided in the source paper/input, set `corrected_explanation`: null. Never invent or fabricate solutions.
+
 TASKS & RULES:
 1. CORRECT TYPOS & MATHEMATICAL SYMBOLS (PRESERVE ORIGINAL MEANING):
    - CRITICAL: DO NOT rewrite, rephrase, summarize, or alter the wording of questions. Preserve original wording.
    - ONLY correct typos, OCR errors, spelling, and truncated words (e.g. 'oth'->'Both', 'll'->'All').
    - For Malayalam: Fix split ligatures, conjuncts, chillu glyphs, and spacing. Do NOT translate between English and Malayalam.
-   - For Math: Enclose all math, formulas, fractions, and units in valid inline LaTeX ($...$). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$. Fix broken braces ($V_{proton}$). Never enclose ordinary sentences inside $...$.
+   - For Math: Enclose all math, formulas, fractions, and units in valid inline LaTeX ($...). Examples: $x^2$, $\frac{a}{b}$, $\sqrt{x}$, $5 \times 10^5\text{ V/m}$, $20\,\Omega$. Fix broken braces ($V_{proton}$). Never enclose ordinary sentences inside $...$.
 
 2. DETERMINE QUESTION TYPE:
    - Identify `question_type`:
@@ -398,7 +414,6 @@ TASKS & RULES:
      * Set `validated_answer`: null
      * Set `answer_status`: "none"
      * Set `corrected_explanation`: null
-   - Only correct an explanation if an explanation was explicitly provided in the input.
 
 5. REQUEST OCR VIA PDF CROP (FOR UNCLEAR QUESTIONS OR MISSING DIAGRAMS):
    - If the raw text is unreadable, garbled, incomplete, or if the question needs/refers to a diagram, graph, circuit, or drawing to understand or answer:
@@ -815,6 +830,46 @@ async def _call_llm_for_page(
 # Post-processing gate (spec §6)
 # ---------------------------------------------------------------------------
 
+def requires_diagram(stem: str, options: dict) -> bool:
+    """Checks whether a question requires or references a diagram/figure and lacks an image tag."""
+    if not stem:
+        return False
+    # If already has an image tag, diagram is present
+    if re.search(r'\{\{IMG(?:_BLOCK)?:\s*[^}]+\}\}', stem) or "<img" in stem:
+        return False
+    if options and any("<img" in str(v) or "{{IMG" in str(v) for v in options.values()):
+        return False
+    diagram_pat = re.compile(
+        r'(?:\b(?:figure|fig\.?|diagram|circuit|graph|chart|shown\s+in\s+the\s+figure|as\s+shown\s+in\s+(?:the\s+)?fig(?:ure)?|as\s+shown\s+below|given\s+in\s+(?:the\s+)?fig(?:ure)?|given\s+below|circuit\s+below)\b|'
+        r'ചിത്രം|ചിത്രത്തിൽ|ചിത്രം\s*കാണുക|തന്നിരിക്കുന്ന\s*ചിത്രം|രേഖാചിത്രം|ഗ്രാഫ്|സർക്യൂട്ട്|താഴെ\s*തന്നിരിക്കുന്ന\s*ചിത്രം)',
+        re.IGNORECASE
+    )
+    return bool(diagram_pat.search(stem))
+
+
+def is_unclear_or_unreadable(q: dict, correction: Any = None) -> bool:
+    """Detects if question cannot be understood by AI (corrupted, missing options, unreadable)."""
+    if correction:
+        if getattr(correction, "needs_ocr_fallback", False) or getattr(correction, "is_too_messy", False):
+            return True
+        if getattr(correction, "text_confidence", 1.0) < 0.4:
+            return True
+    if q.get("is_garbled") or q.get("ocr_uncertain") or q.get("needs_ocr_fallback"):
+        return True
+    stem = (q.get("stem") or "").strip()
+    opts = q.get("options") or {}
+    if not stem or len(stem) < 5:
+        return True
+    from ..ingest.quality_check import is_question_unreadable
+    if is_question_unreadable(stem, opts):
+        return True
+    # If question type is MCQ but has fewer than 2 options
+    qtype = getattr(correction, "question_type", q.get("question_type", ""))
+    if qtype == "mcq" and len(opts) < 2:
+        return True
+    return False
+
+
 def _apply_post_processing_gate(
     corrections: list[QuestionCorrection],
     questions_by_number: dict[int, dict],
@@ -829,6 +884,7 @@ def _apply_post_processing_gate(
     Rules:
     - Text corrections: edit-distance check + confidence floor → accept or reject
     - Answer disagreements: ALWAYS flagged for admin, never auto-applied
+    - Questions requiring diagrams or unclear questions: automatically routed to direct OCR
     """
     from ..storage.models import ReviewFlag
     from ..storage.database import SessionLocal
@@ -840,17 +896,24 @@ def _apply_post_processing_gate(
     for correction in corrections:
         q_num = correction.question_number
         q = questions_by_number.get(q_num, {})
-
         stem = q.get("stem", "")
-        from ..ingest.quality_check import is_question_unreadable
-        if (
-            getattr(correction, 'needs_ocr_fallback', False)
-            or getattr(correction, 'is_too_messy', False)
-            or q.get("is_garbled", False)
-            or q.get("ocr_uncertain", False)
-            or is_question_unreadable(stem, q.get("options", {}))
-        ):
-            ocr_fallbacks.append(q_num)
+        options = q.get("options", {})
+
+        if is_unclear_or_unreadable(q, correction) or requires_diagram(stem, options):
+            if q_num not in ocr_fallbacks:
+                ocr_fallbacks.append(q_num)
+
+    # Also route any questions omitted from the LLM batch that require diagrams or are unclear
+    for q_num, q in questions_by_number.items():
+        if q_num not in [c.question_number for c in corrections]:
+            stem = q.get("stem", "")
+            options = q.get("options", {})
+            if is_unclear_or_unreadable(q) or requires_diagram(stem, options):
+                if q_num not in ocr_fallbacks:
+                    ocr_fallbacks.append(q_num)
+
+    for correction in corrections:
+        q_num = correction.question_number
 
         # --- Text correction gate ---
         for original, corrected in correction.corrected_words.items():
@@ -1051,16 +1114,13 @@ def correction_and_validation_node(state: dict) -> dict:
     cache = get_correction_cache()
 
     force_validation = bool(state.get("force_validation", False))
-    if force_validation:
-        ans_val_on = True
-        word_corr_on = True
-        provider = state.get("provider") or get_on_demand_llm_provider()
-        llm_enabled = provider != "none"
-    else:
-        provider = get_correction_provider()
-        llm_enabled = provider != "none"
-        word_corr_on = is_word_correction_enabled()
-        ans_val_on = is_answer_validation_enabled()
+    provider = state.get("provider") or get_correction_provider()
+    if provider == "none":
+        provider = get_on_demand_llm_provider()
+    llm_enabled = provider != "none"
+    # Automatic pipeline: verification & correction run automatically whenever an LLM provider is available
+    word_corr_on = True if llm_enabled else is_word_correction_enabled()
+    ans_val_on = True if llm_enabled else is_answer_validation_enabled()
 
     # ---- Step 1: Route words for all questions (if word correction enabled) ----
     all_flagged: dict[int, list[dict]] = {}
@@ -1177,7 +1237,7 @@ def correction_and_validation_node(state: dict) -> dict:
             }
 
             exp_val = q.get("explanation") or q.get("answer_text") or ""
-            reasoning = exp_val if exp_val.strip() else "Unvalidated (click 'Verify with AI' to validate)"
+            reasoning = exp_val if exp_val.strip() else None
 
             processed.append({
                 **q,
@@ -1268,7 +1328,7 @@ def correction_and_validation_node(state: dict) -> dict:
         for q in corrected_blocks:
             marked = q.get("marked_correct_answer") or q.get("marked_answer")
             exp_val = q.get("explanation") or q.get("answer_text") or ""
-            reasoning = exp_val if exp_val.strip() else "no explanation"
+            reasoning = exp_val if exp_val.strip() else None
             processed.append({
                 **q,
                 "marked_correct_answer": marked,
@@ -1365,6 +1425,7 @@ def correction_and_validation_node(state: dict) -> dict:
                 doc = pymupdf.open(resolved_pdf_path)
                 
                 from ..ingest.crop_utils import get_question_crop_rect, find_question_page
+                from ..storage.cloudflare import upload_image_to_cloudflare
 
                 for q in corrected_blocks:
                     q_num = q.get("question_number")
@@ -1396,6 +1457,15 @@ def correction_and_validation_node(state: dict) -> dict:
                                 fallback_p_tokens += p_tok
                                 fallback_c_tokens += c_tok
                                 
+                                # Check if diagram is required/present in question
+                                # If the question requires a diagram, upload the high-DPI crop to Cloudflare and embed image tag
+                                if requires_diagram(ext_data.get("stem", "") or q.get("stem", ""), ext_data.get("options", {}) or q.get("options", {})):
+                                    diagram_url = upload_image_to_cloudflare(image_bytes, filename=f"q_{q_num}")
+                                    img_tag = f'<img src="{diagram_url}" alt="Question {q_num} Diagram" />'
+                                    cur_stem = ext_data.get("stem") or q.get("stem", "")
+                                    if "<img" not in cur_stem:
+                                        ext_data["stem"] = f"{cur_stem}\n\n{img_tag}".strip()
+
                                 # Replace content from cropped Vision OCR
                                 if ext_data.get("stem"):
                                     q["stem"] = ext_data["stem"]
@@ -1411,25 +1481,27 @@ def correction_and_validation_node(state: dict) -> dict:
                                     q["marked_answer"] = ext_data["marked_answer"]
                                     q["marked_correct_answer"] = ext_data["marked_answer"]
 
-                                if ext_data.get("explanation") or ext_data.get("answer_text"):
-                                    q["explanation"] = ext_data.get("explanation") or ext_data.get("answer_text")
-                                    q["answer_text"] = q["explanation"]
+                                # Strictly no extra texts: explanation is None unless printed in source PDF
+                                exp_from_ocr = ext_data.get("explanation") or ext_data.get("answer_text")
+                                q["explanation"] = exp_from_ocr if exp_from_ocr else None
+                                q["answer_text"] = exp_from_ocr if exp_from_ocr else None
+                                q["reasoning"] = exp_from_ocr if exp_from_ocr else None
 
-                                if ext_data.get("reasoning"):
-                                    q["reasoning"] = ext_data["reasoning"]
-
-                                if ext_data.get("validated_answer"):
-                                    q["validated_answer"] = ext_data["validated_answer"]
-                                    q["is_valid"] = True
+                                val_ans = ext_data.get("validated_answer")
+                                if val_ans:
+                                    q["validated_answer"] = val_ans
+                                    marked_val = q.get("marked_answer")
+                                    is_match = bool(marked_val and str(marked_val).strip().upper() == str(val_ans).strip().upper())
+                                    q["is_valid"] = is_match
                                     solved = {
-                                        "validated_answer": ext_data["validated_answer"],
-                                        "is_valid": True,
-                                        "reasoning": ext_data.get("reasoning") or ext_data.get("explanation"),
-                                        "explanation": ext_data.get("explanation"),
+                                        "validated_answer": val_ans,
+                                        "is_valid": is_match,
+                                        "reasoning": None,
+                                        "explanation": q["explanation"],
                                         "confidence": "high"
                                     }
                                     q["_ocr_solved_result"] = solved
-                                elif q.get("options") or q.get("marked_answer") or q.get("explanation"):
+                                elif q.get("options") or q.get("marked_answer"):
                                     solved = _solve_single_block(ext_data, 1)
                                     q["_ocr_solved_result"] = solved
                                 else:
@@ -1440,6 +1512,7 @@ def correction_and_validation_node(state: dict) -> dict:
                                         "reasoning": None,
                                         "explanation": None
                                     }
+                                q["_direct_ocr_completed"] = True
                             except Exception as e:
                                 logger.error("[CorrectionNode] OCR fallback failed for Q%d: %s", q_num, e)
                 doc.close()
@@ -1477,6 +1550,9 @@ def correction_and_validation_node(state: dict) -> dict:
     for q in corrected_blocks:
         q_num = q.get("question_number", 0)
         c = correction_map.get(q_num)
+        is_direct_ocr = bool(q.get("_direct_ocr_completed"))
+        if is_direct_ocr:
+            c = None  # Protect OCR-extracted question text from pre-OCR corrupted LLM response
         
         marked = q.get("marked_correct_answer") or q.get("marked_answer")
         orig_explanation = q.get("explanation") or q.get("answer_text") or ""
@@ -1489,38 +1565,45 @@ def correction_and_validation_node(state: dict) -> dict:
 
         from ..ingest.math_normalizer import normalize_math_in_text
 
-        # Apply LLM stem math correction if provided, else restore owned images
-        cand_stem = getattr(c, "corrected_stem", None)
-        if cand_stem and str(cand_stem).strip():
-            cand_stem_clean = str(cand_stem).strip()
-            cand_stem_clean = _restore_owned_images(cand_stem_clean, extracted_images_stem, q.get("stem", ""))
-            q["stem"] = normalize_math_in_text(cand_stem_clean)
-        else:
-            stem_val = _restore_owned_images(q.get("stem", ""), extracted_images_stem, q.get("stem", ""))
-            q["stem"] = normalize_math_in_text(stem_val)
-
-        # Apply LLM options math correction if provided, else normalize existing options
-        cand_opts = getattr(c, "corrected_options", None)
-        if cand_opts is not None and isinstance(cand_opts, dict):
-            if len(cand_opts) > 0:
-                q["options"] = {k: normalize_math_in_text(str(v)) for k, v in cand_opts.items()}
+        if not is_direct_ocr:
+            # Apply LLM stem math correction if provided, else restore owned images
+            cand_stem = getattr(c, "corrected_stem", None) if c else None
+            if cand_stem and str(cand_stem).strip():
+                cand_stem_clean = str(cand_stem).strip()
+                cand_stem_clean = _restore_owned_images(cand_stem_clean, extracted_images_stem, q.get("stem", ""))
+                q["stem"] = normalize_math_in_text(cand_stem_clean)
             else:
-                q["options"] = {}
-        elif "options" in q and isinstance(q["options"], dict):
-            for ok, ov in q["options"].items():
-                if isinstance(ov, str):
-                    q["options"][ok] = normalize_math_in_text(ov)
+                stem_val = _restore_owned_images(q.get("stem", ""), extracted_images_stem, q.get("stem", ""))
+                q["stem"] = normalize_math_in_text(stem_val)
 
-        # Determine corrected explanation
+            # Apply LLM options math correction if provided, else normalize existing options
+            cand_opts = getattr(c, "corrected_options", None) if c else None
+            if cand_opts is not None and isinstance(cand_opts, dict):
+                if len(cand_opts) > 0:
+                    q["options"] = {k: normalize_math_in_text(str(v)) for k, v in cand_opts.items()}
+                else:
+                    q["options"] = {}
+            elif "options" in q and isinstance(q["options"], dict):
+                for ok, ov in q["options"].items():
+                    if isinstance(ov, str):
+                        q["options"][ok] = normalize_math_in_text(ov)
+        else:
+            # Direct OCR question: preserve OCR stem & options, normalize math
+            q["stem"] = normalize_math_in_text(q.get("stem", ""))
+            if "options" in q and isinstance(q["options"], dict):
+                q["options"] = {k: normalize_math_in_text(str(v)) for k, v in q["options"].items()}
+
+        # Determine corrected explanation: strictly NO EXTRA TEXTS
         final_explanation = None
         has_corrected_exp = False
-        if c and getattr(c, "corrected_explanation", None) and str(c.corrected_explanation).strip():
-            final_explanation = _restore_owned_images(
-                str(c.corrected_explanation).strip(), extracted_images_exp, orig_explanation
-            )
-            has_corrected_exp = True
-        elif orig_explanation:
-            final_explanation = orig_explanation
+        if orig_explanation and str(orig_explanation).strip():
+            if c and getattr(c, "corrected_explanation", None) and str(c.corrected_explanation).strip():
+                final_explanation = _restore_owned_images(
+                    str(c.corrected_explanation).strip(), extracted_images_exp, orig_explanation
+                )
+                has_corrected_exp = True
+            else:
+                final_explanation = orig_explanation
 
         if final_explanation:
             final_explanation = normalize_math_in_text(final_explanation)
@@ -1539,9 +1622,9 @@ def correction_and_validation_node(state: dict) -> dict:
                     q["marked_correct_answer"] = None
                     q["validated_answer"] = None
                     marked = None
-                    final_explanation = "Question was unclear or required diagram. Cropped image was requested for Vision AI."
-                    q["explanation"] = final_explanation
-                    q["answer_text"] = final_explanation
+                    final_explanation = None
+                    q["explanation"] = None
+                    q["answer_text"] = None
                     q["question_type"] = getattr(c, "question_type", "descriptive_single") or "descriptive_single"
                     c = None # Skip further LLM parsing for this question
                 
@@ -1557,8 +1640,6 @@ def correction_and_validation_node(state: dict) -> dict:
                 q["marked_answer"] = None
                 q["marked_correct_answer"] = None
                 marked = None
-                # Never copy answer options into sub_parts!
-                # Only populate sub_parts if the question stem itself has genuine directive subparts
                 if q.get("stem"):
                     from ..ingest.option_answer_separator import extract_subparts_from_text, is_valid_subparts, strip_subparts_text_from_stem
                     extracted_sub, clean_stem_ret = extract_subparts_from_text(q.get("stem", ""))
@@ -1630,7 +1711,7 @@ def correction_and_validation_node(state: dict) -> dict:
                                 first_sub_pattern = re.compile(
                                     rf'(?:(?:^|\n|\s{{2,}}|\.\s+)\([{fk_esc}{fk_esc.upper()}]\)\s*)|'
                                     rf'(?:(?:^|\n|[ \t]{{2,}}|\.\s+)[{fk_esc}{fk_esc.upper()}][\.\)\:-]\s*)'
-                                )
+                                    )
                                 m_sub = first_sub_pattern.search(q["stem"])
                                 if m_sub:
                                     intro = q["stem"][:m_sub.start()].strip()
@@ -1657,7 +1738,7 @@ def correction_and_validation_node(state: dict) -> dict:
             elif not ans_val_on:
                 validated_answer = None
                 is_valid = False
-                reasoning = final_explanation or "Answer validation disabled in settings (.env)"
+                reasoning = final_explanation
                 llm_status = "skipped"
                 llm_details = "Answer validation skipped (disabled in settings)"
             else:
@@ -1669,7 +1750,7 @@ def correction_and_validation_node(state: dict) -> dict:
                     validated_answer = marked if c.answer_status == "agrees" else None
 
                 is_valid = bool(validated_answer and marked and validated_answer.upper() == marked.upper())
-                reasoning = final_explanation or ("Answer key verified and matches" if is_valid else (f"AI verified Option {validated_answer} (differs from marked {marked})" if validated_answer else "Answer disagreement detected"))
+                reasoning = final_explanation
                 llm_status = "completed"
                 if is_valid:
                     llm_details = f"{provider.title()} verified answer (Agreed: Option {validated_answer})"
@@ -1680,16 +1761,18 @@ def correction_and_validation_node(state: dict) -> dict:
                 else:
                     llm_details += "."
         else:
-            validated_answer = None
-            is_valid = False
-            if q.get("is_garbled"):
-                reasoning = q.get("reasoning", "Text was too messy to validate automatically. Requesting image crop for Vision AI.")
+            validated_answer = q.get("validated_answer")
+            is_valid = q.get("is_valid", False)
+            reasoning = final_explanation
+            if is_direct_ocr:
                 llm_status = "completed"
-                llm_details = f"{provider.title()} flagged text as too messy for validation."
+                llm_details = f"Direct OCR verified: Option {validated_answer}" if validated_answer else "Direct OCR scanned"
+            elif q.get("is_garbled"):
+                llm_status = "completed"
+                llm_details = f"{provider.title()} flagged text as unreadable."
             else:
-                reasoning = final_explanation or "LLM call skipped or offline"
                 llm_status = "skipped"
-                llm_details = "LLM validation skipped / offline"
+                llm_details = "LLM validation skipped"
         
         # Build step-by-step pipeline status
         has_math_img = "<img" in q.get("stem", "") or any("<img" in str(v) for v in q.get("options", {}).values())
@@ -1705,12 +1788,11 @@ def correction_and_validation_node(state: dict) -> dict:
 
         ocr_solved = q.pop("_ocr_solved_result", None)
         if ocr_solved:
-            validated_answer = ocr_solved.get("validated_answer")
+            validated_answer = ocr_solved.get("validated_answer") or validated_answer
             is_valid = ocr_solved.get("is_valid", False)
-            if not final_explanation:
-                reasoning = ocr_solved.get("reasoning", "OCR fallback applied")
+            reasoning = final_explanation
             llm_status = "completed"
-            llm_details = f"Re-verified after OCR: {ocr_solved.get('reasoning', '')}"
+            llm_details = f"Re-verified after OCR: Option {validated_answer}" if validated_answer else "Direct OCR completed"
 
         ext_dur = q.get("extraction_time_seconds") or (q.get("step_times") or {}).get("extraction")
         val_dur = q.get("validation_time_seconds") or (q.get("step_times") or {}).get("validation")
@@ -1740,9 +1822,9 @@ def correction_and_validation_node(state: dict) -> dict:
             "ocr_scanned": {
                 "name": "ocr_scanned",
                 "label": "OCR Scanned",
-                "status": "completed" if (has_math_img or has_latex or ocr_solved) else "not_needed",
+                "status": "completed" if (has_math_img or has_latex or ocr_solved or is_direct_ocr) else "not_needed",
                 "duration_seconds": ocr_dur,
-                "details": "Dynamic OCR fallback triggered by LLM" if ocr_solved else ("Math equation clips OCR parsed to LaTeX" if has_math_img else ("Math expressions parsed" if has_latex else "Text-only question (no image OCR needed)"))
+                "details": "Direct OCR executed on question crop" if (ocr_solved or is_direct_ocr) else ("Math equation clips OCR parsed to LaTeX" if has_math_img else ("Math expressions parsed" if has_latex else "Text-only question (no image OCR needed)"))
             }
         }
 
@@ -1752,7 +1834,7 @@ def correction_and_validation_node(state: dict) -> dict:
             "marked_answer": marked,
             "validated_answer": validated_answer,
             "is_valid": is_valid,
-            "confidence": "high",  # We can just say high if it succeeded
+            "confidence": "high" if is_valid or is_direct_ocr else "none",
             "explanation": final_explanation,
             "answer_text": final_explanation,
             "reasoning": reasoning,
@@ -1969,8 +2051,16 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                         rec_opts = ext_data.get("options") or {}
                         rec_qtype = ext_data.get("question_type") or ("mcq" if rec_opts else "descriptive_single")
                         rec_ans = ext_data.get("validated_answer") or ext_data.get("marked_answer")
-                        rec_exp = ext_data.get("reasoning") or ext_data.get("explanation") or ext_data.get("answer_text")
+                        rec_exp = ext_data.get("explanation") or ext_data.get("answer_text") or None
                         
+                        # If question requires diagram, upload crop to Cloudflare and embed img tag
+                        if requires_diagram(rec_stem, rec_opts):
+                            from ..storage.cloudflare import upload_image_to_cloudflare
+                            diagram_url = upload_image_to_cloudflare(image_bytes, filename=f"q_{q_num}")
+                            img_tag = f'<img src="{diagram_url}" alt="Question {q_num} Diagram" />'
+                            if "<img" not in rec_stem:
+                                rec_stem = f"{rec_stem}\n\n{img_tag}".strip()
+
                         is_val = False
                         if rec_ans:
                             if marked and marked != "Unknown":
@@ -1978,7 +2068,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                             else:
                                 is_val = True
                         elif rec_qtype.startswith("descriptive"):
-                            is_val = True
+                            is_val = bool(rec_exp)
 
                         return {
                             "success": True,
@@ -2003,7 +2093,6 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                 except Exception as e:
                     logger.error("[CorrectionNode] Targeted crop OCR failed in fix_single_question_with_llm: %s", e)
 
-            msg = "Question was unclear or required diagram. Requesting image crop for Vision AI."
             return {
                 "success": True,
                 "is_garbled": True,
@@ -2014,7 +2103,7 @@ async def fix_single_question_with_llm(q_data: dict, provider: str | None = None
                 "corrected_options": options,
                 "validated_answer": None,
                 "is_valid": False,
-                "reasoning": msg,
+                "reasoning": None,
                 "explanation": None,
                 "answer_text": None,
                 "corrected_explanation": None,

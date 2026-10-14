@@ -34,14 +34,19 @@ Text:
 SOLVE_PROMPT = """\
 You are an expert bilingual (English & Malayalam) educator and math tutor reviewing an exam question for students.
 
+CRITICAL INSTRUCTION - NO EXTRA TEXTS:
+The role of AI verification is strictly to:
+1. Correct typos, split characters, and OCR errors in the stem and options (preserve original wording without rewriting or summarizing).
+2. Determine question type ('mcq', 'descriptive_single', or 'descriptive_subquestions').
+3. Validate the answer (solve MCQ against choices to find the matching option key).
+4. DO NOT generate any extra texts, commentary, preambles, or unprompted solutions.
+5. If no answer, explanation, or solution was provided in the input, set `corrected_explanation`: null and `reasoning`: null. Never invent or fabricate solutions for questions.
+
 TASKS & RULES:
-1. LANGUAGE & TYPOS (AUTO-FIX): If the question stem or options contain minor OCR typos (like `n2/u` instead of `n2/v`) or Malayalam ligature errors, fix them silently and output the `corrected_stem` and `corrected_options`.
-2. GARBLED TEXT (FLAGGING): If the text is completely incomprehensible or heavily garbled (e.g. `Ny പൂ u _ v` instead of math) making it impossible to solve safely, set `is_garbled` to true. You may leave the answer fields null.
-3. QUESTION TYPE: Verify if question is MCQ with choices (A/B/C/D) or descriptive (single or with subquestions).
-4. LATEX EQUATIONS: Format all math, fractions, and units with valid inline LaTeX ($...$). Fix broken braces ($V_{proton}$), fractions ($\\frac{a}{b}$), and units ($5 \\times 10^5\\text{ V/m}$, $20\\,\\Omega$). Never put ordinary prose or sentences inside $...$.
-5. READABILITY & PARAGRAPHS: Format explanations with clean paragraph breaks (\\n\\n) and numbered steps (1., 2.). Un-mash joined words ("where $h$ is", not "whereh").
-6. VERIFICATION: Independently solve and return `validated_answer` ('A'|'B'|'C'|'D' or null for descriptive), reasoning, and confidence.
-7. NO ANSWER GENERATION FOR UNANSWERED QUESTIONS: If no answer or explanation was provided in the input, DO NOT invent or generate one. Set `corrected_explanation` to null and `reasoning` to null.
+1. LANGUAGE & TYPOS (AUTO-FIX): Fix minor OCR typos, split Malayalam ligatures, and punctuation without rewriting the question. Format all math with valid inline LaTeX ($...$).
+2. QUESTION TYPE: Verify if question is MCQ with choices (A/B/C/D) or descriptive (single or with subquestions).
+3. VERIFICATION: Independently solve and return `validated_answer` ('A'|'B'|'C'|'D' or null for descriptive).
+4. GARBLED / DIAGRAM NEEDED: If text is unreadable or requires a diagram from the PDF, set `is_garbled` to true.
 
 Question Type:
 {question_type}
@@ -61,10 +66,10 @@ Explanation:
 Output valid JSON matching:
 {{
   "is_garbled": false,
-  "corrected_stem": "Cleaned stem with typos fixed",
-  "corrected_options": {{"A": "Cleaned option A"}},
-  "reasoning": "Step-by-step reasoning or null if no answer/explanation provided",
-  "corrected_explanation": "Cleaned explanation or null if none provided in paper",
+  "corrected_stem": "Stem with typos and math formulas corrected",
+  "corrected_options": {{"A": "Option A with typos corrected"}},
+  "reasoning": null,
+  "corrected_explanation": "Cleaned explanation if provided in paper, otherwise null",
   "validated_answer": "A" | "B" | "C" | "D" | null,
   "confidence": "high" | "medium" | "low"
 }}

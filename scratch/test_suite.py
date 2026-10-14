@@ -424,7 +424,7 @@ text_with_answers = """Calculate the total current.
 Answer:
 (a) Higher
 (b) Lower"""
-assert extract_subparts_from_text(text_with_answers) is None, "Test 25 Failed: extract_subparts_from_text must not extract answer steps"
+assert extract_subparts_from_text(text_with_answers)[0] is None, "Test 25 Failed: extract_subparts_from_text must not extract answer steps"
 
 # 4. strip_subquestion_labels_from_answer cleans accidental subquestion labels while preserving content
 dirty_answer = "Subquestion 1: Higher\nSubquestion 2: Lower\nSubquestion (a): 10 V\nSubquestion: Field is zero"

@@ -67,9 +67,9 @@ def is_answer_validation_enabled() -> bool:
     """Checks whether AI answer solving & verification is enabled via runtime configuration or env."""
     try:
         from ..storage.config_manager import get_setting
-        return bool(get_setting("validation_enabled", False))
+        return bool(get_setting("validation_enabled", True))
     except Exception:
-        val = os.getenv("ENABLE_ANSWER_VALIDATION", os.getenv("ENABLE_VALIDATION", "false"))
+        val = os.getenv("ENABLE_ANSWER_VALIDATION", os.getenv("ENABLE_VALIDATION", "true"))
         return val.strip().lower() in ("true", "1", "yes")
 
 
@@ -1906,22 +1906,16 @@ def rescan_question_vision(image_bytes: bytes, question_number: int, engine: Opt
 
     prompt = r"""You are an expert bilingual exam educator and STEM professor.
 Carefully inspect this question crop containing Question {question_number}.
-CRITICAL INSTRUCTIONS:
-1. Transcribe the question stem cleanly into 'stem'.
-   - Transcribe and preserve all mathematical equations, fractions, formulas, and symbols into standard inline LaTeX ($...) or display LaTeX ($$...$$).
-   - DO NOT put regular English or Malayalam sentences inside math delimiters ($...$ or $$...$$).
+
+CRITICAL INSTRUCTION - NO EXTRA TEXTS:
+The role of AI verification is strictly to:
+1. Transcribe the question stem cleanly into 'stem' with all mathematical equations, fractions, and symbols formatted in standard inline LaTeX ($...).
+   - DO NOT generate any extra commentary, conversational preambles, or notes.
    - Preserve all image tokens (e.g., {{IMG:https://...}} or {{IMG_BLOCK:...}}) exactly as they appear.
 2. Determine question type: 'mcq', 'descriptive_single', or 'descriptive_subquestions'.
-3. Extract all options into 'options' using their printed keys (e.g., '1', '2', '3', '4' or 'A', 'B', 'C', 'D'). Clean values into standard LaTeX ($...$).
-4. SOLVE AND VALIDATE THE QUESTION:
-   - For MCQs: Solve the problem/circuit/diagram step-by-step.
-     * Check circuit symmetry / balanced bridge condition (e.g. Wheatstone bridge R1/R2 = R3/R4 eliminates the central bridge resistor).
-     * Calculate the final equivalent value.
-   - Keep 'reasoning' concise and direct (under 100 words), summarizing the final derivation clearly.
-   - Compare the derived answer with 'options' and set 'validated_answer' to the EXACT key of the matching option (e.g. '2' or 'B').
-   - If an exam key or answer is printed on the paper, extract it into 'marked_answer', otherwise set 'marked_answer': null.
-5. For descriptive questions (no options):
-   - Only extract 'answer_text'/'explanation' if printed on the page. If not printed, set to null. NEVER invent solutions for descriptive questions.
+3. Extract all options into 'options' using their printed keys (e.g., '1', '2', '3', '4' or 'A', 'B', 'C', 'D'). Clean values into standard LaTeX ($...).
+4. Validate the answer: For MCQs, find which option matches the derivation and set 'validated_answer' to the exact option key (e.g. '2' or 'B').
+5. DO NOT fabricate solutions: If no explanation/solution is printed on the page, set 'explanation': null and 'answer_text': null. Set 'reasoning': null.
 
 Output ONLY a valid JSON object:
 {
@@ -1933,8 +1927,8 @@ Output ONLY a valid JSON object:
     "2": "Option 2 text"
   },
   "marked_answer": null,
-  "reasoning": "Concise derivation under 100 words",
-  "explanation": "Brief solution explanation",
+  "reasoning": null,
+  "explanation": null,
   "validated_answer": "2",
   "answer_text": null
 }
@@ -2040,10 +2034,10 @@ def _solve_single_block(b: dict, total: int = 1) -> dict:
 
     try:
         from ..storage.config_manager import get_setting
-        validation_enabled = get_setting("validation_enabled", False)
+        validation_enabled = get_setting("validation_enabled", True)
         provider = get_setting("validation_provider", "groq")
     except Exception:
-        validation_enabled = False
+        validation_enabled = True
         provider = "groq"
 
     if not validation_enabled or not is_llm_enabled():

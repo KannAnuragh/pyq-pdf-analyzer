@@ -1798,7 +1798,7 @@ export default function Home() {
           stem: qData.stem,
           options: qData.options,
           marked_answer: qData.marked_answer || qData.marked_correct_answer,
-          explanation: qData.explanation || qData.answer_text || qData.reasoning
+          explanation: qData.explanation || qData.answer_text || ''
         })
       });
       if (!res.ok) {
@@ -1902,7 +1902,7 @@ export default function Home() {
           stem: qData.stem,
           options: qData.options,
           marked_answer: qData.marked_answer || qData.marked_correct_answer,
-          explanation: qData.explanation || qData.answer_text || qData.reasoning
+          explanation: qData.explanation || qData.answer_text || ''
         })
       });
       if (!res.ok) {

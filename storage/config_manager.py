@@ -57,7 +57,7 @@ def get_default_settings() -> Dict[str, Any]:
     if default_question_engine not in ("groq", "gemini", "tesseract", "off"):
         default_question_engine = "groq"
 
-    word_corr_enabled = _get_env_bool("ENABLE_WORD_CORRECTION", _get_env_bool("ENABLE_CORRECTION", False))
+    word_corr_enabled = _get_env_bool("ENABLE_WORD_CORRECTION", _get_env_bool("ENABLE_CORRECTION", True))
 
     corr_provider = os.getenv("CORRECTION_LLM_PROVIDER", default_provider).strip().lower()
     if corr_provider in ("false", "0", "no", "off"):
@@ -66,19 +66,19 @@ def get_default_settings() -> Dict[str, Any]:
         corr_provider = default_provider
 
     return {
-        "validation_enabled": _get_env_bool("ENABLE_ANSWER_VALIDATION", False),
+        "validation_enabled": _get_env_bool("ENABLE_ANSWER_VALIDATION", True),
         "validation_provider": os.getenv("SOLVE_LLM_PROVIDER", default_provider).strip().lower(),
         "correction_enabled": word_corr_enabled,
         "word_correction_enabled": word_corr_enabled,
         "correction_provider": corr_provider,
         "repair_enabled": _get_env_bool("ENABLE_REPAIR", True),
-        "math_ocr_enabled": _get_env_bool("ENABLE_MATH_OCR", False),
+        "math_ocr_enabled": _get_env_bool("ENABLE_MATH_OCR", True),
         "math_ocr_engine": default_math_engine,
-        "question_ocr_enabled": _get_env_bool("ENABLE_QUESTION_OCR", False),
+        "question_ocr_enabled": _get_env_bool("ENABLE_QUESTION_OCR", True),
         "question_ocr_engine": default_question_engine,
-        "auto_convert_math": _get_env_bool("AUTO_CONVERT_MATH", False),
-        "auto_whole_pdf_ocr_threshold": int(os.getenv("AUTO_WHOLE_PDF_OCR_THRESHOLD", "0")),
-        "auto_whole_pdf_ocr_engine": os.getenv("AUTO_WHOLE_PDF_OCR_ENGINE", "off").strip().lower(),
+        "auto_convert_math": _get_env_bool("AUTO_CONVERT_MATH", True),
+        "auto_whole_pdf_ocr_threshold": int(os.getenv("AUTO_WHOLE_PDF_OCR_THRESHOLD", "3")),
+        "auto_whole_pdf_ocr_engine": os.getenv("AUTO_WHOLE_PDF_OCR_ENGINE", "auto").strip().lower(),
         "groq_model": os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
         "groq_vision_model": os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b"),
         "gemini_extract_model": os.getenv("GEMINI_EXTRACT_MODEL", "gemini-3.1-flash-lite"),

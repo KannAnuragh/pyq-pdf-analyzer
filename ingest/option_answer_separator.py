@@ -376,7 +376,7 @@ def separate_options_dict(
             extracted_exp = exp
     # Extract answer if the explanation explicitly starts with an option letter (e.g., "(C) E != 0" or "Answer: A")
     if extracted_exp:
-        has_multi_sub_exp = len(re.findall(r'(?:^|\n|\s)\(([a-d])\)[\s\:\-\.]+', extracted_exp, re.IGNORECASE)) >= 2
+        has_multi_sub_exp = len(re.findall(r'(?:^|\n)\s*(?:\([a-zA-Z0-9]+\)|[a-zA-Z0-9]+[\.\)\:-])\s+', extracted_exp)) >= 2
         if not has_multi_sub_exp:
             pat1 = r"^\s*(?:Answer|Ans|Solution|Sol|Correct\s*Option|Option|Key)[\s\:\-\.]*[\(\[]?\s*([A-E1-5])\s*[\)\]]?(?:[\s\.\:\-]+|is\s*correct\b)?"
             pat2 = r"^\s*(?:[\(\[]\s*([A-E1-5])\s*[\)\]]|([A-E1-5])\s*[\.\:\-\)]+)(?=\s|$)"
@@ -394,7 +394,14 @@ def separate_options_dict(
                     # Only override if it's an explicit "Answer:" marker OR if we don't already have an answer
                     if m1 or not extracted_ans:
                         extracted_ans = candidate
-                    # We no longer strip the prefix so that "Answer: C" remains visible in the explanation block.
+        else:
+            # If multi-step explanation, only match explicit Answer: prefix
+            pat1 = r"^\s*(?:Answer|Ans|Solution|Sol|Correct\s*Option|Option|Key)[\s\:\-\.]*[\(\[]?\s*([A-E1-5])\s*[\)\]]?(?:[\s\.\:\-]+|is\s*correct\b)?"
+            m1 = re.match(pat1, extracted_exp, re.IGNORECASE)
+            if m1:
+                candidate = m1.group(1).upper()
+                if any(k.upper() == candidate for k in clean_opts.keys()):
+                    extracted_ans = candidate
 
     # If marked answer wasn't explicitly given as a letter, check if explanation/answer text
     # or its first line matches one of the option values (e.g. Answer: b/a matches Option B)
@@ -1125,6 +1132,19 @@ def clean_question_options_and_answer(q: Any) -> Any:
 
     clean_opts, new_marked, new_exp = separate_options_dict(opts, marked, exp)
     new_stem, clean_opts = heal_assertion_reason_question(new_stem, clean_opts)
+
+    # If all option values are identical to lines/steps in the explanation and there is no marked answer,
+    # the options were extracted from the answer/solution block rather than being genuine MCQ options!
+    if clean_opts and new_exp and not new_marked:
+        all_in_exp = True
+        for opt_val in clean_opts.values():
+            val_clean = opt_val.strip()
+            if val_clean and val_clean not in new_exp:
+                all_in_exp = False
+                break
+        if all_in_exp:
+            clean_opts = {}
+
     q_type, sub_parts = classify_question_type(clean_opts, new_exp, marked_answer=new_marked, stem=new_stem)
     if not sub_parts and existing_sub and is_valid_subparts(existing_sub, stem=new_stem):
         sub_parts = existing_sub
