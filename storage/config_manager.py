@@ -83,6 +83,8 @@ def get_default_settings() -> Dict[str, Any]:
         "groq_vision_model": os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b"),
         "gemini_extract_model": os.getenv("GEMINI_EXTRACT_MODEL", "gemini-3.1-flash-lite"),
         "gemini_solve_model": os.getenv("GEMINI_SOLVE_MODEL", "gemini-3.1-pro-preview"),
+        "groq_api_key": os.getenv("GROQ_API_KEY", ""),
+        "google_api_key": os.getenv("GOOGLE_API_KEY", ""),
     }
 
 
@@ -110,6 +112,10 @@ def get_all_settings() -> Dict[str, Any]:
                     db_settings[r.key] = r.value
             
             merged = {**defaults, **db_settings}
+            if db_settings.get("groq_api_key"):
+                os.environ["GROQ_API_KEY"] = db_settings["groq_api_key"]
+            if db_settings.get("google_api_key"):
+                os.environ["GOOGLE_API_KEY"] = db_settings["google_api_key"]
             _CONFIG_CACHE = merged
             _CACHE_INITIALIZED = True
             return merged
@@ -134,7 +140,7 @@ def update_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
     """
     global _CONFIG_CACHE
     
-    valid_keys = set(get_default_settings().keys())
+    valid_keys = set(get_default_settings().keys()) | {"gemini_api_key"}
     
     try:
         from .database import SessionLocal
@@ -185,6 +191,13 @@ def update_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
                     if v not in ("auto", "groq", "gemini", "tesseract", "off"):
                         v = "auto"
                     final_updates[k] = v
+                elif k in ("groq_api_key", "google_api_key", "gemini_api_key"):
+                    val_str = str(v).strip()
+                    if val_str:
+                        target_env = "GROQ_API_KEY" if k == "groq_api_key" else "GOOGLE_API_KEY"
+                        os.environ[target_env] = val_str
+                        final_key = "groq_api_key" if k == "groq_api_key" else "google_api_key"
+                        final_updates[final_key] = val_str
                 else:
                     final_updates[k] = str(v)
             

@@ -1,16 +1,42 @@
-from sqlalchemy import Column, String, DateTime, Text, Integer, Float, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, DateTime, Text, Integer, Float, ForeignKey, UniqueConstraint, Boolean
 from .database import Base
 from datetime import datetime
 import uuid
+
+class Client(Base):
+    __tablename__ = "clients"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    name = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)
+    is_admin = Column(Boolean, default=False)
+    daily_upload_limit = Column(Integer, nullable=True, default=None)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    client_id = Column(String, ForeignKey("clients.id"), nullable=False, index=True)
+    key_hash = Column(String, nullable=False, unique=True, index=True)
+    prefix = Column(String, nullable=False)
+    name = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
 
 class Job(Base):
     __tablename__ = "jobs"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    client_id = Column(String, ForeignKey("clients.id"), nullable=True, index=True)
     filename = Column(String, index=True)
     file_path = Column(String, nullable=True)
-    status = Column(String, default="pending") # pending, processing, done, failed
+    status = Column(String, default="pending") # pending, extracting, correcting, done, failed
+    stage = Column(String, default="pending")
+    error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     processing_time_seconds = Column(Float, nullable=True)
     
     # Store JSON result as text

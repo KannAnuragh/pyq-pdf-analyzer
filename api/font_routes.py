@@ -2,16 +2,20 @@
 API Routes for Font Inspection, Installation, and Decompilation.
 """
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 import os
 
 from ..ingest.font_installer import list_installed_fonts, install_reference_font, get_known_font_families
+from .auth import get_current_client, get_current_admin_client
+from ..storage import models
 
 router = APIRouter(prefix="/fonts", tags=["Fonts"])
 
 
 @router.get("/")
-def get_installed_fonts():
+def get_installed_fonts(
+    client: models.Client = Depends(get_current_client)
+):
     """Returns a list of all installed font maps, reference fonts, and recognized font families."""
     fonts = list_installed_fonts()
     families = get_known_font_families()
@@ -24,7 +28,10 @@ def get_installed_fonts():
 
 
 @router.post("/upload")
-async def upload_font_file(file: UploadFile = File(...)):
+async def upload_font_file(
+    file: UploadFile = File(...),
+    admin_client: models.Client = Depends(get_current_admin_client)
+):
     """
     Upload a TrueType (.ttf) or OpenType (.otf) font file.
     The system decompiles its glyph outlines, extracts GSUB ligatures,

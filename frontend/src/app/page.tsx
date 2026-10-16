@@ -5,16 +5,12 @@ import {
   UploadCloud, FileText, CheckCircle2, AlertTriangle, Trash2, ExternalLink, 
   RefreshCw, Type, X, Sparkles, ArrowLeft, Eye, Check, Clock, Cpu, ShieldCheck, 
   ChevronRight, BarChart3, HelpCircle, Layers, Sliders, Settings, Save, CheckCircle,
-  ScanLine, Database, Bot, Zap, Cloud, Copy, Download
+  ScanLine, Database, Bot, Zap, Cloud, Copy, Download, Lock, LogOut
 } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || (
-  typeof window === 'undefined'
-    ? 'http://localhost:8000'
-    : `${window.location.protocol}//${window.location.hostname}:8000`
-);
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api/proxy';
 
 const KNOWN_KATEX_COMMANDS = new Set([
   'frac', 'dfrac', 'tfrac', 'sqrt', 'times', 'div', 'pm', 'mp', 'cdot', 'circ', 'degree',
@@ -1628,6 +1624,52 @@ export default function Home() {
   const [rescanStates, setRescanStates] = useState<Record<number, 'rescanning' | 'success' | 'error'>>({});
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
 
+  // Authentication State (Next.js Dashboard Gateway)
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/auth/check')
+      .then(r => r.json())
+      .then(d => setIsAuthenticated(Boolean(d?.authenticated)))
+      .catch(() => setIsAuthenticated(false));
+  }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoggingIn(true);
+    setLoginError('');
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: loginPassword })
+      });
+      if (res.ok) {
+        setIsAuthenticated(true);
+        fetchConfig();
+        fetchJobs();
+      } else {
+        const d = await res.json();
+        setLoginError(d?.detail || 'Invalid password');
+      }
+    } catch {
+      setLoginError('Login failed. Connection error.');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    try {
+      if (typeof window !== 'undefined') sessionStorage.removeItem('qscan_selected_job');
+    } catch {}
+    setIsAuthenticated(false);
+  };
+
   // Question numbers are labels, not reliable client-side IDs: some papers restart
   // numbering in a new section. Keep the selected row's position as well, so polling
   // cannot replace its diagrams with the first question that has the same number.
@@ -2070,13 +2112,28 @@ export default function Home() {
   };
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     fetchConfig();
-    fetchJobs();
+    fetchJobs().then((fetchedJobs) => {
+      try {
+        if (typeof window !== 'undefined') {
+          const savedJobId = sessionStorage.getItem('qscan_selected_job');
+          if (savedJobId && (!selectedJobId || selectedJobId === savedJobId)) {
+            const exists = Array.isArray(fetchedJobs) && fetchedJobs.some((j: any) => j.job_id === savedJobId);
+            if (exists) {
+              loadJobResult(savedJobId);
+            } else {
+              sessionStorage.removeItem('qscan_selected_job');
+            }
+          }
+        }
+      } catch {}
+    });
+
     const interval = setInterval(() => {
       fetchJobs();
       fetchConfig();
       if (selectedJobId) {
-        loadJobResult(selectedJobId);
         // Sync conversion status in case page was reloaded while converting
         fetch(`${API_BASE}/pdfs/${selectedJobId}/math-status`)
           .then(r => r.ok ? r.json() : null)
@@ -2093,7 +2150,7 @@ export default function Home() {
       }
     }, 4000);
     return () => clearInterval(interval);
-  }, [selectedJobId]);
+  }, [isAuthenticated, selectedJobId]);
 
   const fetchConfig = async () => {
     try {
@@ -2111,9 +2168,11 @@ export default function Home() {
       if (!res.ok) throw new Error(`Could not load uploaded PDFs (${res.status})`);
       const data = await res.json();
       setJobs(data);
+      return data;
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : 'Could not load uploaded PDFs');
       console.error('Failed to fetch jobs', e);
+      return [];
     }
   };
 
@@ -2123,6 +2182,13 @@ export default function Home() {
       await fetch(`${API_BASE}/pdfs/${jobId}`, {
         method: 'DELETE',
       });
+      if (selectedJobId === jobId) {
+        setSelectedJobId(null);
+        setJobResult(null);
+        try {
+          if (typeof window !== 'undefined') sessionStorage.removeItem('qscan_selected_job');
+        } catch {}
+      }
       fetchJobs();
     } catch (err) {
       console.error('Failed to delete job', err);
@@ -2192,6 +2258,9 @@ export default function Home() {
   const loadJobResult = async (jobId: string) => {
     setSelectedJobId(jobId);
     try {
+      if (typeof window !== 'undefined') sessionStorage.setItem('qscan_selected_job', jobId);
+    } catch {}
+    try {
       const res = await fetch(`${API_BASE}/pdfs/${jobId}/result`);
       if (!res.ok) {
         let detail = `Could not load PDF result (${res.status})`;
@@ -2255,6 +2324,104 @@ export default function Home() {
     }
   }, [jobResult]);
 
+  if (isAuthenticated === null) {
+    return (
+      <div className="container" style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: '#94a3b8' }}>
+          <RefreshCw className="animate-spin" size={24} color="#38bdf8" />
+          <span>Verifying security credentials...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (isAuthenticated === false) {
+    return (
+      <div className="container" style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{
+          maxWidth: '420px',
+          width: '100%',
+          background: 'rgba(15, 23, 42, 0.85)',
+          backdropFilter: 'blur(16px)',
+          border: '1px solid rgba(56, 189, 248, 0.25)',
+          borderRadius: '1.25rem',
+          padding: '2.5rem',
+          boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7), 0 0 20px rgba(56, 189, 248, 0.15)',
+          textAlign: 'center'
+        }}>
+          <div style={{
+            width: '56px',
+            height: '56px',
+            borderRadius: '1rem',
+            background: 'linear-gradient(135deg, #0284c7, #38bdf8)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            margin: '0 auto 1.5rem',
+            boxShadow: '0 8px 16px rgba(2, 132, 199, 0.4)'
+          }}>
+            <ShieldCheck size={28} color="#fff" />
+          </div>
+          <h2 style={{ fontSize: '1.4rem', fontWeight: 700, color: '#f8fafc', marginBottom: '0.5rem' }}>
+            QScanner Secure Gateway
+          </h2>
+          <p style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '1.75rem', lineHeight: 1.5 }}>
+            Tenant isolation active. Enter your Client API Key (<code>qscan_live_...</code>) to authenticate.
+          </p>
+          <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <input
+              type="password"
+              placeholder="Enter Client API Key (qscan_live_...)"
+              value={loginPassword}
+              onChange={(e) => setLoginPassword(e.target.value)}
+              required
+              autoFocus
+              style={{
+                width: '100%',
+                padding: '0.85rem 1rem',
+                borderRadius: '0.75rem',
+                border: '1px solid rgba(56, 189, 248, 0.3)',
+                background: 'rgba(2, 6, 23, 0.7)',
+                color: '#fff',
+                fontSize: '0.95rem',
+                outline: 'none',
+                boxSizing: 'border-box'
+              }}
+            />
+            {loginError && (
+              <div style={{ fontSize: '0.82rem', color: '#f87171', background: 'rgba(239, 68, 68, 0.1)', padding: '0.5rem', borderRadius: '0.5rem' }}>
+                {loginError}
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={isLoggingIn}
+              style={{
+                width: '100%',
+                padding: '0.85rem',
+                borderRadius: '0.75rem',
+                border: 'none',
+                background: 'linear-gradient(135deg, #0284c7, #2563eb)',
+                color: '#fff',
+                fontSize: '0.95rem',
+                fontWeight: 600,
+                cursor: isLoggingIn ? 'not-allowed' : 'pointer',
+                transition: 'all 0.2s ease',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '0.5rem'
+              }}
+            >
+              {isLoggingIn ? <RefreshCw className="animate-spin" size={18} /> : <Zap size={18} />}
+              {isLoggingIn ? 'Authenticating...' : 'Unlock Workspace'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="container">
       <header className="app-header">
@@ -2271,6 +2438,22 @@ export default function Home() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
+          <button
+            onClick={handleLogout}
+            className="btn btn-secondary"
+            style={{
+              padding: '0.4rem 0.85rem',
+              borderRadius: '9999px',
+              fontSize: '0.8rem',
+              color: '#f87171',
+              borderColor: 'rgba(239, 68, 68, 0.35)',
+              background: 'rgba(239, 68, 68, 0.08)'
+            }}
+            title="Log out from dashboard session"
+          >
+            <LogOut size={14} color="#f87171" />
+            <span>Sign Out</span>
+          </button>
           <button
             onClick={openConfigModal}
             className="btn btn-secondary"
@@ -2530,7 +2713,13 @@ export default function Home() {
         <div>
           <button 
             className="btn btn-secondary" 
-            onClick={() => { setSelectedJobId(null); setJobResult(null); }}
+            onClick={() => {
+              setSelectedJobId(null);
+              setJobResult(null);
+              try {
+                if (typeof window !== 'undefined') sessionStorage.removeItem('qscan_selected_job');
+              } catch {}
+            }}
             style={{ marginBottom: '1rem', borderRadius: '9999px', padding: '0.45rem 1rem' }}
           >
             <ArrowLeft size={15} />

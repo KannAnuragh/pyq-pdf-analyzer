@@ -15,6 +15,7 @@ import re
 
 from ..storage import database, models
 from ..models import schemas
+from .auth import get_current_client, get_current_admin_client, check_llm_rate_limit
 
 router = APIRouter()
 
@@ -189,19 +190,37 @@ def get_job_file_path(job: models.Job) -> Optional[str]:
     """Resolves the physical file path across Docker and host environments."""
     if not job:
         return None
-    # 1. Direct path if valid
+    # 1. Direct path if valid and exists
     if job.file_path and os.path.exists(job.file_path):
         return job.file_path
-    # 2. Match basename inside current UPLOADS_DIR
+    # 2. Check uploads/{client_id}/{job_id}.pdf
+    if job.client_id:
+        client_target = os.path.join(database.UPLOADS_DIR, job.client_id, f"{job.id}.pdf")
+        if os.path.exists(client_target):
+            return client_target
+    # 3. Match relative subpath from job.file_path
     if job.file_path:
-        rel_target = os.path.join(database.UPLOADS_DIR, os.path.basename(job.file_path))
-        if os.path.exists(rel_target):
-            return rel_target
-    # 3. Fallback to {job.id}_{job.filename} inside current UPLOADS_DIR
+        parts = os.path.normpath(job.file_path).split(os.sep)
+        if len(parts) >= 2:
+            rel_candidate = os.path.join(database.UPLOADS_DIR, parts[-2], parts[-1])
+            if os.path.exists(rel_candidate):
+                return rel_candidate
+        base_target = os.path.join(database.UPLOADS_DIR, os.path.basename(job.file_path))
+        if os.path.exists(base_target):
+            return base_target
+    # 4. Fallback to {job.id}_{job.filename} inside current UPLOADS_DIR
     fallback_target = os.path.join(database.UPLOADS_DIR, f"{job.id}_{job.filename}")
     if os.path.exists(fallback_target):
         return fallback_target
     return None
+
+
+def get_job_for_client(db: Session, job_id: str, client: models.Client) -> Optional[models.Job]:
+    """Retrieves a job scoped to the client, or unrestricted if client is an admin."""
+    query = db.query(models.Job).filter(models.Job.id == job_id)
+    if not client.is_admin:
+        query = query.filter(models.Job.client_id == client.id)
+    return query.first()
 
 
 def recover_question_from_source_pdf(job: models.Job, question_number: int) -> Optional[dict]:
@@ -230,7 +249,9 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
         # Mark as processing
         job = db.query(models.Job).filter(models.Job.id == job_id).first()
         if job:
-            job.status = "processing"
+            job.status = "extracting"
+            job.stage = "extracting"
+            job.error_message = None
             db.commit()
             resolved = get_job_file_path(job)
             if resolved:
@@ -275,10 +296,13 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
             node_name = list(event.keys())[0]
             current_full_state.update(event[node_name])
             
-            # 3. Intermediate DB Update (when extraction and repair are done, but before validation)
-            if node_name == "repair":
+            # 3. Intermediate DB Update (when moving to correction and validation)
+            if node_name in ("repair", "correction_and_validation"):
                 job = db.query(models.Job).filter(models.Job.id == job_id).first()
                 if job:
+                    job.status = "correcting"
+                    job.stage = "correcting"
+                    db.commit()
                     questions = []
                     for b in current_full_state.get("extracted_blocks", []):
                         # Show raw blocks immediately
@@ -357,6 +381,8 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
             )
             
             job.status = "done"
+            job.stage = "done"
+            job.error_message = None
             job.processing_time_seconds = total_duration
             job.result_json = result.model_dump_json()
             db.commit()
@@ -384,6 +410,8 @@ def process_pdf_background(job_id: str, file_path: str, db: Session):
         job = db.query(models.Job).filter(models.Job.id == job_id).first()
         if job:
             job.status = "failed"
+            job.stage = "failed"
+            job.error_message = str(e)
             db.commit()
 
 # ---------------------------------------------------------------------------
@@ -487,24 +515,34 @@ except Exception as _init_err:
 
 
 @router.post("/pdfs/upload", response_model=schemas.JobStatusResponse)
-async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(database.get_db)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    client: models.Client = Depends(get_current_client),
+    db: Session = Depends(database.get_db)
+):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
 
-    # Create job entry in pending status
-    job = models.Job(filename=file.filename, status="pending")
+    job_id = str(uuid.uuid4())
+    client_dir = os.path.join(database.UPLOADS_DIR, client.id)
+    os.makedirs(client_dir, exist_ok=True)
+    file_path = os.path.join(client_dir, f"{job_id}.pdf")
+
+    contents = await file.read()
+    with open(file_path, "wb") as buffer:
+        buffer.write(contents)
+
+    job = models.Job(
+        id=job_id,
+        filename=os.path.basename(file.filename),
+        client_id=client.id,
+        file_path=file_path,
+        status="pending",
+        stage="pending"
+    )
     db.add(job)
     db.commit()
     db.refresh(job)
-
-    # Save the file to persistent uploads storage
-    safe_filename = os.path.basename(file.filename)
-    file_path = os.path.join(database.UPLOADS_DIR, f"{job.id}_{safe_filename}")
-    with open(file_path, "wb") as buffer:
-        buffer.write(await file.read())
-
-    job.file_path = file_path
-    db.commit()
 
     # Trigger sequential worker (strictly one PDF processed at a time)
     trigger_queue_worker()
@@ -521,28 +559,37 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(databas
 @router.post("/pdfs/upload-bulk", response_model=List[schemas.JobStatusResponse])
 async def upload_bulk_pdfs(
     files: List[UploadFile] = File(...),
+    client: models.Client = Depends(get_current_client),
     db: Session = Depends(database.get_db)
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
+
+    client_dir = os.path.join(database.UPLOADS_DIR, client.id)
+    os.makedirs(client_dir, exist_ok=True)
 
     created_jobs = []
     for file in files:
         if not file.filename or not file.filename.lower().endswith(".pdf"):
             continue
 
-        job = models.Job(filename=file.filename, status="pending")
+        job_id = str(uuid.uuid4())
+        file_path = os.path.join(client_dir, f"{job_id}.pdf")
+        contents = await file.read()
+        with open(file_path, "wb") as buffer:
+            buffer.write(contents)
+
+        job = models.Job(
+            id=job_id,
+            filename=os.path.basename(file.filename),
+            client_id=client.id,
+            file_path=file_path,
+            status="pending",
+            stage="pending"
+        )
         db.add(job)
         db.commit()
         db.refresh(job)
-
-        safe_filename = os.path.basename(file.filename)
-        file_path = os.path.join(database.UPLOADS_DIR, f"{job.id}_{safe_filename}")
-        with open(file_path, "wb") as buffer:
-            buffer.write(await file.read())
-
-        job.file_path = file_path
-        db.commit()
 
         created_jobs.append(
             schemas.JobStatusResponse(
@@ -563,8 +610,12 @@ async def upload_bulk_pdfs(
     return created_jobs
 
 @router.get("/pdfs/{job_id}/status", response_model=schemas.JobStatusResponse)
-def get_job_status(job_id: str, db: Session = Depends(database.get_db)):
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+def get_job_status(
+    job_id: str,
+    client: models.Client = Depends(get_current_client),
+    db: Session = Depends(database.get_db)
+):
+    job = get_job_for_client(db, job_id, client)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -591,8 +642,12 @@ def get_job_status(job_id: str, db: Session = Depends(database.get_db)):
     )
 
 @router.get("/pdfs/{job_id}/file")
-def get_pdf_file(job_id: str, db: Session = Depends(database.get_db)):
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+def get_pdf_file(
+    job_id: str,
+    client: models.Client = Depends(get_current_client),
+    db: Session = Depends(database.get_db)
+):
+    job = get_job_for_client(db, job_id, client)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -610,8 +665,12 @@ def get_pdf_file(job_id: str, db: Session = Depends(database.get_db)):
     )
 
 @router.get("/pdfs/{job_id}/result", response_model=schemas.JobResultResponse)
-def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+def get_job_result(
+    job_id: str,
+    client: models.Client = Depends(get_current_client),
+    db: Session = Depends(database.get_db)
+):
+    job = get_job_for_client(db, job_id, client)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -743,6 +802,7 @@ def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
                 if (not hasattr(q, "options") or not q.options or len(q.options) < 2 or any(not str(v).strip() for v in q.options.values())) and job.filename:
                     sibling_jobs = db.query(models.Job).filter(
                         models.Job.filename == job.filename,
+                        models.Job.client_id == client.id,
                         models.Job.id != job.id,
                         models.Job.result_json.isnot(None)
                     ).order_by(models.Job.created_at.desc()).all()
@@ -890,8 +950,14 @@ def get_job_result(job_id: str, db: Session = Depends(database.get_db)):
     )
 
 @router.get("/pdfs", response_model=List[schemas.JobStatusResponse])
-def list_pdfs(db: Session = Depends(database.get_db)):
-    jobs = db.query(models.Job).order_by(models.Job.created_at.desc()).all()
+def list_pdfs(
+    client: models.Client = Depends(get_current_client),
+    db: Session = Depends(database.get_db)
+):
+    query = db.query(models.Job)
+    if not client.is_admin:
+        query = query.filter(models.Job.client_id == client.id)
+    jobs = query.order_by(models.Job.created_at.desc()).all()
     results = []
     for j in jobs:
         has_file = get_job_file_path(j) is not None
@@ -919,8 +985,12 @@ def list_pdfs(db: Session = Depends(database.get_db)):
     return results
 
 @router.delete("/pdfs/{job_id}")
-def delete_pdf(job_id: str, db: Session = Depends(database.get_db)):
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+def delete_pdf(
+    job_id: str,
+    client: models.Client = Depends(get_current_client),
+    db: Session = Depends(database.get_db)
+):
+    job = get_job_for_client(db, job_id, client)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -931,12 +1001,24 @@ def delete_pdf(job_id: str, db: Session = Depends(database.get_db)):
         except Exception as e:
             print(f"Warning: Failed to delete file {file_to_remove}: {e}")
 
+    # Clean up cached image crops if any exist for this job
+    cache_dir = os.path.join(database.UPLOADS_DIR, client.id, "cache")
+    if os.path.exists(cache_dir):
+        for fname in os.listdir(cache_dir):
+            if fname.startswith(f"{job_id}_"):
+                try:
+                    os.remove(os.path.join(cache_dir, fname))
+                except Exception:
+                    pass
+
     db.delete(job)
     db.commit()
     return {"status": "deleted", "job_id": job_id}
 
 @router.get("/config")
-def get_app_config():
+def get_app_config(
+    admin_client: models.Client = Depends(get_current_admin_client)
+):
     from ..graph.correction_node import get_correction_provider, get_on_demand_llm_provider, GROQ_CORRECTION_MODEL, GEMINI_CORRECTION_MODEL
     from ..storage.config_manager import get_all_settings
     settings = get_all_settings()
@@ -965,22 +1047,29 @@ def get_app_config():
         "repair_enabled": settings.get("repair_enabled", True),
         "math_ocr_enabled": settings.get("math_ocr_enabled", True),
         "math_ocr_engine": settings.get("math_ocr_engine", "auto"),
-        "question_ocr_enabled": settings.get("question_ocr_enabled", True),
+        "question_ocr_enabled": settings.get("question_ocr_engine", True),
         "question_ocr_engine": settings.get("question_ocr_engine", "groq"),
         "auto_convert_math": settings.get("auto_convert_math", True),
         "correction_model": GROQ_CORRECTION_MODEL if on_demand_provider == "groq" else GEMINI_CORRECTION_MODEL,
         "available_math_engines": ["auto", "groq", "gemini", "tesseract", "mathpix", "off"],
         "available_question_engines": ["groq", "gemini", "tesseract", "off"],
-        "available_providers": ["groq", "gemini"]
+        "available_providers": ["groq", "gemini"],
+        "groq_api_key_configured": bool((os.getenv("GROQ_API_KEY") or "").strip()),
+        "gemini_api_key_configured": bool((os.getenv("GOOGLE_API_KEY") or "").strip()),
+        "groq_api_key_masked": (os.getenv("GROQ_API_KEY", "")[:8] + "..." + os.getenv("GROQ_API_KEY", "")[-4:]) if (os.getenv("GROQ_API_KEY") or "").strip() else "",
+        "gemini_api_key_masked": (os.getenv("GOOGLE_API_KEY", "")[:8] + "..." + os.getenv("GOOGLE_API_KEY", "")[-4:]) if (os.getenv("GOOGLE_API_KEY") or "").strip() else ""
     }
 
 
 @router.post("/config")
-def update_app_config(updates: dict = Body(...)):
+def update_app_config(
+    updates: dict = Body(...),
+    admin_client: models.Client = Depends(get_current_admin_client)
+):
     """Updates dynamic pipeline settings in SQLite and refreshes memory."""
     from ..storage.config_manager import update_settings
     update_settings(updates)
-    return get_app_config()
+    return get_app_config(admin_client)
 
 
 from ..ingest.crop_utils import (
@@ -998,11 +1087,25 @@ def get_question_image(
     job_id: str,
     question_number: int,
     part: Optional[int] = Query(None),
+    client: models.Client = Depends(get_current_client),
     db: Session = Depends(database.get_db)
 ):
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    job = get_job_for_client(db, job_id, client)
     if not job or not job.result_json:
         raise HTTPException(status_code=404, detail="Job or result not found")
+
+    cache_dir = os.path.join(database.UPLOADS_DIR, job.client_id or client.id, "cache")
+    cache_file = os.path.join(cache_dir, f"{job_id}_q{question_number}_p{part or 0}.png")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "rb") as cf:
+                cached_bytes = cf.read()
+            response = Response(content=cached_bytes, media_type="image/png")
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["X-Cache"] = "HIT"
+            return response
+        except Exception:
+            pass
 
     file_path = get_job_file_path(job)
     if not file_path:
@@ -1115,6 +1218,14 @@ def get_question_image(
             stitched_img.save(img_byte_arr, format='PNG')
             image_bytes = img_byte_arr.getvalue()
             
+        # Write to disk cache for future rapid retrieval
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_file, "wb") as cf:
+                cf.write(image_bytes)
+        except Exception as e:
+            print(f"Warning: Failed to write cropped image cache: {e}")
+
         response = Response(content=image_bytes, media_type="image/png")
         response.headers["X-Image-Parts-Count"] = str(len(pixmaps))
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
@@ -1129,9 +1240,10 @@ def get_question_image(
 def get_question_image_info(
     job_id: str,
     question_number: int,
+    client: models.Client = Depends(get_current_client),
     db: Session = Depends(database.get_db)
 ):
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    job = get_job_for_client(db, job_id, client)
     if not job or not job.result_json:
         raise HTTPException(status_code=404, detail="Job or result not found")
 
@@ -1212,10 +1324,12 @@ def rescan_question(
     job_id: str,
     question_number: int,
     engine: Optional[str] = Query(None),
+    client: models.Client = Depends(get_current_client),
     db: Session = Depends(database.get_db)
 ):
+    check_llm_rate_limit(client.id)
     t_ocr_start = time.perf_counter()
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    job = get_job_for_client(db, job_id, client)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1430,6 +1544,7 @@ def rescan_question(
 @router.post("/fix_question_with_ai")
 async def fix_question_with_ai_endpoint(
     request: Request,
+    client: models.Client = Depends(get_current_client),
     db: Session = Depends(database.get_db)
 ):
     """
@@ -1440,6 +1555,16 @@ async def fix_question_with_ai_endpoint(
         data = await request.json()
         if "stem" not in data or "question_number" not in data:
             raise HTTPException(status_code=400, detail="Missing required question data")
+
+        job_id = data.get("job_id")
+        if not client.is_admin:
+            if not job_id:
+                raise HTTPException(status_code=400, detail="job_id is required for AI question fix")
+            job = get_job_for_client(db, job_id, client)
+            if not job:
+                raise HTTPException(status_code=404, detail="Job not found or access denied")
+
+        check_llm_rate_limit(client.id)
             
         t_fix_start = time.perf_counter()
         from ..graph.correction_node import fix_single_question_with_llm
@@ -1472,7 +1597,7 @@ async def fix_question_with_ai_endpoint(
         job_id = data.get("job_id")
         if job_id:
             try:
-                job = db.query(models.Job).filter(models.Job.id == job_id).first()
+                job = get_job_for_client(db, job_id, client)
                 if job and job.result_json:
                     result_data = json.loads(job.result_json)
                     tu = result.get("token_usage", {})
@@ -1558,6 +1683,7 @@ async def fix_question_with_ai_endpoint(
 @router.post("/verify_question_with_ai")
 async def verify_question_with_ai_endpoint(
     request: Request,
+    client: models.Client = Depends(get_current_client),
     db: Session = Depends(database.get_db)
 ):
     """
@@ -1568,6 +1694,16 @@ async def verify_question_with_ai_endpoint(
         data = await request.json()
         if "stem" not in data or "question_number" not in data:
             raise HTTPException(status_code=400, detail="Missing required question data")
+
+        job_id = data.get("job_id")
+        if not client.is_admin:
+            if not job_id:
+                raise HTTPException(status_code=400, detail="job_id is required for AI question verification")
+            job = get_job_for_client(db, job_id, client)
+            if not job:
+                raise HTTPException(status_code=404, detail="Job not found or access denied")
+
+        check_llm_rate_limit(client.id)
 
         t_val_start = time.perf_counter()
         from ..graph.correction_node import fix_single_question_with_llm
@@ -1599,7 +1735,7 @@ async def verify_question_with_ai_endpoint(
         job_id = data.get("job_id")
         if job_id:
             try:
-                job = db.query(models.Job).filter(models.Job.id == job_id).first()
+                job = get_job_for_client(db, job_id, client)
                 if job and job.result_json:
                     result_data = json.loads(job.result_json)
                     tu = result.get("token_usage", {})
@@ -1681,14 +1817,16 @@ def convert_equations_endpoint(
     job_id: str,
     background_tasks: BackgroundTasks,
     engine: Optional[str] = Query(None),
+    client: models.Client = Depends(get_current_client),
     db: Session = Depends(database.get_db)
 ):
     """Manually triggers progressive equation-to-LaTeX background conversion for a job with optional engine override."""
+    check_llm_rate_limit(client.id)
     task = _math_conversion_tasks.get(job_id)
     if task and task.get("is_active"):
         return {"status": "already_running", "message": "Conversion is already actively running for this job"}
 
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    job = get_job_for_client(db, job_id, client)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not job.result_json:
@@ -1702,12 +1840,17 @@ def convert_equations_endpoint(
 
 
 @router.post("/pdfs/{job_id}/revalidate")
-def revalidate_job_endpoint(job_id: str, db: Session = Depends(database.get_db)):
+def revalidate_job_endpoint(
+    job_id: str,
+    client: models.Client = Depends(get_current_client),
+    db: Session = Depends(database.get_db)
+):
     """
     Re-runs word cleaning, font artifact removal, and AI validation on all questions of an existing job.
     Updates Job.result_json in SQLite and returns the updated job result.
     """
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    check_llm_rate_limit(client.id)
+    job = get_job_for_client(db, job_id, client)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not job.result_json:
@@ -1808,13 +1951,17 @@ def revalidate_job_endpoint(job_id: str, db: Session = Depends(database.get_db))
 
 
 @router.get("/pdfs/{job_id}/math-status")
-def get_math_conversion_status(job_id: str, db: Session = Depends(database.get_db)):
+def get_math_conversion_status(
+    job_id: str,
+    client: models.Client = Depends(get_current_client),
+    db: Session = Depends(database.get_db)
+):
     """Returns the live conversion status, question progress, and remaining equation image count."""
     task = _math_conversion_tasks.get(job_id)
     if task and task.get("is_active"):
         return task
 
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    job = get_job_for_client(db, job_id, client)
     if not job or not job.result_json:
         return {"is_active": False, "status": "not_found", "remaining_math_images": 0, "total_questions": 0, "current_question": 0}
 
@@ -1844,10 +1991,11 @@ def list_review_flags(
     status: str = None,
     limit: int = 50,
     offset: int = 0,
+    client: models.Client = Depends(get_current_client),
     db: Session = Depends(database.get_db),
 ):
     """
-    List review flags, filterable by job, type, and status.
+    List review flags, filterable by job, type, and status, scoped to authenticated client.
     
     Flag types:
     - "text_rejection": LLM text correction failed edit-distance or confidence gate
@@ -1856,7 +2004,9 @@ def list_review_flags(
     from ..storage.models import ReviewFlag
     from ..models.schemas import ReviewFlagResponse, ReviewFlagListResponse
 
-    query = db.query(ReviewFlag)
+    query = db.query(ReviewFlag).join(models.Job, ReviewFlag.job_id == models.Job.id)
+    if not client.is_admin:
+        query = query.filter(models.Job.client_id == client.id)
     if job_id:
         query = query.filter(ReviewFlag.job_id == job_id)
     if flag_type:
@@ -1894,16 +2044,22 @@ def list_review_flags(
 def resolve_review_flag(
     flag_id: int,
     body: dict,
+    client: models.Client = Depends(get_current_client),
     db: Session = Depends(database.get_db),
 ):
     """
-    Accept or reject a review flag.
+    Accept or reject a review flag scoped to authenticated client.
     Body: {"action": "accept"|"reject", "resolved_by": "admin"}
     """
     from ..storage.models import ReviewFlag
     from datetime import datetime
 
-    flag = db.query(ReviewFlag).filter(ReviewFlag.id == flag_id).first()
+    query = db.query(ReviewFlag).join(models.Job, ReviewFlag.job_id == models.Job.id).filter(
+        ReviewFlag.id == flag_id
+    )
+    if not client.is_admin:
+        query = query.filter(models.Job.client_id == client.id)
+    flag = query.first()
     if not flag:
         raise HTTPException(status_code=404, detail="Review flag not found")
 
@@ -1920,17 +2076,22 @@ def resolve_review_flag(
 
 
 @router.get("/review-flags/stats")
-def review_flag_stats(db: Session = Depends(database.get_db)):
-    """Aggregate counts by flag type and status for dashboard indicator."""
+def review_flag_stats(
+    client: models.Client = Depends(get_current_client),
+    db: Session = Depends(database.get_db)
+):
+    """Aggregate counts by flag type and status for dashboard indicator, scoped to authenticated client."""
     from ..storage.models import ReviewFlag
     from ..models.schemas import ReviewFlagStatsResponse
     from sqlalchemy import func
 
-    rows = (
+    query = (
         db.query(ReviewFlag.flag_type, ReviewFlag.status, func.count())
-        .group_by(ReviewFlag.flag_type, ReviewFlag.status)
-        .all()
+        .join(models.Job, ReviewFlag.job_id == models.Job.id)
     )
+    if not client.is_admin:
+        query = query.filter(models.Job.client_id == client.id)
+    rows = query.group_by(ReviewFlag.flag_type, ReviewFlag.status).all()
 
     stats = ReviewFlagStatsResponse()
     for flag_type, status, count in rows:
@@ -1949,7 +2110,9 @@ def review_flag_stats(db: Session = Depends(database.get_db)):
 
 
 @router.get("/cache/stats")
-def cache_stats():
+def cache_stats(
+    client: models.Client = Depends(get_current_client)
+):
     """Correction cache health: staging count, trusted count, hit rate."""
     from ..ingest.correction_cache import get_correction_cache
     from ..models.schemas import CacheStatsResponse

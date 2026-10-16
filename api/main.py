@@ -1,44 +1,63 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import router as pdf_router
 from .font_routes import router as font_router
-from ..storage.database import engine, Base
+from .v1_routes import router as v1_router
+from .auth import get_current_client, verify_internal_network
+from .cleanup import run_startup_cleanup
+from ..storage.database import engine, Base, init_db
 from sqlalchemy import text
 
-# Create DB tables
-Base.metadata.create_all(bind=engine)
+# Initialize database and migrate schema
+init_db()
 
-# Ensure file_path column exists for legacy databases
-try:
-    with engine.connect() as conn:
-        res = conn.execute(text("PRAGMA table_info(jobs)")).fetchall()
-        col_names = [r[1] for r in res]
-        if "file_path" not in col_names and len(col_names) > 0:
-            conn.execute(text("ALTER TABLE jobs ADD COLUMN file_path VARCHAR"))
-            conn.commit()
-except Exception as e:
-    print(f"Database schema check warning: {e}")
-
-app = FastAPI(title="PDF QA Agent API")
+app = FastAPI(
+    title="PDF QA Agent API",
+    version="1.0.0",
+    description="Multi-tenant PDF Question-Answer Scanner API"
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all origins for dev
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(pdf_router, tags=["pdfs"])
-app.include_router(font_router, prefix="/api")
-app.include_router(font_router)
+# 1. Primary V1 Routers
+# Authenticated endpoints (strictly requires X-API-Key)
+app.include_router(v1_router)
 
-from .routes import trigger_queue_worker
+# 2. Legacy Routers (Strictly authenticated with X-API-Key; keyless requests return 401; network-restricted if enabled)
+app.include_router(
+    pdf_router,
+    dependencies=[Depends(verify_internal_network), Depends(get_current_client)],
+    tags=["legacy_pdfs"]
+)
+app.include_router(
+    font_router,
+    prefix="/api",
+    dependencies=[Depends(verify_internal_network), Depends(get_current_client)],
+    tags=["legacy_fonts"]
+)
+app.include_router(
+    font_router,
+    dependencies=[Depends(verify_internal_network), Depends(get_current_client)],
+    tags=["legacy_fonts"]
+)
+
 
 @app.on_event("startup")
 def on_startup():
-    trigger_queue_worker()
+    run_startup_cleanup()
 
-@app.get("/")
+
+# Health Check (strictly requires auth)
+@app.get("/", dependencies=[Depends(get_current_client)], tags=["Health"])
 def root():
-    return {"message": "Welcome to PDF QA Agent API"}
+    return {
+        "service": "PDF QA Agent API",
+        "status": "healthy",
+        "version": "1.0.0"
+    }
