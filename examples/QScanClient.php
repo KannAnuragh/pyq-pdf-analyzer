@@ -2,7 +2,7 @@
 /**
  * QScanClient.php
  * Robust, production-ready PHP integration client for the PDF QA Agent API.
- * Supports automated onboarding, streaming upload, status polling, and result fetching.
+ * Supports streaming upload, status polling, and result fetching.
  */
 
 class QScanClient {
@@ -20,54 +20,6 @@ class QScanClient {
 
     public function getApiKey(): ?string {
         return $this->apiKey;
-    }
-
-    /**
-     * Self-service client registration using ADMIN_REGISTRATION_TOKEN.
-     * Note: client_id is assigned server-side; daily_upload_limit is managed by server policy.
-     *
-     * @param string $adminToken Secret token matching ADMIN_REGISTRATION_TOKEN env var
-     * @param string $clientName Descriptive name for your PHP frontend/application
-     * @return array Contains client_id, api_key, daily_upload_limit
-     */
-    public function register(string $adminToken, string $clientName): array {
-        $url = "{$this->baseUrl}/v1/register";
-        $payload = json_encode([
-            "admin_token" => $adminToken,
-            "name"        => $clientName
-        ]);
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_POST           => true,
-            CURLOPT_POSTFIELDS     => $payload,
-            CURLOPT_HTTPHEADER     => [
-                "Content-Type: application/json",
-                "Accept: application/json"
-            ],
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 15
-        ]);
-
-        $response = curl_exec($ch);
-        if ($response === false) {
-            $err = curl_error($ch);
-            curl_close($ch);
-            throw new Exception("Registration request failed: {$err}");
-        }
-
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        $data = json_decode($response, true);
-        if ($httpCode !== 201) {
-            $detail = $data["detail"] ?? $response;
-            throw new Exception("Registration failed (HTTP {$httpCode}): {$detail}");
-        }
-
-        // Automatically store the generated API key for subsequent requests
-        $this->apiKey = $data["api_key"];
-        return $data;
     }
 
     /**
@@ -261,7 +213,7 @@ class QScanClient {
 
     private function ensureApiKey(): void {
         if (empty($this->apiKey)) {
-            throw new RuntimeException("API key is not configured. Call register() or provide a valid key.");
+            throw new RuntimeException("API key is not configured. Please supply an API key in the constructor or call setApiKey().");
         }
     }
 }

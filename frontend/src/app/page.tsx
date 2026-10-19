@@ -1631,10 +1631,27 @@ export default function Home() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   useEffect(() => {
-    fetch('/api/auth/check')
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      setIsAuthenticated(false);
+      controller.abort();
+    }, 3500);
+
+    fetch('/api/auth/check', { signal: controller.signal })
       .then(r => r.json())
-      .then(d => setIsAuthenticated(Boolean(d?.authenticated)))
-      .catch(() => setIsAuthenticated(false));
+      .then(d => {
+        clearTimeout(timer);
+        setIsAuthenticated(Boolean(d?.authenticated));
+      })
+      .catch(() => {
+        clearTimeout(timer);
+        setIsAuthenticated(false);
+      });
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, []);
 
   const handleLogin = async (e: React.FormEvent) => {

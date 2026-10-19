@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 function getBackendBase(): string {
   if (process.env.BACKEND_URL) return process.env.BACKEND_URL;
   if (process.env.INTERNAL_BACKEND_URL) return process.env.INTERNAL_BACKEND_URL;
-  return process.env.NODE_ENV === 'production' ? 'http://backend:8000' : 'http://localhost:8000';
+  return 'http://localhost:8000';
 }
 
 export async function POST(request: NextRequest) {

@@ -32,7 +32,7 @@ const ALLOWED_PATH_PATTERNS: RegExp[] = [
 function getBackendBase(): string {
   if (process.env.BACKEND_URL) return process.env.BACKEND_URL;
   if (process.env.INTERNAL_BACKEND_URL) return process.env.INTERNAL_BACKEND_URL;
-  return process.env.NODE_ENV === 'production' ? 'http://backend:8000' : 'http://localhost:8000';
+  return 'http://localhost:8000';
 }
 
 async function handleProxy(
