@@ -76,7 +76,7 @@ KNOWN_LATEX_COMMANDS = {
 #   {{IMG:https://cdn.example.com/abc.png}}   — Cloudflare R2 image
 #   {{EQ:$\frac{1}{2}$}}                      — inline LaTeX equation
 
-_ANCHOR_IMG_RE = re.compile(r'\{\{\s*IMG\s*:\s*(https?://[^\s}]+)\}*')
+_ANCHOR_IMG_RE = re.compile(r'\{\{\s*IMG\s*:\s*((?:https?://|data:image/)[^\s}]+)\}*')
 _ANCHOR_EQ_RE  = re.compile(r'\{\{EQ:([^}]+)\}*\}')
 
 
@@ -91,9 +91,9 @@ def expand_anchor_tokens(text: str) -> str:
     if not text:
         return text
 
-    # Block diagram token (large images)
+    # Block diagram token (large images: supports CDN URLs and fallback data: URIs)
     text = re.sub(
-        r'\{\{\s*IMG_BLOCK\s*:\s*(https?://[^\s}]+)\}*',
+        r'\{\{\s*IMG_BLOCK\s*:\s*((?:https?://|data:image/)[^\s}]+)\}*',
         r'![diagram](\1)',
         text,
     )

@@ -407,12 +407,30 @@ class AdminClientCreateRequest(BaseModel):
     daily_upload_limit: Optional[int] = None
     is_admin: Optional[bool] = False
 
+def _require_http_key_provisioning_allowed():
+    """
+    Restricts API key and client provisioning over HTTP.
+    By default, only the backend administrator on the local host machine can create
+    or manage API keys using the Admin CLI ('admin_cli.py').
+    """
+    allow = os.getenv("ALLOW_HTTP_KEY_PROVISIONING", "false").lower() in ("true", "1", "yes")
+    if not allow:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Forbidden: Remote API key and client management is disabled over HTTP. "
+                "Only the backend administrator on the host server can create, delete, or provision API keys "
+                "using the Admin CLI ('./venv/bin/python -m pdf_qa_agent.scripts.admin_cli')."
+            )
+        )
+
 @router.get("/admin/clients", tags=["v1_admin"])
 def list_admin_clients(
     admin: models.Client = Depends(get_current_admin_client),
     db: Session = Depends(database.get_db)
 ):
     """List all registered clients in the multi-tenant system."""
+    _require_http_key_provisioning_allowed()
     clients = db.query(models.Client).order_by(models.Client.created_at.desc()).all()
     return [
         {
@@ -433,6 +451,7 @@ def create_admin_client(
     db: Session = Depends(database.get_db)
 ):
     """Create a new client account."""
+    _require_http_key_provisioning_allowed()
     if req.id:
         existing = db.query(models.Client).filter(models.Client.id == req.id).first()
         if existing:
@@ -470,6 +489,7 @@ def list_admin_keys(
     db: Session = Depends(database.get_db)
 ):
     """List API keys across all clients, or filter by specific client_id."""
+    _require_http_key_provisioning_allowed()
     query = db.query(models.ApiKey)
     if client_id:
         query = query.filter(models.ApiKey.client_id == client_id)
@@ -498,6 +518,7 @@ def create_or_add_admin_key(
     If raw_key is provided, it is hashed and stored; otherwise a cryptographically
     secure random key is generated.
     """
+    _require_http_key_provisioning_allowed()
     client = db.query(models.Client).filter(models.Client.id == req.client_id).first()
     if not client:
         if req.create_client_if_missing:
@@ -565,6 +586,7 @@ def revoke_admin_key(
     db: Session = Depends(database.get_db)
 ):
     """Revoke an API key by marking is_active=False."""
+    _require_http_key_provisioning_allowed()
     key_rec = db.query(models.ApiKey).filter(models.ApiKey.id == key_id).first()
     if not key_rec:
         raise HTTPException(status_code=404, detail="API key not found.")

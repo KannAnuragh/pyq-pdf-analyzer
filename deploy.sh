@@ -14,6 +14,12 @@
 
 set -e
 
+# Auto-detect and source NVM if node is not yet in PATH
+if ! command -v node &>/dev/null; then
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+fi
+
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$APP_DIR/venv"
 FRONTEND_DIR="$APP_DIR/frontend"
@@ -123,7 +129,7 @@ build() {
 
     # 2. Database initialization
     log_info "Initializing database schema..."
-    PYTHONPATH="$APP_DIR/.." "$VENV_DIR/bin/python" -c "
+    PYTHONPATH="$APP_DIR:$APP_DIR/..:$PYTHONPATH" "$VENV_DIR/bin/python" -c "
 from pdf_qa_agent.storage.database import init_db
 init_db()
 print('Database initialized successfully.')
@@ -165,9 +171,18 @@ start() {
     if is_running "$BACKEND_PID_FILE"; then
         log_warn "Backend is already running (PID: $(cat "$BACKEND_PID_FILE"))."
     else
+        # Ensure port 8000 is clean before launching
+        local old_port_pid
+        old_port_pid=$(lsof -ti :"$BACKEND_PORT" 2>/dev/null || true)
+        if [ -n "$old_port_pid" ]; then
+            log_warn "Terminating lingering process on port $BACKEND_PORT (PID: $old_port_pid)..."
+            kill -9 $old_port_pid 2>/dev/null || true
+            sleep 0.5
+        fi
+
         log_info "Starting Backend on port $BACKEND_PORT..."
-        cd "$APP_DIR/.."
-        PYTHONPATH="$APP_DIR/.." setsid "$VENV_DIR/bin/python" -m uvicorn pdf_qa_agent.api.main:app \
+        cd "$APP_DIR"
+        PYTHONPATH="$APP_DIR:$APP_DIR/..:$PYTHONPATH" setsid "$VENV_DIR/bin/python" -m uvicorn pdf_qa_agent.api.main:app \
             --host 0.0.0.0 \
             --port "$BACKEND_PORT" \
             </dev/null >> "$BACKEND_LOG" 2>&1 &
@@ -218,8 +233,10 @@ start() {
         fi
 
         # Start Next.js standalone server
+        local node_bin
+        node_bin="$(command -v node || echo "node")"
         PORT="$FRONTEND_PORT" HOSTNAME="0.0.0.0" BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
-            setsid node .next/standalone/server.js \
+            setsid "$node_bin" .next/standalone/server.js \
             </dev/null >> "$FRONTEND_LOG" 2>&1 &
 
         local f_pid=$!
@@ -296,6 +313,21 @@ stop_process() {
 stop() {
     stop_process "Frontend" "$FRONTEND_PID_FILE"
     stop_process "Backend" "$BACKEND_PID_FILE"
+
+    # Also clean up any unmanaged process remaining on backend/frontend ports
+    local lingering_backend
+    lingering_backend=$(lsof -ti :"$BACKEND_PORT" 2>/dev/null || true)
+    if [ -n "$lingering_backend" ]; then
+        log_info "Cleaning up lingering process on port $BACKEND_PORT (PID: $lingering_backend)..."
+        kill -9 $lingering_backend 2>/dev/null || true
+    fi
+
+    local lingering_frontend
+    lingering_frontend=$(lsof -ti :"$FRONTEND_PORT" 2>/dev/null || true)
+    if [ -n "$lingering_frontend" ]; then
+        log_info "Cleaning up lingering process on port $FRONTEND_PORT (PID: $lingering_frontend)..."
+        kill -9 $lingering_frontend 2>/dev/null || true
+    fi
 }
 
 # ------------------------------------------------------------------------------
@@ -368,6 +400,9 @@ install_systemd() {
         exit 1
     fi
 
+    local node_bin
+    node_bin="$(command -v node || echo "/usr/bin/node")"
+
     log_info "Generating systemd service unit files..."
 
     cat <<EOF > "$service_dir/pdf-qa-backend.service"
@@ -378,9 +413,9 @@ After=network.target
 [Service]
 Type=simple
 User=$current_user
-WorkingDirectory=$APP_DIR/..
+WorkingDirectory=$APP_DIR
 EnvironmentFile=-$APP_DIR/.env
-Environment=PYTHONPATH=$APP_DIR/..
+Environment=PYTHONPATH=$APP_DIR:$APP_DIR/..
 ExecStart=$VENV_DIR/bin/uvicorn pdf_qa_agent.api.main:app --host 0.0.0.0 --port $BACKEND_PORT
 Restart=always
 RestartSec=5
@@ -404,7 +439,7 @@ Environment=NODE_ENV=production
 Environment=PORT=$FRONTEND_PORT
 Environment=HOSTNAME=0.0.0.0
 Environment=BACKEND_URL=http://127.0.0.1:$BACKEND_PORT
-ExecStart=/usr/bin/node .next/standalone/server.js
+ExecStart=$node_bin .next/standalone/server.js
 Restart=always
 RestartSec=5
 StandardOutput=append:$FRONTEND_LOG

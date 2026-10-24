@@ -42,6 +42,14 @@ async function handleProxy(
   const { path } = await context.params;
   const pathStr = path ? path.join('/') : '';
 
+  // 0. Security Block: Frontends and clients cannot create, view, or manage API keys or clients
+  if (pathStr.startsWith('admin') || pathStr.includes('keys') || pathStr.includes('clients')) {
+    return NextResponse.json(
+      { detail: 'Forbidden: Frontends and clients cannot create, view, or manage API keys. Key management is strictly restricted to the backend administrator on the server CLI.' },
+      { status: 403 }
+    );
+  }
+
   // 1. Path Allowlist check: reject any path outside UI requirements
   const isAllowed = ALLOWED_PATH_PATTERNS.some((pattern) => pattern.test(pathStr));
   if (!isAllowed) {

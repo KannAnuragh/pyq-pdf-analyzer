@@ -38,12 +38,23 @@ def _get_s3_client():
     if _s3_client is not None:
         return _s3_client
 
-    account_id = os.getenv("R2_ACCOUNT_ID", "").strip()
-    access_key = os.getenv("R2_ACCESS_KEY_ID", "").strip()
-    secret_key = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
+    account_id = (os.getenv("R2_ACCOUNT_ID", "") or os.getenv("CLOUDFLARE_ACCOUNT_ID", "")).strip()
+    access_key = (os.getenv("R2_ACCESS_KEY_ID", "") or os.getenv("CLOUDFLARE_ACCESS_KEY_ID", "")).strip()
+    secret_key = (os.getenv("R2_SECRET_ACCESS_KEY", "") or os.getenv("CLOUDFLARE_SECRET_ACCESS_KEY", "")).strip()
+
+    # Reject placeholder strings
+    if account_id.lower() in ("your_account_id", "your_account_id_here", "your_cloudflare_account_id"):
+        account_id = ""
+    if access_key.lower() in ("your_access_key", "your_access_key_id", "your_r2_access_key_id"):
+        access_key = ""
+    if secret_key.lower() in ("your_secret_key", "your_secret_access_key", "your_r2_secret_access_key"):
+        secret_key = ""
 
     if not account_id or not access_key or not secret_key:
-        logger.debug("R2 credentials not configured, uploads will fall back to base64")
+        logger.warning(
+            "Cloudflare R2 credentials (R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY) "
+            "are missing or set to placeholder values. Image crops will fall back to base64 data URIs."
+        )
         _s3_init_failed = True
         return None
 
@@ -86,7 +97,7 @@ def upload_image_to_cloudflare(image_bytes: bytes, filename: str = "unknown") ->
     to returning a data:image/png;base64 string.
     """
     s3 = _get_s3_client()
-    bucket = os.getenv("R2_BUCKET_NAME", "").strip()
+    bucket = (os.getenv("R2_BUCKET_NAME", "") or os.getenv("CLOUDFLARE_BUCKET_NAME", "") or "examportal").strip()
 
     if s3 is None or not bucket:
         logger.debug("R2 not available, falling back to base64")
@@ -115,7 +126,11 @@ def upload_image_to_cloudflare(image_bytes: bytes, filename: str = "unknown") ->
             ContentType="image/png",
         )
 
-        custom_domain = os.getenv("R2_CUSTOM_DOMAIN", "https://examcdn.trogon.info").strip()
+        custom_domain = (
+            os.getenv("R2_CUSTOM_DOMAIN", "")
+            or os.getenv("CLOUDFLARE_CUSTOM_DOMAIN", "")
+            or "https://examcdn.trogon.info"
+        ).strip().rstrip("/")
         cdn_url = f"{custom_domain}/{object_key}"
         logger.info(f"Uploaded to R2: {cdn_url}")
         return cdn_url

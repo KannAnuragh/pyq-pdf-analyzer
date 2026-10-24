@@ -1013,9 +1013,13 @@ export function renderLatex(text: string): string {
 
   let s = text;
 
+  // Direct expansion of any unexpanded IMG_BLOCK or IMG tokens (handles both CDN and base64 data URIs)
+  s = s.replace(/\{\{\s*IMG_BLOCK\s*:\s*((?:https?:\/\/|data:image\/)[^\s}]+)\s*\}\}/gi, '<div class="my-3 flex flex-col items-center"><img src="$1" alt="diagram" class="max-h-64 rounded shadow-sm border border-slate-200" /></div>');
+  s = s.replace(/\{\{\s*IMG\s*:\s*((?:https?:\/\/|data:image\/)[^\s}]+)\s*\}\}/gi, '<img src="$1" alt="math" class="inline-math-img" style="vertical-align:-0.38em;max-height:2.2em;display:inline-block;margin:0 1px;" />');
+
   // Convert markdown images to HTML image containers if present
-  s = s.replace(/!\[(diagram)\]\((https?:\/\/[^\s\)]+)\)/gi, '<div class="my-3 flex flex-col items-center"><img src="$2" alt="$1" class="max-h-64 rounded shadow-sm border border-slate-200" /></div>');
-  s = s.replace(/!\[(math)\]\((https?:\/\/[^\s\)]+)\)/gi, '<img src="$2" alt="$1" class="inline-math-img" style="vertical-align:-0.38em;max-height:2.2em;display:inline-block;margin:0 1px;" />');
+  s = s.replace(/!\[(diagram)\]\(((?:https?:\/\/|data:image\/)[^\s\)]+)\)/gi, '<div class="my-3 flex flex-col items-center"><img src="$2" alt="$1" class="max-h-64 rounded shadow-sm border border-slate-200" /></div>');
+  s = s.replace(/!\[(math)\]\(((?:https?:\/\/|data:image\/)[^\s\)]+)\)/gi, '<img src="$2" alt="$1" class="inline-math-img" style="vertical-align:-0.38em;max-height:2.2em;display:inline-block;margin:0 1px;" />');
 
   // Ensure Cloudflare CDN domain always points to examcdn.trogon.info
   s = s.replaceAll('exam.trogon.info', 'examcdn.trogon.info');
@@ -1393,6 +1397,25 @@ export function extractImagesFromQuestion(q: any): ExtractedMediaAsset[] {
             src,
             isCloudflare: isCf,
             alt
+          });
+        }
+      }
+    }
+
+    // 3. Extracted from {{IMG:...}} or {{IMG_BLOCK:...}} tokens
+    const tokenRegex = /\{\{\s*(?:IMG|IMG_BLOCK)\s*:\s*([^}\s]+)\s*\}\}/gi;
+    let tokenMatch;
+    while ((tokenMatch = tokenRegex.exec(text)) !== null) {
+      let src = tokenMatch[1];
+      if (src) {
+        src = src.replaceAll('exam.trogon.info', 'examcdn.trogon.info');
+        if (!seen.has(src)) {
+          seen.add(src);
+          const isCf = src.includes('imagedelivery.net') || src.includes('cloudflare') || src.includes('trogon.info') || src.startsWith('http');
+          assets.push({
+            src,
+            isCloudflare: isCf,
+            alt: 'Extracted Diagram'
           });
         }
       }

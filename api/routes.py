@@ -694,9 +694,9 @@ def get_job_result(
                 raw_text = getattr(q, "raw_text", "") or ""
                 if hasattr(q, "stem") and q.stem:
                     if raw_text:
-                        raw_imgs = re.findall(r'(\{\{\s*(?:IMG|IMG_BLOCK)\s*:\s*https?://[^\s}]+\}\})', raw_text)
+                        raw_imgs = re.findall(r'(\{\{\s*(?:IMG|IMG_BLOCK)\s*:\s*(?:https?://|data:image/)[^\s}]+\}\})', raw_text)
                         for r_img in raw_imgs:
-                            if "example.com" not in r_img and r_img not in q.stem and "examcdn.trogon.info" not in q.stem:
+                            if "example.com" not in r_img and r_img not in q.stem and "examcdn.trogon.info" not in q.stem and "data:image/" not in q.stem:
                                 q.stem = f"{q.stem.strip()}\n\n{r_img}".strip()
                     q.stem = expand_anchor_tokens(q.stem)
                 if hasattr(q, "explanation") and q.explanation:
@@ -1017,7 +1017,7 @@ def delete_pdf(
 
 @router.get("/config")
 def get_app_config(
-    admin_client: models.Client = Depends(get_current_admin_client)
+    client: models.Client = Depends(get_current_client)
 ):
     from ..graph.correction_node import get_correction_provider, get_on_demand_llm_provider, GROQ_CORRECTION_MODEL, GEMINI_CORRECTION_MODEL
     from ..storage.config_manager import get_all_settings

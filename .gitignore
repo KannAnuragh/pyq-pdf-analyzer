@@ -22,6 +22,7 @@ data/run/*
 !data/run/.gitkeep
 *.pid
 *.sock
+pdf_qa_agent
 
 # ==============================================================================
 # Logs & Audit Trails
